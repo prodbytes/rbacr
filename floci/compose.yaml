@@ -1,0 +1,37 @@
+# Floci: a local AWS emulator. Here it plays the rbacr CloudFront
+# distribution, serving the vite dev server over HTTPS (mkcert certificate)
+# the way the deployed CloudFront serves the Lambda. Started by
+# `devbox services up` (3-floci in process-compose.yaml).
+services:
+  floci:
+    # The compat image has the AWS CLI, which the init hook uses. Same dated
+    # nightly as prodbytes/presence: 2.1.0 forwards no viewer headers to
+    # custom origins. Move to the next release once it ships.
+    image: floci/floci:nightly-09242026-compat
+    container_name: rbacr-floci
+    ports:
+      # Not 4566/8443: prodbytes/presence's Floci uses those, and both
+      # stacks can run side by side.
+      - "127.0.0.1:${RBACR_FLOCI_PORT:-4567}:4566"
+      - "127.0.0.1:${RBACR_FLOCI_HTTPS_PORT:-8444}:8443"
+    extra_hosts:
+      # The origin host (see init/ready.d/10-cloudfront.sh): the Docker host
+      # in here, loopback in the browser.
+      - "${RBACR_ORIGIN_HOST:-dev.rbacr.localhost}:host-gateway"
+    environment:
+      # Stateless: the ready hook recreates the distribution on every start.
+      FLOCI_STORAGE_MODE: memory
+      # Local HTTPS with the certificate from scripts/local-certs.sh.
+      FLOCI_TLS_ENABLED: "true"
+      FLOCI_TLS_CERT_PATH: /etc/rbacr-certs/rbacr.pem
+      FLOCI_TLS_KEY_PATH: /etc/rbacr-certs/rbacr-key.pem
+      FLOCI_TLS_AWS_HTTPS_PORT: "8443"
+      # CloudFront refuses private origins unless they're listed here.
+      FLOCI_SERVICES_CLOUDFRONT_ALLOWED_PRIVATE_ORIGIN_HOSTS: ${RBACR_ORIGIN_HOST:-dev.rbacr.localhost}
+      RBACR_ORIGIN_HOST: ${RBACR_ORIGIN_HOST:-dev.rbacr.localhost}
+      RBACR_CDN_ALIAS: ${RBACR_CDN_ALIAS:-rbacr.localhost}
+      RBACR_PUBLIC_HOST: ${RBACR_PUBLIC_HOST:-local.rbacr.nu01.com}
+      RBACR_APP_PORT: ${RBACR_APP_PORT:-5173}
+    volumes:
+      - ./init/ready.d:/etc/floci/init/ready.d:ro
+      - ./certs:/etc/rbacr-certs:ro

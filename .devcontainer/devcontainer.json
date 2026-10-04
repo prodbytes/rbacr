@@ -22,9 +22,17 @@
         "ms-vscode.vscode-typescript-next",
         "golang.go",
         "ms-azuretools.vscode-docker",
-        "redhat.vscode-xml"
+        "redhat.vscode-xml",
+        "svelte.svelte-vscode"
       ]
     }
   },
-  "postCreateCommand": "bash -lc 'devbox install'"
+  "postCreateCommand": "bash -lc 'devbox install'",
+  "forwardPorts": [
+    5173,
+    8444
+  ],
+  "remoteEnv": {
+    "RBACR_BIND_HOST": "0.0.0.0"
+  }
 }

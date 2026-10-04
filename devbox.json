@@ -1,13 +1,38 @@
 {
   "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/0.17.5/.schema/devbox.schema.json",
   "packages": {
-    "graalvmPackages.graalvm-ce-musl": "latest",
+    "graalvmPackages.graalvm-ce-musl": {
+      "version": "latest",
+      "platforms": [
+        "x86_64-linux",
+        "aarch64-linux"
+      ]
+    },
     "python": "latest",
     "nodejs": "latest",
     "go": "latest",
     "postgresql": {
       "version": "latest",
       "disable_plugin": true
+    },
+    "awscli2": "latest",
+    "mkcert": "latest",
+    "openssl": "latest",
+    "curl": "latest"
+  },
+  "shell": {
+    "init_hook": [
+      "test -d node_modules || npm ci --no-audit --no-fund"
+    ],
+    "scripts": {
+      "dev": "npm run dev",
+      "test": "npm test",
+      "check": "npm run check",
+      "build": "npm run build",
+      "deploy": "npm run deploy",
+      "release-rc": "bash scripts/release-rc.sh",
+      "release-ga": "bash scripts/release-ga.sh",
+      "certs": "bash scripts/local-certs.sh"
     }
   }
 }

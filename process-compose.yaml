@@ -5,6 +5,16 @@ processes:
     command: bash scripts/health-check.sh
     environment:
       - HEALTH_CHECK_INTERVAL=${HEALTH_CHECK_INTERVAL:-15}
+      - RBACR_APP_PORT=${RBACR_APP_PORT:-5173}
+      - RBACR_PUBLIC_HOST=${RBACR_PUBLIC_HOST:-local.rbacr.nu01.com}
+      - RBACR_FLOCI_HTTPS_PORT=${RBACR_FLOCI_HTTPS_PORT:-8444}
+    # Start logging once every service is ready, so the first status line
+    # reflects a fully started stack.
+    depends_on:
+      2-app:
+        condition: process_healthy
+      3-floci:
+        condition: process_healthy
     availability:
       restart: on_failure
       backoff_seconds: 5
@@ -25,4 +35,55 @@ processes:
       restart: on_failure
       backoff_seconds: 5
 
+  # SvelteKit dev server (vite), http://localhost:5173 directly or
+  # https://local.rbacr.nu01.com:8444 through Floci (3-floci). Other RBACR_*
+  # settings (root allow list, Google credentials) come from .env.
+  # RBACR_BIND_HOST: 0.0.0.0 in the dev container, where Floci reaches the
+  # host through the Docker bridge rather than loopback (see floci/README.md).
+  2-app:
+    command: npm install --no-audit --no-fund && npm run dev -- --host ${RBACR_BIND_HOST:-127.0.0.1} --port ${RBACR_APP_PORT:-5173} --strictPort
+    environment:
+      - RBACR_DATABASE_URL=${RBACR_DATABASE_URL:-postgres://postgres:postgres@localhost:5432/postgres}
+      # Google redirects back to the HTTPS URL, so sign in through it.
+      - RBACR_PUBLIC_ORIGIN=${RBACR_PUBLIC_ORIGIN:-https://local.rbacr.nu01.com:8444}
+      # vite's HMR socket bypasses Floci (see vite.config.ts).
+      - RBACR_HMR_HOST=${RBACR_HMR_HOST:-dev.rbacr.localhost}
+      - RBACR_APP_PORT=${RBACR_APP_PORT:-5173}
+    depends_on:
+      1-postgresql:
+        condition: process_healthy
+    readiness_probe:
+      http_get:
+        host: 127.0.0.1
+        port: ${RBACR_APP_PORT:-5173}
+        path: /api/health
+      initial_delay_seconds: 3
+      period_seconds: 3
+      failure_threshold: 30
+    availability:
+      restart: on_failure
+      backoff_seconds: 5
 
+  # Floci as the CloudFront distribution in front of 2-app, over HTTPS with
+  # an mkcert certificate (generated first when missing or stale).
+  3-floci:
+    command: bash scripts/local-certs.sh && docker compose -f floci/compose.yaml up floci
+    environment:
+      - RBACR_FLOCI_PORT=${RBACR_FLOCI_PORT:-4567}
+      - RBACR_FLOCI_HTTPS_PORT=${RBACR_FLOCI_HTTPS_PORT:-8444}
+      - RBACR_APP_PORT=${RBACR_APP_PORT:-5173}
+    shutdown:
+      command: docker compose -f floci/compose.yaml down
+      timeout_seconds: 30
+    readiness_probe:
+      exec:
+        command: curl -fs http://localhost:${RBACR_FLOCI_PORT:-4567}/_floci/init | grep -q '"ready":true'
+      initial_delay_seconds: 1
+      period_seconds: 2
+      timeout_seconds: 5
+      failure_threshold: 90
+    availability:
+      # Always, not on_failure: a `docker compose down` from outside makes
+      # `compose up` exit 0, which would leave HTTPS down.
+      restart: always
+      backoff_seconds: 5
