@@ -1,0 +1,365 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  rbacr-github-deploy: lets GitHub Actions deploy rbacr without stored keys.
+  A production role that only *GA tag runs can assume, and a
+  release-candidate role for *RC* tag runs and manual runs from main,
+  limited to the rbacr-rc stacks and the rc.rbacr.nu01.com records. Both may
+  only create Lambda roles bounded by rbacr-lambda-boundary (write logs,
+  nothing else). Deployed once, by hand (infra/README.md).
+
+Parameters:
+  GitHubRepository:
+    Type: String
+    Default: prodbytes/rbacr
+    Description: owner/name of the repository whose runs may deploy
+  GitHubImmutableRepository:
+    Type: String
+    Default: prodbytes@288014477/rbacr@1404734829
+    Description: >
+      The same repository in GitHub's immutable subject form,
+      owner@<owner id>/name@<repository id>. The repository uses immutable
+      OIDC subject claims (gh api repos/<owner>/<name>/actions/oidc/customization/sub
+      shows use_immutable_subject and the sub_claim_prefix).
+  HostedZoneId:
+    Type: AWS::Route53::HostedZone::Id
+    Description: The rbacr.nu01.com zone (the rbacr-zone stack's HostedZoneId output)
+  CreateOidcProvider:
+    Type: String
+    AllowedValues: ['true', 'false']
+    Default: 'false'
+    Description: true only when the account doesn't have the GitHub OIDC provider yet (prodbytes/presence created it)
+
+Conditions:
+  CreateProvider: !Equals [!Ref CreateOidcProvider, 'true']
+
+Resources:
+  GitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: CreateProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+
+  # The most a Lambda role made by the deploy roles can ever do.
+  LambdaBoundary:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: rbacr-lambda-boundary
+      Description: Permissions boundary for the rbacr Lambda roles (infra/app.yaml)
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource: !Sub arn:${AWS::Partition}:logs:*:${AWS::AccountId}:log-group:/aws/lambda/rbacr*
+
+  DeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: rbacr-github-deploy
+      Description: Assumed by GitHub Actions on *GA tags to deploy rbacr (rbacr.nu01.com)
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                # In both subject forms (immutable IDs, and owner/name).
+                token.actions.githubusercontent.com:sub:
+                  - !Sub repo:${GitHubImmutableRepository}:ref:refs/tags/*GA
+                  - !Sub repo:${GitHubRepository}:ref:refs/tags/*GA
+      Policies:
+        - PolicyName: deploy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # CloudFormation: this stage's app and artifacts stacks only
+              - Effect: Allow
+                Action: cloudformation:*
+                Resource:
+                  - !Sub arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/rbacr/*
+                  - !Sub arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/rbacr-artifacts/*
+              - Effect: Allow
+                Action:
+                  - cloudformation:ValidateTemplate
+                  - cloudformation:GetTemplateSummary
+                  - cloudformation:ListStacks
+                Resource: '*'
+              # The artifacts bucket (CloudFormation names it rbacr-artifacts-artifactsbucket-*)
+              - Effect: Allow
+                Action: s3:*
+                Resource:
+                  - arn:aws:s3:::rbacr-artifacts-*
+                  - arn:aws:s3:::rbacr-artifacts-*/*
+              # The function, its URL and permissions
+              - Effect: Allow
+                Action: lambda:*
+                Resource:
+                  - !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:rbacr
+                  - !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:rbacr:*
+              # Its log group
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:DeleteLogGroup
+                  - logs:PutRetentionPolicy
+                  - logs:DeleteRetentionPolicy
+                  - logs:TagResource
+                  - logs:UntagResource
+                  - logs:ListTagsForResource
+                  - logs:TagLogGroup
+                  - logs:UntagLogGroup
+                  - logs:ListTagsLogGroup
+                Resource:
+                  - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/rbacr
+                  - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/rbacr:*
+              - Effect: Allow
+                Action: logs:DescribeLogGroups
+                Resource: '*'
+              # Its execution role: only ever with the boundary attached, so
+              # a deploy can't create a role more powerful than "write logs".
+              - Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:PutRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:AttachRolePolicy
+                  - iam:DetachRolePolicy
+                Resource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/rbacr-lambda
+                Condition:
+                  StringEquals:
+                    iam:PermissionsBoundary: !Ref LambdaBoundary
+              - Effect: Allow
+                Action:
+                  - iam:GetRole
+                  - iam:DeleteRole
+                  - iam:UpdateRole
+                  - iam:UpdateAssumeRolePolicy
+                  - iam:TagRole
+                  - iam:UntagRole
+                  - iam:GetRolePolicy
+                  - iam:ListRolePolicies
+                  - iam:ListAttachedRolePolicies
+                Resource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/rbacr-lambda
+              - Effect: Allow
+                Action: iam:PassRole
+                Resource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/rbacr-lambda
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: lambda.amazonaws.com
+              # The origin secret CloudFront sends to the function
+              - Effect: Allow
+                Action:
+                  - secretsmanager:CreateSecret
+                  - secretsmanager:DeleteSecret
+                  - secretsmanager:DescribeSecret
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:UpdateSecret
+                  - secretsmanager:TagResource
+                  - secretsmanager:UntagResource
+                Resource: !Sub arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:rbacr-origin-secret-*
+              - Effect: Allow
+                Action: secretsmanager:GetRandomPassword
+                Resource: '*'
+              # CloudFront, the certificate and DNS records
+              - Effect: Allow
+                Action: cloudfront:*
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - acm:RequestCertificate
+                  - acm:DescribeCertificate
+                  - acm:DeleteCertificate
+                  - acm:ListCertificates
+                  - acm:AddTagsToCertificate
+                  - acm:ListTagsForCertificate
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - route53:ListResourceRecordSets
+                  - route53:GetHostedZone
+                Resource: !Sub arn:${AWS::Partition}:route53:::hostedzone/${HostedZoneId}
+              - Effect: Allow
+                Action: route53:ChangeResourceRecordSets
+                Resource: !Sub arn:${AWS::Partition}:route53:::hostedzone/${HostedZoneId}
+                # Production's records and its ACM validation name, never
+                # the zone's own NS/CAA/local records.
+                Condition:
+                  ForAllValues:StringLike:
+                    route53:ChangeResourceRecordSetsNormalizedRecordNames:
+                      - rbacr.nu01.com
+                      - _*.rbacr.nu01.com
+              - Effect: Allow
+                Action:
+                  - route53:GetChange
+                  - route53:ListHostedZones
+                Resource: '*'
+
+  RcDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: rbacr-github-deploy-rc
+      Description: Assumed by GitHub Actions on *RC* tags and manual runs from main to deploy the rbacr release candidate (rc.rbacr.nu01.com)
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                # In both subject forms (immutable IDs, and owner/name).
+                token.actions.githubusercontent.com:sub:
+                  - !Sub repo:${GitHubImmutableRepository}:ref:refs/tags/*RC*
+                  - !Sub repo:${GitHubImmutableRepository}:ref:refs/heads/main
+                  - !Sub repo:${GitHubRepository}:ref:refs/tags/*RC*
+                  - !Sub repo:${GitHubRepository}:ref:refs/heads/main
+      Policies:
+        - PolicyName: deploy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # CloudFormation: this stage's app and artifacts stacks only
+              - Effect: Allow
+                Action: cloudformation:*
+                Resource:
+                  - !Sub arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/rbacr-rc/*
+                  - !Sub arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/rbacr-rc-artifacts/*
+              - Effect: Allow
+                Action:
+                  - cloudformation:ValidateTemplate
+                  - cloudformation:GetTemplateSummary
+                  - cloudformation:ListStacks
+                Resource: '*'
+              # The artifacts bucket (CloudFormation names it rbacr-rc-artifacts-artifactsbucket-*)
+              - Effect: Allow
+                Action: s3:*
+                Resource:
+                  - arn:aws:s3:::rbacr-rc-artifacts-*
+                  - arn:aws:s3:::rbacr-rc-artifacts-*/*
+              # The function, its URL and permissions
+              - Effect: Allow
+                Action: lambda:*
+                Resource:
+                  - !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:rbacr-rc
+                  - !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:rbacr-rc:*
+              # Its log group
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:DeleteLogGroup
+                  - logs:PutRetentionPolicy
+                  - logs:DeleteRetentionPolicy
+                  - logs:TagResource
+                  - logs:UntagResource
+                  - logs:ListTagsForResource
+                  - logs:TagLogGroup
+                  - logs:UntagLogGroup
+                  - logs:ListTagsLogGroup
+                Resource:
+                  - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/rbacr-rc
+                  - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/rbacr-rc:*
+              - Effect: Allow
+                Action: logs:DescribeLogGroups
+                Resource: '*'
+              # Its execution role: only ever with the boundary attached, so
+              # a deploy can't create a role more powerful than "write logs".
+              - Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:PutRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:AttachRolePolicy
+                  - iam:DetachRolePolicy
+                Resource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/rbacr-rc-lambda
+                Condition:
+                  StringEquals:
+                    iam:PermissionsBoundary: !Ref LambdaBoundary
+              - Effect: Allow
+                Action:
+                  - iam:GetRole
+                  - iam:DeleteRole
+                  - iam:UpdateRole
+                  - iam:UpdateAssumeRolePolicy
+                  - iam:TagRole
+                  - iam:UntagRole
+                  - iam:GetRolePolicy
+                  - iam:ListRolePolicies
+                  - iam:ListAttachedRolePolicies
+                Resource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/rbacr-rc-lambda
+              - Effect: Allow
+                Action: iam:PassRole
+                Resource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/rbacr-rc-lambda
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: lambda.amazonaws.com
+              # The origin secret CloudFront sends to the function
+              - Effect: Allow
+                Action:
+                  - secretsmanager:CreateSecret
+                  - secretsmanager:DeleteSecret
+                  - secretsmanager:DescribeSecret
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:UpdateSecret
+                  - secretsmanager:TagResource
+                  - secretsmanager:UntagResource
+                Resource: !Sub arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:rbacr-rc-origin-secret-*
+              - Effect: Allow
+                Action: secretsmanager:GetRandomPassword
+                Resource: '*'
+              # CloudFront, the certificate and DNS records
+              - Effect: Allow
+                Action: cloudfront:*
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - acm:RequestCertificate
+                  - acm:DescribeCertificate
+                  - acm:DeleteCertificate
+                  - acm:ListCertificates
+                  - acm:AddTagsToCertificate
+                  - acm:ListTagsForCertificate
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - route53:ListResourceRecordSets
+                  - route53:GetHostedZone
+                Resource: !Sub arn:${AWS::Partition}:route53:::hostedzone/${HostedZoneId}
+              # Records may change only for rc.rbacr.nu01.com and its ACM
+              # validation name (_<token>.rc.rbacr.nu01.com): never prod's.
+              - Effect: Allow
+                Action: route53:ChangeResourceRecordSets
+                Resource: !Sub arn:${AWS::Partition}:route53:::hostedzone/${HostedZoneId}
+                Condition:
+                  ForAllValues:StringLike:
+                    route53:ChangeResourceRecordSetsNormalizedRecordNames:
+                      - rc.rbacr.nu01.com
+                      - _*.rc.rbacr.nu01.com
+              - Effect: Allow
+                Action:
+                  - route53:GetChange
+                  - route53:ListHostedZones
+                Resource: '*'
+
+Outputs:
+  DeployRoleArn:
+    Description: Set as the repository variable AWS_DEPLOY_ROLE_ARN
+    Value: !GetAtt DeployRole.Arn
+  RcDeployRoleArn:
+    Description: Set as the repository variable AWS_DEPLOY_RC_ROLE_ARN
+    Value: !GetAtt RcDeployRole.Arn
+  LambdaBoundaryArn:
+    Value: !Ref LambdaBoundary

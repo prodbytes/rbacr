@@ -1,0 +1,233 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  rbacr (and rbacr-rc): the role manager at https://rbacr.nu01.com (or
+  https://rc.rbacr.nu01.com). One Lambda (the SvelteKit app, lambda.js)
+  behind a function URL, fronted by CloudFront with an ACM certificate and
+  Route 53 aliases in the rbacr.nu01.com zone. CloudFront adds a generated
+  secret header that the app requires, so the function URL is useless when
+  called directly. Deploy in us-east-1 (CloudFront certificates live there)
+  with scripts/deploy.sh.
+
+Parameters:
+  DomainName:
+    Type: String
+    Default: rbacr.nu01.com
+  HostedZoneId:
+    Type: AWS::Route53::HostedZone::Id
+    Description: The rbacr.nu01.com zone (the rbacr-zone stack's HostedZoneId output)
+  CodeBucket:
+    Type: String
+    Description: The rbacr(-rc)-artifacts stack's bucket
+  CodeKey:
+    Type: String
+    Description: The Lambda zip's key in CodeBucket (scripts/package-lambda.sh)
+  Version:
+    Type: String
+    Description: The release version, reported by /api/health
+  RootList:
+    Type: String
+    Default: ''
+    Description: RBACR_ROOT_LIST, comma-separated addresses and/or domains
+  GoogleClientId:
+    Type: String
+    Description: RBACR_GOOGLE_CLIENT_ID, the Google OAuth web client
+  GoogleClientSecret:
+    Type: String
+    NoEcho: true
+    Description: RBACR_GOOGLE_CLIENT_SECRET
+  DatabaseUrl:
+    Type: String
+    NoEcho: true
+    Description: RBACR_DATABASE_URL, e.g. postgres://user:pass@host/db?sslmode=require
+
+Resources:
+  Certificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Ref DomainName
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !Ref DomainName
+          HostedZoneId: !Ref HostedZoneId
+
+  # The header value only CloudFront knows (see the app's hooks.server.ts).
+  OriginSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub ${AWS::StackName}-origin-secret
+      Description: !Sub Header value CloudFront sends to the ${AWS::StackName} Lambda
+      GenerateSecretString:
+        PasswordLength: 48
+        ExcludePunctuation: true
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${AWS::StackName}
+      RetentionInDays: 30
+
+  FunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${AWS::StackName}-lambda
+      # Created by infra/github-deploy.yaml; the deploy roles may only create
+      # roles bounded by it (logs only).
+      PermissionsBoundary: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/rbacr-lambda-boundary
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: logs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub ${LogGroup.Arn}
+
+  Function:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Ref AWS::StackName
+      Description: !Sub rbacr ${Version} (https://${DomainName})
+      Runtime: nodejs24.x
+      Architectures: [arm64]
+      Handler: lambda.handler
+      MemorySize: 1024
+      Timeout: 15
+      Role: !GetAtt FunctionRole.Arn
+      Code:
+        S3Bucket: !Ref CodeBucket
+        S3Key: !Ref CodeKey
+      LoggingConfig:
+        LogGroup: !Ref LogGroup
+      Environment:
+        Variables:
+          NODE_OPTIONS: --enable-source-maps
+          # adapter-node takes the request's host from this header, which
+          # CloudFront sets (the Lambda itself sees the function URL host).
+          HOST_HEADER: x-rbacr-host
+          RBACR_VERSION: !Ref Version
+          RBACR_PUBLIC_ORIGIN: !Sub https://${DomainName}
+          RBACR_ORIGIN_SECRET: !Sub '{{resolve:secretsmanager:${OriginSecret}}}'
+          RBACR_ROOT_LIST: !Ref RootList
+          RBACR_GOOGLE_CLIENT_ID: !Ref GoogleClientId
+          RBACR_GOOGLE_CLIENT_SECRET: !Ref GoogleClientSecret
+          RBACR_DATABASE_URL: !Ref DatabaseUrl
+
+  FunctionUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !GetAtt Function.Arn
+      # Public, but the app refuses requests without CloudFront's secret
+      # header. (CloudFront's IAM origin access control for Lambda would
+      # require browsers to sign POST bodies, which forms can't.)
+      AuthType: NONE
+      InvokeMode: BUFFERED
+
+  FunctionUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref Function
+      Action: lambda:InvokeFunctionUrl
+      Principal: '*'
+      FunctionUrlAuthType: NONE
+
+  # Function URLs also need lambda:InvokeFunction, limited to URL calls.
+  FunctionInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref Function
+      Action: lambda:InvokeFunction
+      Principal: '*'
+      InvokedViaFunctionUrl: true
+
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Comment: !Sub rbacr (${DomainName})
+        Enabled: true
+        HttpVersion: http2and3
+        IPV6Enabled: true
+        PriceClass: PriceClass_100
+        Aliases:
+          - !Ref DomainName
+        ViewerCertificate:
+          AcmCertificateArn: !Ref Certificate
+          SslSupportMethod: sni-only
+          MinimumProtocolVersion: TLSv1.2_2021
+        Origins:
+          - Id: app
+            # https://<id>.lambda-url.<region>.on.aws/ -> <id>.lambda-url.<region>.on.aws
+            DomainName: !Select [2, !Split ['/', !GetAtt FunctionUrl.FunctionUrl]]
+            CustomOriginConfig:
+              OriginProtocolPolicy: https-only
+              OriginSSLProtocols: [TLSv1.2]
+            OriginCustomHeaders:
+              - HeaderName: x-rbacr-origin-secret
+                HeaderValue: !Sub '{{resolve:secretsmanager:${OriginSecret}}}'
+              - HeaderName: x-rbacr-host
+                HeaderValue: !Ref DomainName
+        # Pages and the JSON API: nothing cached; every viewer header but
+        # Host, every cookie and query string forwarded.
+        DefaultCacheBehavior:
+          TargetOriginId: app
+          ViewerProtocolPolicy: redirect-to-https
+          Compress: true
+          AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+          CachedMethods: [GET, HEAD]
+          CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad # Managed-CachingDisabled
+          OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac # Managed-AllViewerExceptHostHeader
+          ResponseHeadersPolicyId: 67f7725c-6f97-4210-82d7-5512b31e9d03 # Managed-SecurityHeadersPolicy
+        CacheBehaviors:
+          # Content-hashed client assets: cached at the edge.
+          - PathPattern: /_app/immutable/*
+            TargetOriginId: app
+            ViewerProtocolPolicy: redirect-to-https
+            Compress: true
+            AllowedMethods: [GET, HEAD]
+            CachedMethods: [GET, HEAD]
+            CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6 # Managed-CachingOptimized
+            ResponseHeadersPolicyId: 67f7725c-6f97-4210-82d7-5512b31e9d03 # Managed-SecurityHeadersPolicy
+
+  DnsRecordA:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref DomainName
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt Distribution.DomainName
+        HostedZoneId: Z2FDTNDATAQYW2 # CloudFront's alias zone
+        EvaluateTargetHealth: false
+
+  DnsRecordAAAA:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref DomainName
+      Type: AAAA
+      AliasTarget:
+        DNSName: !GetAtt Distribution.DomainName
+        HostedZoneId: Z2FDTNDATAQYW2
+        EvaluateTargetHealth: false
+
+Outputs:
+  SiteUrl:
+    Value: !Sub https://${DomainName}/
+  DistributionId:
+    Value: !Ref Distribution
+  DistributionDomainName:
+    Value: !GetAtt Distribution.DomainName
+  FunctionName:
+    Value: !Ref Function
+  FunctionUrl:
+    Description: Direct calls are refused (403); use SiteUrl
+    Value: !GetAtt FunctionUrl.FunctionUrl

@@ -1,0 +1,64 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  rbacr-zone: the public hosted zone rbacr.nu01.com, delegated from the
+  parent zone nu01.com (same account), with a CAA record limiting
+  certificates to Amazon, and local.rbacr.nu01.com -> 127.0.0.1 for local
+  HTTPS through Floci (floci/README.md). Deployed once, by hand
+  (infra/README.md).
+
+Parameters:
+  DomainName:
+    Type: String
+    Default: rbacr.nu01.com
+  ParentHostedZoneId:
+    Type: AWS::Route53::HostedZone::Id
+    Description: The zone of nu01.com, where the NS delegation record goes
+
+Resources:
+  HostedZone:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      Name: !Ref DomainName
+      HostedZoneConfig:
+        Comment: rbacr (prodbytes/rbacr infra/zone.yaml)
+
+  # Delegates rbacr.nu01.com from nu01.com to this zone's name servers.
+  Delegation:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref ParentHostedZoneId
+      Name: !Ref DomainName
+      Type: NS
+      TTL: '3600'
+      ResourceRecords: !GetAtt HostedZone.NameServers
+
+  # Only Amazon (ACM) may issue certificates for the zone's names.
+  Caa:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Ref DomainName
+      Type: CAA
+      TTL: '3600'
+      ResourceRecords:
+        - '0 issue "amazon.com"'
+        - '0 issuewild ";"'
+
+  # Local development: a public name for loopback, so Google accepts it as an
+  # OAuth redirect URI (https://local.rbacr.nu01.com:8444/login/google/callback).
+  Local:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Sub local.${DomainName}
+      Type: A
+      TTL: '3600'
+      ResourceRecords:
+        - 127.0.0.1
+
+Outputs:
+  HostedZoneId:
+    Description: Set as the repository variable HOSTED_ZONE_ID
+    Value: !Ref HostedZone
+  NameServers:
+    Value: !Join [',', !GetAtt HostedZone.NameServers]
