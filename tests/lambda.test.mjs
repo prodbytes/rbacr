@@ -1,0 +1,165 @@
+// Smoke test for the packaged Lambda: invokes lambda.js (the deployed entrypoint)
+// with Lambda function URL events (payload v2, as CloudFront forwards them)
+// against the production build.
+// Run `npm run build` first. Only exercises routes that need no database.
+import assert from 'node:assert/strict';
+import { readdirSync } from 'node:fs';
+import { before, describe, it } from 'node:test';
+
+process.env.RBACR_DATABASE_URL = 'postgres://unused@127.0.0.1:1/unused';
+process.env.RBACR_ROOT_LIST = 'example.com';
+process.env.RBACR_GOOGLE_CLIENT_ID = 'test-client-id';
+process.env.RBACR_GOOGLE_CLIENT_SECRET = 'test-client-secret';
+process.env.RBACR_DEV_LOGIN = '1'; // must be ignored by production builds
+process.env.RBACR_PUBLIC_ORIGIN = 'https://rbacr.example.com';
+process.env.RBACR_ORIGIN_SECRET = 'test-origin-secret';
+process.env.RBACR_VERSION = '1.2.3-RC';
+// The Lambda sees the function URL's Host; CloudFront sends the site's host in
+// x-rbacr-host (an origin custom header), which adapter-node reads.
+process.env.HOST_HEADER = 'x-rbacr-host';
+const FROM_CLOUDFRONT = { 'x-rbacr-origin-secret': 'test-origin-secret', 'x-rbacr-host': 'rbacr.example.com' };
+
+let handler;
+before(async () => {
+	({ handler } = await import('../lambda.js'));
+});
+
+async function invoke(target, { method = 'GET', headers = {}, viaCloudFront = true } = {}) {
+	const [path, query = ''] = target.split('?');
+	const event = {
+		version: '2.0',
+		routeKey: '$default',
+		rawPath: path,
+		rawQueryString: query,
+		headers: {
+			host: 'abc123.lambda-url.us-east-1.on.aws',
+			'x-forwarded-proto': 'https',
+			...(viaCloudFront && FROM_CLOUDFRONT),
+			...headers
+		},
+		requestContext: {
+			http: { method, path, protocol: 'HTTP/1.1', sourceIp: '203.0.113.1', userAgent: 'test' },
+			requestId: 'test',
+			stage: '$default'
+		},
+		isBase64Encoded: false
+	};
+	const res = await handler(event, {});
+	const body = res.isBase64Encoded ? Buffer.from(res.body, 'base64').toString('utf8') : res.body;
+	return { ...res, body };
+}
+
+describe('lambda handler', () => {
+	it('serves the JSON health check with the deployed version', async () => {
+		const res = await invoke('/api/health');
+		assert.equal(res.statusCode, 200);
+		assert.deepEqual(JSON.parse(res.body), { ok: true, version: '1.2.3-RC' });
+	});
+
+	it('refuses requests that bypass CloudFront', async () => {
+		for (const headers of [{}, { 'x-rbacr-origin-secret': 'wrong' }]) {
+			const res = await invoke('/api/health', { viaCloudFront: false, headers });
+			assert.equal(res.statusCode, 403);
+		}
+	});
+
+	it('renders the sign-in page as HTML', async () => {
+		const res = await invoke('/', { headers: { accept: 'text/html' } });
+		assert.equal(res.statusCode, 200);
+		assert.match(res.headers['content-type'], /text\/html/);
+		assert.match(res.body, /Sign in with Google/);
+		assert.doesNotMatch(res.body, /Development sign-in/);
+	});
+
+	it('requires an API token on /api, ignoring session cookies', async () => {
+		for (const headers of [{}, { cookie: 'rbacr_session=anything' }, { authorization: 'Basic abc' }]) {
+			const res = await invoke('/api/me', { headers: { accept: 'application/json', ...headers } });
+			assert.equal(res.statusCode, 401);
+			assert.equal(res.headers['www-authenticate'], 'Bearer');
+			assert.deepEqual(JSON.parse(res.body), { error: 'A valid API token is required' });
+		}
+		const res = await invoke('/api/check', { method: 'POST', headers: { 'content-type': 'application/json' } });
+		assert.equal(res.statusCode, 401);
+	});
+
+	it('refuses /uxapi calls that do not come from the frontend', async () => {
+		const attempts = [
+			{},
+			{ 'x-rbacr-ux': '1' },
+			{ 'x-rbacr-ux': '1', 'sec-fetch-site': 'cross-site' },
+			{ 'sec-fetch-site': 'same-origin' }
+		];
+		for (const headers of attempts) {
+			const res = await invoke('/uxapi/session', { headers });
+			assert.equal(res.statusCode, 403, JSON.stringify(headers));
+			assert.match(JSON.parse(res.body).error, /only for the rbacr frontend/);
+		}
+		const write = await invoke('/uxapi/me/redeem', {
+			method: 'POST',
+			headers: { 'x-rbacr-ux': '1', 'sec-fetch-site': 'same-origin', origin: 'https://evil.example', 'content-type': 'application/json' }
+		});
+		assert.equal(write.statusCode, 403);
+	});
+
+	it('serves /uxapi to the frontend', async () => {
+		const headers = { 'x-rbacr-ux': '1', 'sec-fetch-site': 'same-origin' };
+		const session = await invoke('/uxapi/session', { headers });
+		assert.equal(session.statusCode, 200);
+		assert.equal(session.headers['cache-control'], 'no-store');
+		assert.deepEqual(JSON.parse(session.body), { user: null, devLogin: false });
+		const me = await invoke('/uxapi/me', { headers });
+		assert.equal(me.statusCode, 401);
+		assert.deepEqual(JSON.parse(me.body), { error: 'Not signed in' });
+	});
+
+	it('redirects anonymous page visits to sign-in', async () => {
+		const res = await invoke('/systems', { headers: { accept: 'text/html' } });
+		assert.equal(res.statusCode, 303);
+		assert.equal(res.headers.location, '/');
+	});
+
+	it('starts Google sign-in with the public origin as redirect URI', async () => {
+		const res = await invoke('/login/google');
+		assert.equal(res.statusCode, 302);
+		const url = new URL(res.headers.location);
+		assert.equal(url.hostname, 'accounts.google.com');
+		assert.equal(
+			url.searchParams.get('redirect_uri'),
+			'https://rbacr.example.com/login/google/callback'
+		);
+		const cookie = [].concat(res.multiValueHeaders?.['set-cookie'] ?? res.cookies ?? res.headers['set-cookie']).join();
+		assert.match(cookie, /rbacr_oauth=.*HttpOnly/i);
+		assert.match(cookie, /Secure/);
+	});
+
+	it('does not expose the dev login in production builds', async () => {
+		const res = await invoke('/login/dev', { headers: { accept: 'text/html' } });
+		assert.equal(res.statusCode, 404);
+	});
+
+	it('accepts same-site form submissions arriving on the function URL host', async () => {
+		const res = await invoke('/logout', {
+			method: 'POST',
+			headers: { origin: 'https://rbacr.example.com', 'content-type': 'application/x-www-form-urlencoded' }
+		});
+		assert.equal(res.statusCode, 303); // past the CSRF check: signed out, back to sign-in
+		assert.equal(res.headers.location, '/');
+	});
+
+	it('rejects cross-site form submissions (CSRF)', async () => {
+		const res = await invoke('/logout', {
+			method: 'POST',
+			headers: { origin: 'https://evil.example', 'content-type': 'application/x-www-form-urlencoded' }
+		});
+		assert.equal(res.statusCode, 403);
+		assert.match(res.body, /Cross-site POST form submissions are forbidden/);
+	});
+
+	it('serves static client assets', async () => {
+		const asset = readdirSync('build/client/_app/immutable/entry').find((f) => f.endsWith('.js'));
+		const res = await invoke(`/_app/immutable/entry/${asset}`);
+		assert.equal(res.statusCode, 200);
+		assert.match(res.headers['content-type'], /javascript/);
+		assert.match(res.headers['cache-control'], /immutable/);
+	});
+});

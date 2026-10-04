@@ -1,0 +1,43 @@
+{
+	"name": "rbacr",
+	"private": true,
+	"version": "0.1.0",
+	"type": "module",
+	"scripts": {
+		"dev": "vite dev",
+		"build": "vite build",
+		"preview": "vite preview",
+		"prepare": "svelte-kit sync || echo ''",
+		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
+		"test:unit": "vitest",
+		"test:lambda": "npm run build && node --test tests/lambda.test.mjs",
+		"test:e2e": "node --test tests/api.e2e.test.mjs",
+		"test": "vitest --run && npm run test:lambda",
+		"deploy": "bash scripts/deploy.sh"
+	},
+	"devDependencies": {
+		"@electric-sql/pglite": "^0.5.8",
+		"@sveltejs/adapter-node": "^6.0.0",
+		"@sveltejs/kit": "^3.0.0",
+		"@sveltejs/vite-plugin-svelte": "^7.2.0",
+		"@types/aws-lambda": "^8.10.164",
+		"@types/node": "^24",
+		"svelte": "^5.57.1",
+		"svelte-check": "^4.6.0",
+		"typescript": "^6.0.3",
+		"vite": "^8.3.0",
+		"vitest": "^4.1.8"
+	},
+	"imports": {
+		"#lib": "./src/lib/index.js",
+		"#lib/*": "./src/lib/*"
+	},
+	"dependencies": {
+		"postgres": "^3.4.9",
+		"serverless-http": "^4.0.0"
+	},
+	"engines": {
+		"node": ">=22"
+	}
+}

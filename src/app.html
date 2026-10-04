@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<meta name="text-scale" content="scale" />
+		<script nonce="%sveltekit.nonce%">
+			// The app's forms are handled in JavaScript (they call /uxapi). Until the
+			// app has loaded, a submit would fall back to a native GET and put the
+			// form's values in the URL; drop those. Explicit method="post" forms
+			// (sign-in, sign-out) still submit natively.
+			document.addEventListener(
+				'submit',
+				(e) => {
+					if (!document.documentElement.dataset.ready && e.target.method === 'get') e.preventDefault();
+				},
+				true
+			);
+		</script>
+		%sveltekit.head%
+	</head>
+	<body data-sveltekit-preload-data="hover">
+		<div style="display: contents">%sveltekit.body%</div>
+	</body>
+</html>

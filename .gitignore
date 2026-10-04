@@ -80,3 +80,14 @@ Thumbs.db
 !.vscode/settings.json
 !.vscode/extensions.json
 !.vscode/launch.json
+
+# --- SvelteKit / Lambda packaging ---
+.svelte-kit/
+.env
+.env.*
+!.env.example
+vite.config.ts.timestamp-*
+
+# --- Local HTTPS (mkcert, see scripts/local-certs.sh) ---
+floci/certs/
+.lambda/
