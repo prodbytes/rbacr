@@ -196,3 +196,8 @@ The [Containerfile](.devcontainer/Containerfile) keeps the Microsoft
 4. On container start, `postCreateCommand` runs `devbox install`, which finds
    the heavy downloads already cached. The first install still evaluates
    nixpkgs, which takes a few minutes; after that the environment is instant.
+5. Then [scripts/local-env.sh](scripts/local-env.sh) writes `.env` from the
+   `RBACR_LOCAL_*` Codespaces secrets (`RBACR_LOCAL_<NAME>` becomes
+   `RBACR_<NAME>`), unless `.env` already exists. The GA and RC tenants
+   have their own `RBACR_GA_*` and `RBACR_RC_*` repository settings, used by
+   the deploy workflows ([infra/README.md](infra/README.md#one-time-setup)).

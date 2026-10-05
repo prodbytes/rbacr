@@ -125,17 +125,31 @@ the environment are read from the git-ignored `.env.$STAGE` (`.env.prod`,
    the deploy roles can't update themselves.
 
 3. **Repository settings.** Variables are public identifiers; secrets are
-   not.
+   not. Each tenant has its own settings, named `RBACR_<TENANT>_<NAME>`:
+   `GA` (production, read by [deploy.yml](../.github/workflows/deploy.yml)),
+   `RC` (release candidate, read by
+   [deploy-rc.yml](../.github/workflows/deploy-rc.yml)) and `LOCAL`
+   (Codespaces secrets, written to `.env` by
+   [scripts/local-env.sh](../scripts/local-env.sh) when a codespace is
+   created). The workflows pass `RBACR_<TENANT>_<NAME>` to the app as
+   `RBACR_<NAME>`.
 
    ```bash
    gh variable set AWS_DEPLOY_ROLE_ARN --body "<DeployRoleArn>"
    gh variable set AWS_DEPLOY_RC_ROLE_ARN --body "<RcDeployRoleArn>"
    gh variable set HOSTED_ZONE_ID --body "<rbacr-zone HostedZoneId>"
-   gh variable set RBACR_GOOGLE_CLIENT_ID --body "<client id>.apps.googleusercontent.com"
-   gh variable set RBACR_ROOT_LIST --body "nu01.com"
-   gh secret set RBACR_GOOGLE_CLIENT_SECRET
-   gh secret set RBACR_DATABASE_URL       # production database
-   gh secret set RBACR_RC_DATABASE_URL    # release-candidate database
+   for t in GA RC; do
+     gh variable set "RBACR_${t}_ROOT_LIST" --body "nu01.com"
+     gh variable set "RBACR_${t}_GOOGLE_CLIENT_ID" --body "<client id>.apps.googleusercontent.com"
+     gh variable set "RBACR_${t}_HEALTH_EMAILS" --body "julio+health@nu01.com"  # optional
+     gh secret set "RBACR_${t}_GOOGLE_CLIENT_SECRET"
+     gh secret set "RBACR_${t}_DATABASE_URL"   # that tenant's database
+   done
+   # LOCAL, for codespaces (optional; local machines use .env directly)
+   gh secret set --app codespaces RBACR_LOCAL_ROOT_LIST --body "nu01.com"
+   gh secret set --app codespaces RBACR_LOCAL_GOOGLE_CLIENT_ID
+   gh secret set --app codespaces RBACR_LOCAL_GOOGLE_CLIENT_SECRET
+   gh secret set --app codespaces RBACR_LOCAL_DEV_LOGIN --body 1
    ```
 
 4. **Google.** On the OAuth web client, add these authorised redirect URIs:
