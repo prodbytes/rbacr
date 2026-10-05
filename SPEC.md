@@ -184,6 +184,33 @@ and the README in sync with the code.
   a role missing from its catalog, gives 404. Without a `systemId`,
   `/api/check` asks about a global role (such as `root`).
 
+## Client integration
+
+How applications use rbacr. The README has a walkthrough with examples.
+
+- **C1** rbacr does not authenticate an application's users. The application
+  signs them in itself and asks rbacr about the verified e-mail address,
+  server-side, with a personal API token (T1-T5). rbacr trusts the address
+  it is given.
+- **C2** A token sees what its owner may see (T6): a system's admin, anyone
+  in that system; a root, anyone everywhere plus global roles; anyone else,
+  only themselves. Applications should use a token owned by an admin of
+  their own system.
+- **C3** `POST /api/check` answers `allowed: true` exactly when the identity
+  holds the role in the system as an effective role (R3, R6): through a
+  grant to its address or domain, a global grant, an implication, or root
+  status (R2). A role the identity doesn't hold gives `allowed: false`. A
+  system or role that doesn't exist gives 404, after the reach check (403).
+- **C4** `POST /api/roles` with a `systemId` returns the same effective
+  roles as a sorted list; without one, every system's and the global roles.
+  `GET /api/me` returns the token owner's own roles.
+- **C5** E-mail addresses and role names are matched case-insensitively and
+  returned lower-cased.
+- **C6** A change to grants, implications or vouchers shows in these
+  answers within about a second (D3). A revoked or expired token is refused
+  at once (T3). Clients that cache answers should cache them briefly and
+  never cache errors, and should deny access when rbacr can't answer.
+
 ## HTTP interface
 
 ### `/api`: the external API (personal API token, A1)

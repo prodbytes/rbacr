@@ -79,9 +79,107 @@ Devbox scripts: `devbox run dev | test | check | build | certs | release-rc | re
 | `RBACR_VERSION` | no | The release version, reported by `/health` (default `dev`) |
 | `RBACR_DEV_LOGIN` | no | `1` enables `/login/dev` under `vite dev` |
 
-## JSON APIs
+## Using rbacr from your application
 
-rbacr has two interfaces:
+rbacr answers one question for your applications: **which roles does this
+person hold in my system?** It doesn't sign your users in. Your application
+authenticates its users itself (typically with Google), then asks rbacr
+about the verified e-mail address, server-side, with an API token.
+
+### 1. Set up your system (once, in the UI)
+
+1. A root creates the system on `/systems` (its id is what your code sends
+   as `systemId`, e.g. `presence`) and its roles (e.g. `free`, `premium`).
+   Every system also has `admin`.
+2. Optionally, a root sets **implied roles** (`premium` implies `free`), so
+   your code can ask for the role a feature needs and anyone with a
+   higher role passes too.
+3. Roots or the system's admins grant roles to addresses (roots also to
+   whole domains or globally), or hand out vouchers that people redeem on
+   `/me`.
+
+### 2. Create a token for your application
+
+Sign in as an account that may see the roles your application asks about,
+open `/me` → **API tokens**, create one with an expiry, and store it as a
+server-side secret (it's shown once). A token acts as the person who
+created it, with their roles at the time of each request:
+
+| Token owner | Can ask about |
+|---|---|
+| An **admin of your system** (recommended) | anyone's roles in that system |
+| A **root** | anyone's roles in every system, and global roles |
+| Anyone | only themselves (`/api/me`, or their own address) |
+
+Use an admin of your system unless you need more: if the token leaks, it
+reveals only that system's roles. Revoke tokens on `/me`; a revoked or
+expired token gets 401 at once.
+
+### 3. Ask about roles
+
+All calls go to `https://rbacr.nu01.com/api/…` (RC:
+`https://rc.rbacr.nu01.com`) with `Authorization: Bearer rbacr_…`. Role
+queries are `POST` with a JSON body, so e-mail addresses stay out of URLs
+and access logs.
+
+**Check one permission** when a request needs it:
+
+```bash
+curl -H "Authorization: Bearer $RBACR_TOKEN" -H "content-type: application/json" \
+  -d '{"email":"ana@example.com","systemId":"presence","role":"premium"}' \
+  https://rbacr.nu01.com/api/check
+# {"email":"ana@example.com","systemId":"presence","role":"premium","allowed":true}
+```
+
+**Fetch all of a person's roles** in your system, for example at sign-in,
+and decide locally:
+
+```bash
+curl -H "Authorization: Bearer $RBACR_TOKEN" -H "content-type: application/json" \
+  -d '{"email":"ana@example.com","systemId":"presence"}' \
+  https://rbacr.nu01.com/api/roles
+# {"email":"ana@example.com","systemId":"presence","roles":["free","premium"]}
+```
+
+Without `systemId`, `/api/roles` returns every system's roles and the
+person's global roles (root tokens only, except about yourself). A script
+acting as its owner can call `GET /api/me` for its own roles.
+
+In TypeScript (server-side only; never ship the token to a browser):
+
+```ts
+const RBACR = 'https://rbacr.nu01.com';
+
+export async function hasRole(email: string, systemId: string, role: string): Promise<boolean> {
+	const res = await fetch(`${RBACR}/api/check`, {
+		method: 'POST',
+		headers: { authorization: `Bearer ${process.env.RBACR_TOKEN}`, 'content-type': 'application/json' },
+		body: JSON.stringify({ email, systemId, role })
+	});
+	if (!res.ok) throw new Error(`rbacr ${res.status}: ${(await res.json()).error}`);
+	return (await res.json()).allowed; // treat any failure as "not allowed"
+}
+```
+
+### What the answers mean
+
+- **Roles are effective roles**: grants to the address, grants to its
+  domain, global grants of a role your system defines, and everything those
+  imply. Roots (`RBACR_ROOT_LIST`) hold every role of every system.
+- **E-mail addresses** are matched case-insensitively. Send the address
+  your sign-in verified; rbacr trusts what you send.
+- **`allowed: false`** means the person doesn't hold the role. A role or
+  system that doesn't exist is a 404, not `false`, so typos surface (a
+  token that can't see the system gets 403 first).
+- **Fresh within about a second.** A grant or revocation can take up to a
+  second to show (SPEC D3). If you cache answers, keep it short (a minute
+  or less) and never cache errors.
+- **Errors** are JSON `{ "error": "…" }`: 400 bad input, 401 missing,
+  revoked or expired token (with `WWW-Authenticate: Bearer`), 403 asking
+  beyond the token owner's reach, 404 unknown system or role. Fail closed:
+  deny access when rbacr can't answer.
+
+### The two interfaces
 
 | | `/api`: the API (external) | `/vpi`: the VPI (view programming interface, frontend only) |
 |---|---|---|
@@ -90,30 +188,12 @@ rbacr has two interfaces:
 | Contract | stable, documented in [SPEC.md](SPEC.md#api-the-external-api-personal-api-token-a1) | shaped for the pages, may change |
 
 Every `/api` request, unknown paths included, needs a valid personal API
-token (401 otherwise); `/api` ignores the session cookie. The only
-unauthenticated JSON endpoint is `GET /health`, outside both: it checks the
-database and the Google client and answers 503 when one is missing (SPEC
-HC1-HC3). In AWS a Route 53 health check polls it and e-mails alerts. `/vpi` refuses anything that isn't a
-same-origin request from rbacr's pages (403), so another site, a script, or
-a caller holding only a token can't use it.
-
-```bash
-TOKEN=rbacr_…   # create one on /me → API tokens; it's shown once
-curl -H "Authorization: Bearer $TOKEN" https://<host>/api/me
-# {"email":"ana@example.com","root":false,"adminOf":["billing"],"globalRoles":[],
-#  "roles":{"billing":["admin","viewer"],"crm":["sales"]}}
-
-curl -H "Authorization: Bearer $TOKEN" -H "content-type: application/json" \
-  -d '{"email":"bob@example.com","systemId":"billing","role":"viewer"}' \
-  https://<host>/api/check
-# {"email":"bob@example.com","systemId":"billing","role":"viewer","allowed":true}
-```
-
-Role questions about other people follow the caller's permissions: roots can
-ask about anyone, admins about their own systems, and everyone about
-themselves. For an application that checks roles, create the token under an
-account with the right reach (for example a root), give it an expiry, and
-revoke it on `/me` when it's no longer needed.
+token (401 otherwise), and `/api` ignores the session cookie. Besides role
+queries, it can manage systems, grants and vouchers within the token
+owner's permissions ([SPEC.md](SPEC.md#permissions)). `/vpi` refuses
+anything that isn't a same-origin request from rbacr's pages (403). The only
+unauthenticated JSON endpoint is `GET /health` (SPEC HC1-HC3), which a
+Route 53 health check polls in AWS.
 
 ## Tests
 
