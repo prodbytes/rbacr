@@ -46,7 +46,7 @@ Resources:
     Type: AWS::IAM::ManagedPolicy
     Properties:
       ManagedPolicyName: rbacr-lambda-boundary
-      Description: Permissions boundary for the rbacr Lambda roles (infra/app.yaml); logs and the rbacr tables
+      Description: Permissions boundary for the rbacr Lambda roles (infra/app.yaml)
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
