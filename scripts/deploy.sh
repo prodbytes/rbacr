@@ -27,8 +27,8 @@
 #   AWS_REGION    must be us-east-1 (CloudFront certificates live there)
 #   SKIP_BUILD    1 to deploy an existing dist/rbacr-lambda.zip
 #   HOSTED_ZONE_ID the rbacr.nu01.com zone (default: the rbacr-zone stack's output)
-#   RBACR_ROOT_LIST   root addresses/domains; passed on every deploy, so
-#                 the stack never keeps an old value (empty: no roots)
+#   RBACR_ROOT_LIST   root addresses/domains (default @nu01.com); passed on
+#                 every deploy, so the stack never keeps an old value
 #   RBACR_GOOGLE_CLIENT_ID, RBACR_GOOGLE_CLIENT_SECRET
 #                 required on the first deploy of a stage; afterwards, unset
 #                 ones keep their deployed values
@@ -96,6 +96,9 @@ if [[ ! "${HEALTH_EMAILS:-}" =~ ^[A-Za-z0-9._%+@,-]*$ ]]; then
   echo "error: HEALTH_EMAILS must be comma-separated addresses" >&2
   exit 1
 fi
+# An unset or empty list (e.g. a missing repository variable) means the
+# default, never "no roots".
+RBACR_ROOT_LIST="${RBACR_ROOT_LIST:-@nu01.com}"
 if [[ ! "${RBACR_ROOT_LIST:-}" =~ ^[A-Za-z0-9._%+@,\ -]*$ ]]; then
   echo "error: RBACR_ROOT_LIST must be comma-separated addresses or domains" >&2
   exit 1

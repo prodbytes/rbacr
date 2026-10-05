@@ -12,8 +12,9 @@ app on AWS Lambda.
 
 - **Roots** are listed in `RBACR_ROOT_LIST`, as addresses or domains
   (`@nu01.com` means everyone at nu01.com). They hold the single global
-  `root` role and every role in every system. They create systems and roles, and can
-  grant any role to an address or a whole domain.
+  `root` role and every role in every system. The list is the only way to
+  become a root: `root` can't be granted or redeemed. Roots create systems
+  and roles, and can grant any role to an address or a whole domain.
 - **Implied roles**: a role can imply other roles of its system, so holding
   `premium` can also give `free`, and `admin` can give both. Implication is
   transitive; only roots set it, and no role can imply `admin`.
@@ -71,7 +72,7 @@ Devbox scripts: `devbox run dev | test | check | build | certs | release-rc | re
 |----------|----------|---------|
 | `RBACR_DYNAMODB_TABLE` | yes | The DynamoDB table holding all data. Locally `rbacr` on DynamoDB Local; in AWS the stage's table (`rbacr`, `rbacr-rc`) |
 | `RBACR_DYNAMODB_ENDPOINT` | no | DynamoDB Local's URL in development (process-compose sets `http://127.0.0.1:8642`); the app creates the table there |
-| `RBACR_ROOT_LIST` | no | Comma-separated root addresses and/or domains, e.g. `ana@example.com, example.org`. An invalid entry stops the app from starting. |
+| `RBACR_ROOT_LIST` | no | Comma-separated root addresses and/or domains, e.g. `ana@example.com, @example.org`: the only way to be a root. An invalid entry stops the app from starting. In AWS it defaults to `@nu01.com`. |
 | `RBACR_GOOGLE_CLIENT_ID` / `RBACR_GOOGLE_CLIENT_SECRET` | for sign-in | Google OAuth web client |
 | `RBACR_PUBLIC_ORIGIN` | no | The origin users browse, used for the Google redirect URI (default: the request's origin) |
 | `RBACR_ORIGIN_SECRET` | no | When set, every request must carry it in `x-rbacr-origin-secret`. In AWS, CloudFront adds it, so the Lambda URL can't be called directly. |
