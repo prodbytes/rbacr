@@ -83,6 +83,7 @@ Thumbs.db
 
 # --- SvelteKit / Lambda packaging ---
 .svelte-kit/
+.svelte-kit-vitest/
 # Secrets: .env is local development, .env.<stage> feeds scripts/deploy.sh
 *.env
 *.env.*
