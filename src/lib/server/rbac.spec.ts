@@ -1,3 +1,4 @@
+import { PutCommand } from '@aws-sdk/lib-dynamodb';
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { Table } from './dynamo';
 import { Allowlist } from './identity';
@@ -53,6 +54,47 @@ describe('roots', () => {
 		expect(await rbac.globalRolesOf(ROOT)).toEqual(['root']);
 		expect(await rbac.globalRolesOf(ADMIN)).toEqual([]);
 		expect(await rbac.globalRolesOf(USER)).toEqual([]);
+	});
+
+	it('come only from the allow list: addresses and whole domains', async () => {
+		const list = new Rbac(table, Allowlist.parse('@nu01.com, boss@partner.com'), () => clock);
+		expect((await list.actor('anyone@nu01.com')).root).toBe(true);
+		expect((await list.actor('boss@partner.com')).root).toBe(true);
+		expect(await list.globalRolesOf('boss@partner.com')).toEqual(['root']);
+		for (const email of [USER, 'x@sub.nu01.com', 'nu01.com@evil.com']) {
+			expect((await list.actor(email)).root).toBe(false);
+			expect(await list.globalRolesOf(email)).toEqual([]);
+		}
+	});
+
+	it('cannot be made any other way', async () => {
+		await expectError(rbac.grantGlobal(root, 'root', USER), 400, /reserved/);
+		await expectError(rbac.grantGlobal(root, 'root', 'partner.com'), 400, /reserved/);
+		await expectError(rbac.createVoucher(root, { systemId: null, role: 'root' }), 400, /reserved/);
+		await expectError(rbac.addRole(root, 'billing', 'root'), 400, /reserved/);
+		await expectError(rbac.grant(root, 'billing', 'root', USER), 404);
+		// Even a root grant written straight into the table is ignored.
+		for (const grantee of [USER, '@partner.com']) {
+			await table.doc.send(
+				new PutCommand({
+					TableName: table.name,
+					Item: {
+						PK: 'GLOBAL',
+						SK: `GRANT#root#${grantee}`,
+						GSI1PK: `GRANTEE#${grantee}`,
+						GSI1SK: 'GLOBAL#root',
+						role: 'root',
+						grantee,
+						grantedBy: 'forged',
+						grantedAt: clock.toISOString()
+					}
+				})
+			);
+		}
+		expect((await rbac.actor(USER)).root).toBe(false);
+		expect(await rbac.globalRolesOf(USER)).toEqual([]);
+		expect(await rbac.hasRole(root, USER, null, 'root')).toBe(false);
+		expect(await rbac.allRoles(root, USER)).toEqual({ globalRoles: [], roles: {} });
 	});
 
 	it('hold every role of every system', async () => {

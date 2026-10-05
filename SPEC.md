@@ -33,10 +33,16 @@ and the README in sync with the code.
 
 ## Roles
 
-- **R1 Roots.** `RBACR_ROOT_LIST` lists addresses and/or domains, separated
-  by commas or whitespace. An identity matching an address or its domain is a
-  **root**. An invalid entry makes the app refuse to start. Root status comes
-  only from this list and is never stored.
+- **R1 Roots.** `RBACR_ROOT_LIST` lists addresses and/or domains (`@nu01.com`
+  or `nu01.com`), separated by commas or whitespace. An identity matching an
+  address or its domain is a **root**. An invalid entry makes the app refuse
+  to start. In AWS it is the stack's `RootList` parameter, default
+  `@nu01.com`; `scripts/deploy.sh` passes it on every deploy, and an unset
+  or empty value means that default.
+- **R1a** The list is the **only** way to be a root or hold the `root` role.
+  Root status is never stored. `root` can't be granted, globally or in a
+  system, nor be a voucher's role or a catalog role (400). A `root` grant
+  found in storage anyway is ignored.
 - **R2** Roots hold every role of every system. Their effective roles are the
   full catalog of every system. They also hold the single **global role**
   `root`, which belongs to no system. It is reported apart from system roles
@@ -274,7 +280,7 @@ All settings come from environment variables prefixed `RBACR_`:
 |----------|----------|---------|
 | `RBACR_DYNAMODB_TABLE` | yes | The DynamoDB table holding all data (`rbacr`, `rbacr-rc`; `infra/tables.yaml`) |
 | `RBACR_DYNAMODB_ENDPOINT` | no | DynamoDB Local's URL for development (e.g. `http://127.0.0.1:8642`); the app creates its table there. Unset in AWS. |
-| `RBACR_ROOT_LIST` | no (no roots if empty) | Root addresses and domains (R1) |
+| `RBACR_ROOT_LIST` | no (no roots if empty; in AWS the default is `@nu01.com`) | Root addresses and domains (R1, R1a) |
 | `RBACR_GOOGLE_CLIENT_ID`, `RBACR_GOOGLE_CLIENT_SECRET` | for Google sign-in | OAuth web client. Without them `/login/google` returns 503. |
 | `RBACR_PUBLIC_ORIGIN` | no | Origin for the Google redirect URI (`<origin>/login/google/callback`); default: the request's origin |
 | `RBACR_ORIGIN_SECRET` | no | Required value of the `x-rbacr-origin-secret` header (H1) |

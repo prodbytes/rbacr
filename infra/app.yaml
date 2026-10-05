@@ -31,8 +31,12 @@ Parameters:
     Description: The release version, reported by /health
   RootList:
     Type: String
-    Default: ''
-    Description: RBACR_ROOT_LIST, comma-separated addresses and/or domains
+    Default: '@nu01.com'
+    AllowedPattern: '[A-Za-z0-9._%+@, -]*'
+    Description: >
+      RBACR_ROOT_LIST, comma-separated addresses and/or domains (@example.com
+      or example.com) whose identities are roots. The only source of the root
+      role.
   GoogleClientId:
     Type: String
     Description: RBACR_GOOGLE_CLIENT_ID, the Google OAuth web client

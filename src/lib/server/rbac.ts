@@ -263,10 +263,14 @@ export class Rbac {
 		return { email, root, adminOf };
 	}
 
-	/** The grants (system and global) to an identity's address and domain. */
+	/**
+	 * The grants (system and global) to an identity's address and domain.
+	 * `root` comes only from the root allow list (R1), so a grant naming it,
+	 * which no write path accepts, is ignored even if one were in the table.
+	 */
 	private async grantItemsOf(email: string): Promise<Item[]> {
 		const pages = await Promise.all(granteesFor(email).map((g) => queryIndex(this.table, `GRANTEE#${g}`)));
-		return pages.flat();
+		return pages.flat().filter((it) => it.role !== ROOT_ROLE);
 	}
 
 	/**
