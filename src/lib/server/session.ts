@@ -1,4 +1,5 @@
-import type { Db } from './db';
+import { DeleteCommand, GetCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
+import { TTL_ATTRIBUTE, type Table } from './dynamo';
 
 export const SESSION_COOKIE = 'rbacr_session';
 export const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
@@ -13,42 +14,51 @@ export async function hashToken(token: string): Promise<string> {
 	return Buffer.from(digest).toString('hex');
 }
 
+/** A session item: PK `SESSION#<sha256>`; DynamoDB's TTL removes it some time after expiry. */
+const sessionKey = (hash: string) => ({ PK: `SESSION#${hash}`, SK: 'META' });
+
 export class Sessions {
 	constructor(
-		private readonly db: Db,
+		private readonly table: Table,
 		private readonly now: () => Date = () => new Date()
 	) {}
 
 	async create(email: string): Promise<{ token: string; expiresAt: Date }> {
 		const token = randomToken();
-		const expiresAt = new Date(this.now().getTime() + SESSION_TTL_MS);
-		await this.db.query('INSERT INTO sessions (token_hash, email, expires_at) VALUES ($1, $2, $3)', [
-			await hashToken(token),
-			email,
-			expiresAt
-		]);
+		const now = this.now();
+		const expiresAt = new Date(now.getTime() + SESSION_TTL_MS);
+		await this.table.doc.send(
+			new PutCommand({
+				TableName: this.table.name,
+				Item: {
+					...sessionKey(await hashToken(token)),
+					email,
+					createdAt: now.toISOString(),
+					expiresAt: expiresAt.toISOString(),
+					[TTL_ATTRIBUTE]: Math.ceil(expiresAt.getTime() / 1000)
+				}
+			})
+		);
 		return { token, expiresAt };
 	}
 
 	/** Returns the session's e-mail, or null when the token is unknown or expired. */
 	async validate(token: string): Promise<string | null> {
-		const [row] = await this.db.query<{ email: string; expires_at: Date }>(
-			'SELECT email, expires_at FROM sessions WHERE token_hash = $1',
-			[await hashToken(token)]
+		const { Item } = await this.table.doc.send(
+			new GetCommand({ TableName: this.table.name, Key: sessionKey(await hashToken(token)) })
 		);
-		if (!row) return null;
-		if (new Date(row.expires_at) <= this.now()) {
+		if (!Item) return null;
+		// TTL deletion lags, so expiry is always checked here.
+		if (new Date(Item.expiresAt as string) <= this.now()) {
 			await this.delete(token);
 			return null;
 		}
-		return row.email;
+		return Item.email as string;
 	}
 
 	async delete(token: string): Promise<void> {
-		await this.db.query('DELETE FROM sessions WHERE token_hash = $1', [await hashToken(token)]);
-	}
-
-	async purgeExpired(): Promise<void> {
-		await this.db.query('DELETE FROM sessions WHERE expires_at <= $1', [this.now()]);
+		await this.table.doc.send(
+			new DeleteCommand({ TableName: this.table.name, Key: sessionKey(await hashToken(token)) })
+		);
 	}
 }

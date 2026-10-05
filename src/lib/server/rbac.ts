@@ -1,4 +1,5 @@
-import type { Db } from './db';
+import { DeleteCommand, GetCommand, PutCommand, TransactWriteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { cancellationReasons, deleteAll, queryAll, queryIndex, queryPrefix, type Item, type Table } from './dynamo';
 import { Allowlist, granteesFor, isDomainGrantee, normalizeEmail, parseGrantee } from './identity';
 
 /** The per-system role that lets an identity manage that system's grants and vouchers. */
@@ -141,58 +142,114 @@ export function normalizeVoucherCode(raw: string): string {
 	return chars.match(/.{1,4}/g)?.join('-') ?? '';
 }
 
-type GrantRow = {
-	system_id: string | null;
-	role: string;
-	grantee: string;
-	granted_by: string;
-	granted_at: Date;
-	voucher_code: string | null;
-};
+/**
+ * Item layout in the table (src/lib/server/dynamo.ts). Dates are ISO strings;
+ * an absent attribute means null.
+ *
+ *   system      PK SYS#<id>       SK META                      GSI1 SYSTEMS / <id>
+ *   role        PK SYS#<id>       SK ROLE#<name>               GSI1 ROLENAME#<name> / <id>
+ *   implication PK SYS#<id>       SK IMPL#<role>#<implied>
+ *   grant       PK SYS#<id>       SK GRANT#<role>#<grantee>    GSI1 GRANTEE#<grantee> / SYS#<id>#<role>
+ *   global grant PK GLOBAL        SK GRANT#<role>#<grantee>    GSI1 GRANTEE#<grantee> / GLOBAL#<role>
+ *   voucher     PK VOUCHER#<code> SK META                      GSI1 VOUCHERS#<id, or * if global> / <createdAt>#<code>
+ *   redemption  PK VOUCHER#<code> SK REDEEMED#<email>
+ *
+ * Names and grantees can't contain '#', so the keys are unambiguous and sort
+ * by role, then grantee.
+ */
+const sysPK = (id: string) => `SYS#${id}`;
+const GLOBAL_PK = 'GLOBAL';
+const GLOBAL_VOUCHERS = '*';
+const roleKey = (systemId: string, role: string) => ({ PK: sysPK(systemId), SK: `ROLE#${role}` });
+const grantKey = (systemId: string | null, role: string, grantee: string) => ({
+	PK: systemId === null ? GLOBAL_PK : sysPK(systemId),
+	SK: `GRANT#${role}#${grantee}`
+});
+const voucherKey = (code: string) => ({ PK: `VOUCHER#${code}`, SK: 'META' });
+const iso = (d: Date | null | undefined) => (d ? d.toISOString() : undefined);
+const date = (v: unknown) => (v ? new Date(v as string) : null);
 
-type VoucherRow = {
-	code: string;
-	system_id: string | null;
-	role: string;
-	discount_percent: number;
-	starts_at: Date | null;
-	ends_at: Date | null;
-	max_uses: number | null;
-	uses: number;
-	created_by: string;
-	created_at: Date;
-	disabled_at: Date | null;
-};
+/** Most implied roles one role may list (a transaction holds at most 100 items). */
+const MAX_IMPLIES = 30;
+/** Most roles a new system may define at once (same limit). */
+const MAX_INITIAL_ROLES = 90;
 
-const toGrant = (r: GrantRow): Grant => ({
-	systemId: r.system_id,
-	role: r.role,
-	grantee: r.grantee,
-	grantedBy: r.granted_by,
-	grantedAt: new Date(r.granted_at),
-	voucherCode: r.voucher_code
+const grantItem = (systemId: string | null, role: string, grantee: string, grantedBy: string, now: Date, voucherCode?: string): Item => ({
+	...grantKey(systemId, role, grantee),
+	GSI1PK: `GRANTEE#${grantee}`,
+	GSI1SK: systemId === null ? `GLOBAL#${role}` : `SYS#${systemId}#${role}`,
+	systemId: systemId ?? undefined,
+	role,
+	grantee,
+	grantedBy,
+	grantedAt: now.toISOString(),
+	voucherCode
 });
 
-const toVoucher = (r: VoucherRow): Voucher => ({
-	code: r.code,
-	systemId: r.system_id,
-	role: r.role,
-	discountPercent: r.discount_percent,
-	startsAt: r.starts_at && new Date(r.starts_at),
-	endsAt: r.ends_at && new Date(r.ends_at),
-	maxUses: r.max_uses,
-	uses: r.uses,
-	createdBy: r.created_by,
-	createdAt: new Date(r.created_at),
-	disabledAt: r.disabled_at && new Date(r.disabled_at)
+const toGrant = (it: Item): Grant => ({
+	systemId: (it.systemId as string | undefined) ?? null,
+	role: it.role as string,
+	grantee: it.grantee as string,
+	grantedBy: it.grantedBy as string,
+	grantedAt: new Date(it.grantedAt as string),
+	voucherCode: (it.voucherCode as string | undefined) ?? null
 });
+
+const toVoucher = (it: Item): Voucher => ({
+	code: it.code as string,
+	systemId: (it.systemId as string | undefined) ?? null,
+	role: it.role as string,
+	discountPercent: it.discountPercent as number,
+	startsAt: date(it.startsAt),
+	endsAt: date(it.endsAt),
+	maxUses: (it.maxUses as number | undefined) ?? null,
+	uses: it.uses as number,
+	createdBy: it.createdBy as string,
+	createdAt: new Date(it.createdAt as string),
+	disabledAt: date(it.disabledAt)
+});
+
+/** Every role reachable from `held` through `edges` (role -> implied roles), `held` included. */
+function closure(held: Iterable<string>, edges: Map<string, string[]>): Set<string> {
+	const out = new Set<string>();
+	const stack = [...held];
+	while (stack.length) {
+		const r = stack.pop()!;
+		if (out.has(r)) continue;
+		out.add(r);
+		stack.push(...(edges.get(r) ?? []));
+	}
+	return out;
+}
 
 export class Rbac {
 	constructor(
-		private readonly db: Db,
+		private readonly table: Table,
 		private readonly roots: Allowlist,
 		private readonly now: () => Date = () => new Date()
 	) {}
+
+	private get(key: Item): Promise<Item | undefined> {
+		return this.table.doc
+			.send(new GetCommand({ TableName: this.table.name, Key: key, ConsistentRead: true }))
+			.then((r) => r.Item);
+	}
+
+	private put(item: Item, condition = 'attribute_not_exists(PK)') {
+		return this.table.doc.send(new PutCommand({ TableName: this.table.name, Item: item, ConditionExpression: condition }));
+	}
+
+	/** Runs a TransactWrite; on cancellation returns the reason codes instead of throwing. */
+	private async transact(items: NonNullable<ConstructorParameters<typeof TransactWriteCommand>[0]['TransactItems']>): Promise<string[] | null> {
+		try {
+			await this.table.doc.send(new TransactWriteCommand({ TransactItems: items }));
+			return null;
+		} catch (err) {
+			const reasons = cancellationReasons(err);
+			if (!reasons) throw err;
+			return reasons;
+		}
+	}
 
 	isRoot(email: string): boolean {
 		return this.roots.includes(email);
@@ -206,17 +263,20 @@ export class Rbac {
 		return { email, root, adminOf };
 	}
 
+	/** The grants (system and global) to an identity's address and domain. */
+	private async grantItemsOf(email: string): Promise<Item[]> {
+		const pages = await Promise.all(granteesFor(email).map((g) => queryIndex(this.table, `GRANTEE#${g}`)));
+		return pages.flat();
+	}
+
 	/**
 	 * System-independent roles: ["root"] for identities on the root list,
 	 * otherwise the roles of their (and their domain's) global grants.
 	 */
 	async globalRolesOf(email: string): Promise<string[]> {
 		if (this.isRoot(email)) return [ROOT_ROLE];
-		const rows = await this.db.query<{ role: string }>(
-			'SELECT DISTINCT role FROM global_grants WHERE grantee = ANY($1) ORDER BY role',
-			[granteesFor(email)]
-		);
-		return rows.map((r) => r.role);
+		const items = await this.grantItemsOf(email);
+		return [...new Set(items.filter((it) => it.PK === GLOBAL_PK).map((it) => it.role as string))].sort();
 	}
 
 	/**
@@ -232,44 +292,58 @@ export class Rbac {
 	private async grantedRoles(email: string): Promise<RoleMap> {
 		// Direct grants, plus global grants in every system whose catalog has the
 		// role, then everything those roles imply in their system (transitively).
-		const rows = await this.db.query<{ system_id: string; role: string }>(
-			`WITH RECURSIVE held (system_id, role) AS (
-				SELECT * FROM (
-					SELECT system_id, role FROM grants WHERE grantee = ANY($1)
-					UNION
-					SELECT r.system_id, r.name FROM global_grants g JOIN roles r ON r.name = g.role
-					WHERE g.grantee = ANY($1)
-				) direct
-				UNION
-				SELECT i.system_id, i.implies FROM held h
-				JOIN role_implications i ON i.system_id = h.system_id AND i.role = h.role
-			 )
-			 SELECT system_id, role FROM held ORDER BY system_id, role`,
-			[granteesFor(email)]
-		);
+		const held = new Map<string, Set<string>>();
+		const add = (systemId: string, role: string) => {
+			if (!held.has(systemId)) held.set(systemId, new Set());
+			held.get(systemId)!.add(role);
+		};
+		const items = await this.grantItemsOf(email);
+		const globalRoles = new Set<string>();
+		for (const it of items) {
+			if (it.PK === GLOBAL_PK) globalRoles.add(it.role as string);
+			else add(it.systemId as string, it.role as string);
+		}
+		const defining = await Promise.all([...globalRoles].map((r) => queryIndex(this.table, `ROLENAME#${r}`)));
+		for (const roles of defining) for (const it of roles) add(it.systemId as string, it.name as string);
 		const map: RoleMap = {};
-		for (const r of rows) (map[r.system_id] ??= []).push(r.role);
+		for (const systemId of [...held.keys()].sort()) {
+			const edges = new Map<string, string[]>();
+			for (const it of await queryPrefix(this.table, sysPK(systemId), 'IMPL#')) {
+				edges.set(it.role as string, [...(edges.get(it.role as string) ?? []), it.implies as string]);
+			}
+			map[systemId] = [...closure(held.get(systemId)!, edges)].sort();
+		}
 		return map;
 	}
 
 	// --- systems & role catalog -------------------------------------------
 
+	/** A system's catalog items: its META, roles and implications (not its grants). */
+	private catalogItems(systemId: string): Promise<Item[]> {
+		// Sort keys: GRANT# < IMPL# < META < ROLE#.
+		return queryAll(this.table, {
+			KeyConditionExpression: 'PK = :pk AND SK >= :from',
+			ExpressionAttributeValues: { ':pk': sysPK(systemId), ':from': 'IMPL#' },
+			ConsistentRead: true
+		});
+	}
+
+	private async loadSystem(systemId: string): Promise<(System & { implVersion: number }) | null> {
+		const items = await this.catalogItems(systemId);
+		const meta = items.find((it) => it.SK === 'META');
+		if (!meta) return null;
+		const implies: Record<string, string[]> = {};
+		for (const it of items.filter((it) => (it.SK as string).startsWith('IMPL#'))) {
+			(implies[it.role as string] ??= []).push(it.implies as string);
+		}
+		const roles = items.filter((it) => (it.SK as string).startsWith('ROLE#')).map((it) => it.name as string);
+		return { id: systemId, name: meta.name as string, roles, implies, implVersion: (meta.implVersion as number) ?? 0 };
+	}
+
 	private async allSystems(ids?: string[]): Promise<System[]> {
-		const rows = await this.db.query<{ id: string; name: string; roles: string[] | null }>(
-			`SELECT s.id, s.name, array_remove(array_agg(r.name ORDER BY r.name), NULL) AS roles
-			 FROM systems s LEFT JOIN roles r ON r.system_id = s.id
-			 WHERE $1::text[] IS NULL OR s.id = ANY($1)
-			 GROUP BY s.id, s.name ORDER BY s.id`,
-			[ids ?? null]
-		);
-		const edges = await this.db.query<{ system_id: string; role: string; implies: string }>(
-			`SELECT system_id, role, implies FROM role_implications
-			 WHERE $1::text[] IS NULL OR system_id = ANY($1) ORDER BY system_id, role, implies`,
-			[ids ?? null]
-		);
-		const implies: Record<string, Record<string, string[]>> = {};
-		for (const e of edges) ((implies[e.system_id] ??= {})[e.role] ??= []).push(e.implies);
-		return rows.map((r) => ({ id: r.id, name: r.name, roles: r.roles ?? [], implies: implies[r.id] ?? {} }));
+		const wanted = ids ?? (await queryIndex(this.table, 'SYSTEMS')).map((it) => it.id as string);
+		const systems = await Promise.all([...new Set(wanted)].sort().map((id) => this.loadSystem(id)));
+		return systems.filter((s) => s !== null).map(({ implVersion: _, ...s }) => s);
 	}
 
 	/** Systems the actor can manage: all for roots, administered ones for admins. */
@@ -291,45 +365,101 @@ export class Rbac {
 		const id = validName('system id', input.id);
 		const name = input.name?.trim() || id;
 		const roles = new Set([ADMIN_ROLE, ...(input.roles ?? []).map((r) => validName('role', r))]);
-		return this.db.transaction(async (tx) => {
-			const inserted = await tx.query(
-				'INSERT INTO systems (id, name, created_by) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING RETURNING id',
-				[id, name, actor.email]
-			);
-			if (!inserted.length) throw new RbacError(409, `System "${id}" already exists`);
-			for (const role of roles) {
-				await tx.query('INSERT INTO roles (system_id, name) VALUES ($1, $2)', [id, role]);
-			}
-			return { id, name, roles: [...roles].sort(), implies: {} };
-		});
+		if (roles.size > MAX_INITIAL_ROLES) throw badRequest(`Create at most ${MAX_INITIAL_ROLES} roles at once`);
+		const now = this.now().toISOString();
+		const reasons = await this.transact([
+			{
+				Put: {
+					TableName: this.table.name,
+					Item: { PK: sysPK(id), SK: 'META', GSI1PK: 'SYSTEMS', GSI1SK: id, id, name, createdBy: actor.email, createdAt: now },
+					ConditionExpression: 'attribute_not_exists(PK)'
+				}
+			},
+			...[...roles].map((role) => ({
+				Put: {
+					TableName: this.table.name,
+					Item: { ...roleKey(id, role), GSI1PK: `ROLENAME#${role}`, GSI1SK: id, systemId: id, name: role, createdAt: now }
+				}
+			}))
+		]);
+		if (reasons) throw new RbacError(409, `System "${id}" already exists`);
+		return { id, name, roles: [...roles].sort(), implies: {} };
 	}
 
 	async deleteSystem(actor: Actor, systemId: string): Promise<void> {
 		if (!actor.root) throw forbidden('Only roots can delete systems');
-		const rows = await this.db.query('DELETE FROM systems WHERE id = $1 RETURNING id', [systemId]);
-		if (!rows.length) throw notFound(`System "${systemId}" not found`);
+		const meta = await this.get({ PK: sysPK(systemId), SK: 'META' });
+		if (!meta) throw notFound(`System "${systemId}" not found`);
+		// Not atomic: everything else goes first, so a failure leaves the
+		// system listed and the delete can be retried.
+		const items = await queryAll(this.table, {
+			KeyConditionExpression: 'PK = :pk',
+			ExpressionAttributeValues: { ':pk': sysPK(systemId) }
+		});
+		await this.deleteVouchers(await queryIndex(this.table, `VOUCHERS#${systemId}`));
+		await deleteAll(this.table, items.filter((it) => it.SK !== 'META'));
+		await deleteAll(this.table, [meta]);
+	}
+
+	/** Deletes vouchers with their redemptions. */
+	private async deleteVouchers(vouchers: Item[]): Promise<void> {
+		for (const v of vouchers) {
+			const items = await queryAll(this.table, {
+				KeyConditionExpression: 'PK = :pk',
+				ExpressionAttributeValues: { ':pk': v.PK }
+			});
+			await deleteAll(this.table, items);
+		}
 	}
 
 	async addRole(actor: Actor, systemId: string, rawRole: string): Promise<void> {
 		if (!actor.root) throw forbidden('Only roots can define roles');
 		const role = validName('role', rawRole);
 		await this.getSystem(actor, systemId);
-		const rows = await this.db.query(
-			'INSERT INTO roles (system_id, name) VALUES ($1, $2) ON CONFLICT DO NOTHING RETURNING name',
-			[systemId, role]
-		);
-		if (!rows.length) throw new RbacError(409, `Role "${role}" already exists`);
+		const reasons = await this.transact([
+			{
+				ConditionCheck: {
+					TableName: this.table.name,
+					Key: { PK: sysPK(systemId), SK: 'META' },
+					ConditionExpression: 'attribute_exists(PK)'
+				}
+			},
+			{
+				Put: {
+					TableName: this.table.name,
+					Item: {
+						...roleKey(systemId, role),
+						GSI1PK: `ROLENAME#${role}`,
+						GSI1SK: systemId,
+						systemId,
+						name: role,
+						createdAt: this.now().toISOString()
+					},
+					ConditionExpression: 'attribute_not_exists(PK)'
+				}
+			}
+		]);
+		if (reasons?.[0] === 'ConditionalCheckFailed') throw notFound(`System "${systemId}" not found`);
+		if (reasons) throw new RbacError(409, `Role "${role}" already exists`);
 	}
 
-	/** Removes a role from the catalog, along with its grants and vouchers. */
+	/** Removes a role from the catalog, along with its grants, implications and vouchers. */
 	async removeRole(actor: Actor, systemId: string, role: string): Promise<void> {
 		if (!actor.root) throw forbidden('Only roots can remove roles');
 		if (role === ADMIN_ROLE) throw badRequest('The admin role cannot be removed');
-		const rows = await this.db.query(
-			'DELETE FROM roles WHERE system_id = $1 AND name = $2 RETURNING name',
-			[systemId, role]
+		const { Attributes } = await this.table.doc.send(
+			new DeleteCommand({ TableName: this.table.name, Key: roleKey(systemId, role), ReturnValues: 'ALL_OLD' })
 		);
-		if (!rows.length) throw notFound(`Role "${role}" not found in "${systemId}"`);
+		if (!Attributes) throw notFound(`Role "${role}" not found in "${systemId}"`);
+		// The role is gone first, so nothing new can be granted or implied
+		// with it (those writes check it exists) while the rest is cleaned up.
+		const grants = await queryPrefix(this.table, sysPK(systemId), `GRANT#${role}#`);
+		const implications = (await queryPrefix(this.table, sysPK(systemId), 'IMPL#')).filter(
+			(it) => it.role === role || it.implies === role
+		);
+		await deleteAll(this.table, [...grants, ...implications]);
+		const vouchers = (await queryIndex(this.table, `VOUCHERS#${systemId}`)).filter((it) => it.role === role);
+		await this.deleteVouchers(vouchers);
 	}
 
 	/**
@@ -341,58 +471,94 @@ export class Rbac {
 		if (!actor.root) throw forbidden('Only roots can change role implications');
 		const role = rawRole.trim().toLowerCase();
 		const implies = [...new Set(rawImplies.map((r) => r.trim().toLowerCase()))].sort();
-		await this.db.transaction(async (tx) => {
-			// Lock the system so concurrent edits can't combine into a cycle.
-			const locked = await tx.query('SELECT 1 FROM systems WHERE id = $1 FOR UPDATE', [systemId]);
-			if (!locked.length) throw notFound(`System "${systemId}" not found`);
-			await this.requireRole(tx, systemId, role);
-			for (const r of implies) {
-				if (r === role) throw badRequest(`A role cannot imply itself`);
-				if (r === ADMIN_ROLE) throw badRequest(`No role can imply the ${ADMIN_ROLE} role`);
-				await this.requireRole(tx, systemId, r);
-			}
-			const edges = await tx.query<{ role: string; implies: string }>(
-				'SELECT role, implies FROM role_implications WHERE system_id = $1 AND role <> $2',
-				[systemId, role]
-			);
-			const graph = new Map<string, string[]>([[role, implies]]);
-			for (const e of edges) graph.set(e.role, [...(graph.get(e.role) ?? []), e.implies]);
-			// A cycle through `role` exists if `role` is reachable from what it implies.
-			const seen = new Set<string>();
-			const stack = [...implies];
-			while (stack.length) {
-				const r = stack.pop()!;
-				if (r === role) throw badRequest(`"${role}" would end up implying itself`);
-				if (seen.has(r)) continue;
-				seen.add(r);
-				stack.push(...(graph.get(r) ?? []));
-			}
-			await tx.query('DELETE FROM role_implications WHERE system_id = $1 AND role = $2', [systemId, role]);
-			for (const r of implies) {
-				await tx.query('INSERT INTO role_implications (system_id, role, implies) VALUES ($1, $2, $3)', [
-					systemId,
-					role,
-					r
-				]);
-			}
-		});
+		if (implies.length > MAX_IMPLIES) throw badRequest(`A role can imply at most ${MAX_IMPLIES} roles directly`);
+		const system = await this.loadSystem(systemId);
+		if (!system) throw notFound(`System "${systemId}" not found`);
+		const requireRole = (r: string) => {
+			if (!system.roles.includes(r)) throw notFound(`Role "${r}" not found in "${systemId}"`);
+		};
+		requireRole(role);
+		for (const r of implies) {
+			if (r === role) throw badRequest(`A role cannot imply itself`);
+			if (r === ADMIN_ROLE) throw badRequest(`No role can imply the ${ADMIN_ROLE} role`);
+			requireRole(r);
+		}
+		// A cycle through `role` exists if `role` is reachable from what it implies.
+		const edges = new Map(Object.entries(system.implies));
+		edges.set(role, implies);
+		const reachable = closure(implies.flatMap((r) => edges.get(r) ?? []).concat(implies), edges);
+		if (reachable.has(role)) throw badRequest(`"${role}" would end up implying itself`);
+		const previous = system.implies[role] ?? [];
+		// The META version guards against concurrent edits combining into a
+		// cycle; the role checks against concurrent removal.
+		const reasons = await this.transact([
+			{
+				Update: {
+					TableName: this.table.name,
+					Key: { PK: sysPK(systemId), SK: 'META' },
+					UpdateExpression: 'SET implVersion = :next',
+					ConditionExpression: system.implVersion
+						? 'implVersion = :cur'
+						: 'attribute_exists(PK) AND attribute_not_exists(implVersion)',
+					ExpressionAttributeValues: {
+						':next': system.implVersion + 1,
+						...(system.implVersion && { ':cur': system.implVersion })
+					}
+				}
+			},
+			...[...new Set([role, ...implies])].map((r) => ({
+				ConditionCheck: { TableName: this.table.name, Key: roleKey(systemId, r), ConditionExpression: 'attribute_exists(PK)' }
+			})),
+			...previous
+				.filter((r) => !implies.includes(r))
+				.map((r) => ({ Delete: { TableName: this.table.name, Key: { PK: sysPK(systemId), SK: `IMPL#${role}#${r}` } } })),
+			...implies
+				.filter((r) => !previous.includes(r))
+				.map((r) => ({
+					Put: {
+						TableName: this.table.name,
+						Item: { PK: sysPK(systemId), SK: `IMPL#${role}#${r}`, systemId, role, implies: r }
+					}
+				}))
+		]);
+		if (reasons) throw new RbacError(409, 'The role catalog changed meanwhile; try again');
 		return this.getSystem(actor, systemId);
-	}
-
-	private async requireRole(db: Db, systemId: string, role: string): Promise<void> {
-		const rows = await db.query('SELECT 1 FROM roles WHERE system_id = $1 AND name = $2', [systemId, role]);
-		if (!rows.length) throw notFound(`Role "${role}" not found in "${systemId}"`);
 	}
 
 	// --- grants -------------------------------------------------------------
 
 	async listGrants(actor: Actor, systemId: string): Promise<Grant[]> {
 		await this.getSystem(actor, systemId);
-		const rows = await this.db.query<GrantRow>(
-			'SELECT * FROM grants WHERE system_id = $1 ORDER BY role, grantee',
-			[systemId]
-		);
-		return rows.map(toGrant);
+		return (await queryPrefix(this.table, sysPK(systemId), 'GRANT#')).map(toGrant);
+	}
+
+	/**
+	 * Writes a grant unless it exists (re-granting is idempotent and keeps the
+	 * original), checking the role is in the catalog for system grants.
+	 */
+	private async putGrant(item: Item): Promise<Grant> {
+		const systemId = (item.systemId as string | undefined) ?? null;
+		const reasons = await this.transact([
+			...(systemId === null
+				? []
+				: [
+						{
+							ConditionCheck: {
+								TableName: this.table.name,
+								Key: roleKey(systemId, item.role as string),
+								ConditionExpression: 'attribute_exists(PK)'
+							}
+						}
+					]),
+			{ Put: { TableName: this.table.name, Item: item, ConditionExpression: 'attribute_not_exists(PK)' } }
+		]);
+		if (!reasons) return toGrant(item);
+		if (systemId !== null && reasons[0] === 'ConditionalCheckFailed') {
+			throw notFound(`Role "${item.role}" not found in "${systemId}"`);
+		}
+		const existing = await this.get({ PK: item.PK, SK: item.SK });
+		if (!existing) throw new RbacError(409, 'The grant changed meanwhile; try again');
+		return toGrant(existing);
 	}
 
 	async grant(actor: Actor, systemId: string, role: string, rawGrantee: string): Promise<Grant> {
@@ -407,14 +573,14 @@ export class Rbac {
 						: 'Forbidden'
 			);
 		}
-		await this.requireRole(this.db, systemId, role);
-		const [row] = await this.db.query<GrantRow>(
-			`INSERT INTO grants (system_id, role, grantee, granted_by) VALUES ($1, $2, $3, $4)
-			 ON CONFLICT (system_id, role, grantee) DO UPDATE SET system_id = EXCLUDED.system_id
-			 RETURNING *`,
-			[systemId, role, grantee, actor.email]
+		return this.putGrant(grantItem(systemId, role, grantee, actor.email, this.now()));
+	}
+
+	private async deleteGrant(systemId: string | null, role: string, grantee: string): Promise<void> {
+		const { Attributes } = await this.table.doc.send(
+			new DeleteCommand({ TableName: this.table.name, Key: grantKey(systemId, role, grantee), ReturnValues: 'ALL_OLD' })
 		);
-		return toGrant(row);
+		if (!Attributes) throw notFound('Grant not found');
 	}
 
 	async revoke(actor: Actor, systemId: string, role: string, rawGrantee: string): Promise<void> {
@@ -423,21 +589,14 @@ export class Rbac {
 		if (!canAssign(actor, systemId, role, grantee)) {
 			throw forbidden(role === ADMIN_ROLE ? 'Only roots can revoke the admin role' : 'Forbidden');
 		}
-		const rows = await this.db.query(
-			'DELETE FROM grants WHERE system_id = $1 AND role = $2 AND grantee = $3 RETURNING role',
-			[systemId, role, grantee]
-		);
-		if (!rows.length) throw notFound('Grant not found');
+		await this.deleteGrant(systemId, role, grantee);
 	}
 
 	// --- global grants (roots only) -----------------------------------------
 
 	async listGlobalGrants(actor: Actor): Promise<Grant[]> {
 		if (!actor.root) throw forbidden('Only roots can see global grants');
-		const rows = await this.db.query<GrantRow>(
-			'SELECT NULL AS system_id, * FROM global_grants ORDER BY role, grantee'
-		);
-		return rows.map(toGrant);
+		return (await queryPrefix(this.table, GLOBAL_PK, 'GRANT#')).map(toGrant);
 	}
 
 	/** Grants `role` in every system that defines it, now or later. */
@@ -446,24 +605,14 @@ export class Rbac {
 		const role = validName('role', rawRole);
 		const grantee = parseGrantee(rawGrantee);
 		if (!grantee) throw badRequest(`Invalid grantee "${rawGrantee}": use an e-mail address or a domain`);
-		const [row] = await this.db.query<GrantRow>(
-			`INSERT INTO global_grants (role, grantee, granted_by) VALUES ($1, $2, $3)
-			 ON CONFLICT (role, grantee) DO UPDATE SET role = EXCLUDED.role
-			 RETURNING NULL AS system_id, *`,
-			[role, grantee, actor.email]
-		);
-		return toGrant(row);
+		return this.putGrant(grantItem(null, role, grantee, actor.email, this.now()));
 	}
 
 	async revokeGlobal(actor: Actor, role: string, rawGrantee: string): Promise<void> {
 		if (!actor.root) throw forbidden('Only roots can revoke global roles');
 		const grantee = parseGrantee(rawGrantee);
 		if (!grantee) throw badRequest(`Invalid grantee "${rawGrantee}"`);
-		const rows = await this.db.query(
-			'DELETE FROM global_grants WHERE role = $1 AND grantee = $2 RETURNING role',
-			[role, grantee]
-		);
-		if (!rows.length) throw notFound('Grant not found');
+		await this.deleteGrant(null, role, grantee);
 	}
 
 	// --- vouchers -------------------------------------------------------------
@@ -494,104 +643,141 @@ export class Rbac {
 		if (maxUses !== null && (!Number.isInteger(maxUses) || maxUses < 1)) {
 			throw badRequest('Usage count must be a positive integer');
 		}
-		if (systemId !== null) await this.requireRole(this.db, systemId, role);
-		const [row] = await this.db.query<VoucherRow>(
-			`INSERT INTO vouchers (code, system_id, role, discount_percent, starts_at, ends_at, max_uses, created_by)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
-			[generateVoucherCode(), systemId, role, discountPercent, startsAt, endsAt, maxUses, actor.email]
-		);
-		return toVoucher(row);
+		const code = generateVoucherCode();
+		const createdAt = this.now().toISOString();
+		const item: Item = {
+			...voucherKey(code),
+			GSI1PK: `VOUCHERS#${systemId ?? GLOBAL_VOUCHERS}`,
+			GSI1SK: `${createdAt}#${code}`,
+			code,
+			systemId: systemId ?? undefined,
+			role,
+			discountPercent,
+			startsAt: iso(startsAt),
+			endsAt: iso(endsAt),
+			maxUses: maxUses ?? undefined,
+			uses: 0,
+			createdBy: actor.email,
+			createdAt
+		};
+		const reasons = await this.transact([
+			...(systemId === null
+				? []
+				: [
+						{
+							ConditionCheck: {
+								TableName: this.table.name,
+								Key: roleKey(systemId, role),
+								ConditionExpression: 'attribute_exists(PK)'
+							}
+						}
+					]),
+			{ Put: { TableName: this.table.name, Item: item, ConditionExpression: 'attribute_not_exists(PK)' } }
+		]);
+		if (reasons && systemId !== null && reasons[0] === 'ConditionalCheckFailed') {
+			throw notFound(`Role "${role}" not found in "${systemId}"`);
+		}
+		if (reasons) throw new RbacError(409, 'Voucher code collision; try again');
+		return toVoucher(item);
 	}
 
-	/** Global vouchers (roots only). */
+	/** Global vouchers (roots only), newest first. */
 	async listGlobalVouchers(actor: Actor): Promise<Voucher[]> {
 		if (!actor.root) throw forbidden('Only roots can see global vouchers');
-		const rows = await this.db.query<VoucherRow>(
-			'SELECT * FROM vouchers WHERE system_id IS NULL ORDER BY created_at DESC'
-		);
-		return rows.map(toVoucher);
+		return (await queryIndex(this.table, `VOUCHERS#${GLOBAL_VOUCHERS}`, { newestFirst: true })).map(toVoucher);
 	}
 
-	/** Vouchers of a system; admins only see the ones they may hand out (non-admin). */
+	/** Vouchers of a system, newest first; admins only see the ones they may hand out (non-admin). */
 	async listVouchers(actor: Actor, systemId: string): Promise<Voucher[]> {
 		await this.getSystem(actor, systemId);
-		const rows = await this.db.query<VoucherRow>(
-			`SELECT * FROM vouchers WHERE system_id = $1 AND ($2 OR role <> $3) ORDER BY created_at DESC`,
-			[systemId, actor.root, ADMIN_ROLE]
-		);
-		return rows.map(toVoucher);
+		const items = await queryIndex(this.table, `VOUCHERS#${systemId}`, { newestFirst: true });
+		return items.filter((it) => actor.root || it.role !== ADMIN_ROLE).map(toVoucher);
 	}
 
 	async disableVoucher(actor: Actor, rawCode: string): Promise<Voucher> {
 		const code = normalizeVoucherCode(rawCode);
-		const [existing] = await this.db.query<VoucherRow>('SELECT * FROM vouchers WHERE code = $1', [code]);
-		if (!existing || !canAssign(actor, existing.system_id, existing.role, null)) {
+		const existing = code ? await this.get(voucherKey(code)) : undefined;
+		if (!existing || !canAssign(actor, (existing.systemId as string | undefined) ?? null, existing.role as string, null)) {
 			throw notFound('Voucher not found');
 		}
-		const [row] = await this.db.query<VoucherRow>(
-			'UPDATE vouchers SET disabled_at = coalesce(disabled_at, $2) WHERE code = $1 RETURNING *',
-			[code, this.now()]
+		const { Attributes } = await this.table.doc.send(
+			new UpdateCommand({
+				TableName: this.table.name,
+				Key: voucherKey(code),
+				UpdateExpression: 'SET disabledAt = if_not_exists(disabledAt, :now)',
+				ConditionExpression: 'attribute_exists(PK)',
+				ExpressionAttributeValues: { ':now': this.now().toISOString() },
+				ReturnValues: 'ALL_NEW'
+			})
 		);
-		return toVoucher(row);
+		return toVoucher(Attributes!);
 	}
 
 	/**
 	 * Redeems a voucher for `email`, granting its role (globally for a global
-	 * voucher). Each identity can redeem a given voucher once; the use counter
-	 * is checked and incremented atomically. A voucher with less than 100%
+	 * voucher). Each identity can redeem a given voucher once; counting the
+	 * use, recording the redemption and granting happen in one transaction
+	 * whose conditions keep uses within maxUses. A voucher with less than 100%
 	 * discount needs payment, which isn't available yet: it fails with 402 and
 	 * the voucher's terms, recording nothing.
 	 */
 	async redeemVoucher(email: string, rawCode: string): Promise<Grant> {
 		const code = normalizeVoucherCode(rawCode);
 		const now = this.now();
-		return this.db.transaction(async (tx) => {
-			const [voucher] = await tx.query<VoucherRow>('SELECT * FROM vouchers WHERE code = $1 FOR UPDATE', [code]);
-			if (!voucher) throw notFound('Voucher not found');
-			const status = voucherStatus(toVoucher(voucher), now);
-			if (status !== 'active') {
-				const reasons: Record<Exclude<VoucherStatus, 'active'>, string> = {
-					disabled: 'This voucher has been disabled',
-					'not-started': 'This voucher is not valid yet',
-					expired: 'This voucher has expired',
-					exhausted: 'This voucher has no uses left'
-				};
-				throw new RbacError(409, reasons[status]);
-			}
-			if (voucher.discount_percent < 100) {
-				throw new RbacError(402, 'This voucher requires payment, which is not available yet', {
-					payment: {
-						code,
-						systemId: voucher.system_id,
-						role: voucher.role,
-						discountPercent: voucher.discount_percent
+		const reasonsByStatus: Record<Exclude<VoucherStatus, 'active'>, string> = {
+			disabled: 'This voucher has been disabled',
+			'not-started': 'This voucher is not valid yet',
+			expired: 'This voucher has expired',
+			exhausted: 'This voucher has no uses left'
+		};
+		const requireActive = (item: Item | undefined): Voucher => {
+			if (!item) throw notFound('Voucher not found');
+			const voucher = toVoucher(item);
+			const status = voucherStatus(voucher, now);
+			if (status !== 'active') throw new RbacError(409, reasonsByStatus[status]);
+			return voucher;
+		};
+		const voucher = requireActive(code ? await this.get(voucherKey(code)) : undefined);
+		if (voucher.discountPercent < 100) {
+			throw new RbacError(402, 'This voucher requires payment, which is not available yet', {
+				payment: { code, systemId: voucher.systemId, role: voucher.role, discountPercent: voucher.discountPercent }
+			});
+		}
+		const grant = grantItem(voucher.systemId, voucher.role, email, voucher.createdBy, now, code);
+		for (let attempt = 0; attempt < 2; attempt++) {
+			const existing = await this.get({ PK: grant.PK, SK: grant.SK });
+			const reasons = await this.transact([
+				{
+					Update: {
+						TableName: this.table.name,
+						Key: voucherKey(code),
+						UpdateExpression: 'SET uses = uses + :one',
+						ConditionExpression:
+							'attribute_exists(PK) AND attribute_not_exists(disabledAt) AND (attribute_not_exists(maxUses) OR uses < maxUses)',
+						ExpressionAttributeValues: { ':one': 1 }
 					}
-				});
+				},
+				{
+					Put: {
+						TableName: this.table.name,
+						Item: { PK: voucherKey(code).PK, SK: `REDEEMED#${email}`, email, redeemedAt: now.toISOString() },
+						ConditionExpression: 'attribute_not_exists(PK)'
+					}
+				},
+				// Re-redeeming a role you already hold keeps the existing grant.
+				...(existing
+					? []
+					: [{ Put: { TableName: this.table.name, Item: grant, ConditionExpression: 'attribute_not_exists(PK)' } }])
+			]);
+			if (!reasons) return toGrant(existing ?? grant);
+			if (reasons[0] === 'ConditionalCheckFailed') {
+				requireActive(await this.get(voucherKey(code)));
+				throw new RbacError(409, 'This voucher has no uses left');
 			}
-			const redeemed = await tx.query(
-				'INSERT INTO voucher_redemptions (code, email) VALUES ($1, $2) ON CONFLICT DO NOTHING RETURNING code',
-				[code, email]
-			);
-			if (!redeemed.length) throw new RbacError(409, 'You have already redeemed this voucher');
-			await tx.query('UPDATE vouchers SET uses = uses + 1 WHERE code = $1', [code]);
-			if (voucher.system_id === null) {
-				const [row] = await tx.query<GrantRow>(
-					`INSERT INTO global_grants (role, grantee, granted_by, voucher_code) VALUES ($1, $2, $3, $4)
-					 ON CONFLICT (role, grantee) DO UPDATE SET role = EXCLUDED.role
-					 RETURNING NULL AS system_id, *`,
-					[voucher.role, email, voucher.created_by, code]
-				);
-				return toGrant(row);
-			}
-			const [row] = await tx.query<GrantRow>(
-				`INSERT INTO grants (system_id, role, grantee, granted_by, voucher_code)
-				 VALUES ($1, $2, $3, $4, $5)
-				 ON CONFLICT (system_id, role, grantee) DO UPDATE SET system_id = EXCLUDED.system_id
-				 RETURNING *`,
-				[voucher.system_id, voucher.role, email, voucher.created_by, code]
-			);
-			return toGrant(row);
-		});
+			if (reasons[1] === 'ConditionalCheckFailed') throw new RbacError(409, 'You have already redeemed this voucher');
+			// Otherwise the grant appeared meanwhile: retry keeping it.
+		}
+		throw new RbacError(409, 'The voucher changed meanwhile; try again');
 	}
 
 	// --- role queries (the external API) -------------------------------------
@@ -628,7 +814,7 @@ export class Rbac {
 		const role = rawRole.trim().toLowerCase();
 		if (systemId === null) return (await this.globalRolesOf(email)).includes(role);
 		await this.requireSystem(systemId);
-		await this.requireRole(this.db, systemId, role);
+		if (!(await this.get(roleKey(systemId, role)))) throw notFound(`Role "${role}" not found in "${systemId}"`);
 		if (this.isRoot(email)) return true;
 		return ((await this.grantedRoles(email))[systemId] ?? []).includes(role);
 	}
@@ -649,7 +835,6 @@ export class Rbac {
 	}
 
 	private async requireSystem(systemId: string): Promise<void> {
-		const rows = await this.db.query('SELECT 1 FROM systems WHERE id = $1', [systemId]);
-		if (!rows.length) throw notFound(`System "${systemId}" not found`);
+		if (!(await this.get({ PK: sysPK(systemId), SK: 'META' }))) throw notFound(`System "${systemId}" not found`);
 	}
 }

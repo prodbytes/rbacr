@@ -5,9 +5,14 @@ const optional = (value: string | undefined) => value || undefined;
 
 /** All configuration is read from RBACR_-prefixed environment variables. */
 export const variables = defineEnvVars({
-	RBACR_DATABASE_URL: {
-		description: 'PostgreSQL connection string, e.g. postgres://user:pass@host:5432/db?sslmode=require',
-		// required, but checked on first use: `vite build` evaluates this file without a database
+	RBACR_DYNAMODB_TABLE: {
+		description: 'The DynamoDB table holding all data (infra/tables.yaml), e.g. rbacr',
+		// required, but checked on first use: `vite build` evaluates this file without one
+		schema: optional
+	},
+	RBACR_DYNAMODB_ENDPOINT: {
+		description:
+			'DynamoDB endpoint override for DynamoDB Local, e.g. http://127.0.0.1:8642. The table is created there if missing. Unset in AWS.',
 		schema: optional
 	},
 	RBACR_ROOT_LIST: {

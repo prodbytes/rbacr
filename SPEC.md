@@ -220,16 +220,15 @@ addresses stay out of URLs and access logs.
 
 - **HC1** `GET /health` reports whether rbacr can serve, with no
   authentication. It is the only JSON endpoint outside `/api` and `/vpi`. It
-  answers `{ ok, version, checks: { database, google } }`, with
-  `Cache-Control: no-store`:
-  - `database`: `ok` when PostgreSQL answers a query within 3 seconds
-    (connecting and migrating first if needed), else `error`;
-  - `google`: `ok` when the Google OAuth client is configured, else
-    `missing`.
+  answers `{ ok, version, checks: { google } }`, with
+  `Cache-Control: no-store`. `google` is `ok` when the Google OAuth client is
+  configured, else `missing`.
 - **HC2** The status is 200 when every required check is `ok`, else 503.
-  Both checks are required, except `google` under `vite dev`, which has the
-  dev login (S4). The response names checks and states only, never error
-  details, which go to the server log.
+  `google` is required, except under `vite dev`, which has the dev login
+  (S4). DynamoDB is deliberately not checked: it is a managed regional
+  service, and probing it on every poll would only add cost. The deploy
+  smoke test exercises it instead (an unknown API token gets 401, not
+  500).
 - **HC3** In AWS, a Route 53 health check polls `https://<domain>/health`
   through CloudFront every 30 seconds from three regions. When it fails, a
   CloudWatch alarm e-mails the stack's `HealthNotificationEmails` (default
@@ -273,7 +272,8 @@ All settings come from environment variables prefixed `RBACR_`:
 
 | Variable | Required | Purpose |
 |----------|----------|---------|
-| `RBACR_DATABASE_URL` | yes | PostgreSQL URL (append `?sslmode=require` for managed databases). In AWS, built from the stage's Aurora cluster and secret |
+| `RBACR_DYNAMODB_TABLE` | yes | The DynamoDB table holding all data (`rbacr`, `rbacr-rc`; `infra/tables.yaml`) |
+| `RBACR_DYNAMODB_ENDPOINT` | no | DynamoDB Local's URL for development (e.g. `http://127.0.0.1:8642`); the app creates its table there. Unset in AWS. |
 | `RBACR_ROOT_LIST` | no (no roots if empty) | Root addresses and domains (R1) |
 | `RBACR_GOOGLE_CLIENT_ID`, `RBACR_GOOGLE_CLIENT_SECRET` | for Google sign-in | OAuth web client. Without them `/login/google` returns 503. |
 | `RBACR_PUBLIC_ORIGIN` | no | Origin for the Google redirect URI (`<origin>/login/google/callback`); default: the request's origin |
@@ -288,19 +288,30 @@ All settings come from environment variables prefixed `RBACR_`:
   fronted by CloudFront ([infra/app.yaml](infra/app.yaml)). The request's
   host comes from the `x-rbacr-host` header (adapter-node's `HOST_HEADER`),
   which CloudFront sets, and the protocol is assumed to be `https`.
-- PostgreSQL 18: Aurora PostgreSQL Serverless v2 in AWS (one cluster per
-  stage, credentials in Secrets Manager), a `postgres:18` container locally
-  ([compose.yaml](compose.yaml)), PGlite in unit tests. Migrations in `src/lib/server/schema.ts` are append-only. They
-  run automatically on the first request of each process, under an advisory
-  lock.
+- DynamoDB: one on-demand table per stage ([infra/tables.yaml](infra/tables.yaml)),
+  DynamoDB Local in development ([compose.yaml](compose.yaml)) and in the
+  unit tests. The item layout is documented in
+  [src/lib/server/rbac.ts](src/lib/server/rbac.ts); it needs no migrations.
+- **D1** Writes that must not race are single DynamoDB transactions with
+  conditions: a grant, voucher or implication checks that its role still
+  exists; redeeming counts the use (within `maxUses`), records the
+  redemption (once per identity) and grants, all or nothing; concurrent
+  implication edits are serialized by a version on the system.
+- **D2** Deleting a role or a system removes its dependent items (grants,
+  implications, vouchers and redemptions) in batches after the role or
+  system's own record, so nothing new can attach meanwhile. It is not
+  atomic: a failed deletion can be retried.
+- **D3** Lookups across partitions (an identity's roles, a person's tokens,
+  a system's vouchers) use a secondary index, which is eventually
+  consistent: a change can take up to about a second to show there.
 
 ## Tests
 
 | Suite | Command | Covers |
 |-------|---------|--------|
-| Unit and domain | `npx vitest --run` | Identity parsing, the R*, P*, V* and T* rules against in-process Postgres (PGlite), the A3 guard, sessions, Google OAuth exchange |
+| Unit and domain | `npx vitest --run` | Identity parsing, the R*, P*, V*, T* and D* rules against DynamoDB Local (a Docker container started by the test setup, or `RBACR_TEST_DYNAMODB_ENDPOINT`), the A3 guard, sessions, Google OAuth exchange |
 | Lambda smoke | `npm run test:lambda` | The production build invoked through `lambda.js` with function URL (v2) events: H1, H2, A1 and A3, the version, redirects, 401s, static assets. `scripts/package-lambda.sh` reruns it against the deployable bundle. |
-| End-to-end | `npm run test:e2e` | `/api` with personal tokens, `/vpi` as the frontend, the A1/A3 separation, and the pages, against a running dev server with real Postgres, directly or through Floci over HTTPS |
-| Live | `scripts/deploy.sh` (last step) | The deployed site: version, sign-in page, 401, 404 for `/login/dev`, 403 for the bare function URL |
+| End-to-end | `npm run test:e2e` | `/api` with personal tokens, `/vpi` as the frontend, the A1/A3 separation, and the pages, against a running dev server with DynamoDB Local, directly or through Floci over HTTPS |
+| Live | `scripts/deploy.sh` (last step) | The deployed site: version, sign-in page, 401 (also for an unknown token, which reads DynamoDB), 404 for `/login/dev`, 403 for the bare function URL |
 
 `npm test` runs the first two.

@@ -4,8 +4,8 @@ Description: >
   A production role that only *GA tag runs can assume, and a
   release-candidate role for *RC* tag runs and manual runs from main,
   limited to the rbacr-rc stacks and the rc.rbacr.nu01.com records. Both may
-  only create Lambda roles bounded by rbacr-lambda-boundary (write logs,
-  nothing else). Deployed once, by hand (infra/README.md).
+  only create Lambda roles bounded by rbacr-lambda-boundary (write logs and
+  use the rbacr tables, nothing else). Deployed once, by hand (infra/README.md).
 
 Parameters:
   GitHubRepository:
@@ -46,7 +46,7 @@ Resources:
     Type: AWS::IAM::ManagedPolicy
     Properties:
       ManagedPolicyName: rbacr-lambda-boundary
-      Description: Permissions boundary for the rbacr Lambda roles (infra/app.yaml); logs and VPC network interfaces
+      Description: Permissions boundary for the rbacr Lambda roles (infra/app.yaml); logs and the rbacr tables
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -55,16 +55,21 @@ Resources:
               - logs:CreateLogStream
               - logs:PutLogEvents
             Resource: !Sub arn:${AWS::Partition}:logs:*:${AWS::AccountId}:log-group:/aws/lambda/rbacr*
-          # Network interfaces for the function in its VPC.
+          # The stages' DynamoDB tables (infra/tables.yaml) and their indexes.
           - Effect: Allow
             Action:
-              - ec2:CreateNetworkInterface
-              - ec2:DescribeNetworkInterfaces
-              - ec2:DescribeSubnets
-              - ec2:DeleteNetworkInterface
-              - ec2:AssignPrivateIpAddresses
-              - ec2:UnassignPrivateIpAddresses
-            Resource: '*'
+              - dynamodb:GetItem
+              - dynamodb:PutItem
+              - dynamodb:UpdateItem
+              - dynamodb:DeleteItem
+              - dynamodb:Query
+              - dynamodb:BatchWriteItem
+              - dynamodb:ConditionCheckItem
+            Resource:
+              - !Sub arn:${AWS::Partition}:dynamodb:*:${AWS::AccountId}:table/rbacr
+              - !Sub arn:${AWS::Partition}:dynamodb:*:${AWS::AccountId}:table/rbacr/index/*
+              - !Sub arn:${AWS::Partition}:dynamodb:*:${AWS::AccountId}:table/rbacr-rc
+              - !Sub arn:${AWS::Partition}:dynamodb:*:${AWS::AccountId}:table/rbacr-rc/index/*
 
   DeployRole:
     Type: AWS::IAM::Role
@@ -98,6 +103,7 @@ Resources:
                 Resource:
                   - !Sub arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/rbacr/*
                   - !Sub arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/rbacr-artifacts/*
+                  - !Sub arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/rbacr-tables/*
               - Effect: Allow
                 Action:
                   - cloudformation:ValidateTemplate
@@ -136,7 +142,7 @@ Resources:
                 Action: logs:DescribeLogGroups
                 Resource: '*'
               # Its execution role: only ever with the boundary attached, so
-              # a deploy can't create a role more powerful than "write logs".
+              # a deploy can't create a role beyond "write logs, use the rbacr tables".
               - Effect: Allow
                 Action:
                   - iam:CreateRole
@@ -241,87 +247,12 @@ Resources:
                   - route53:ChangeTagsForResource
                   - route53:ListTagsForResource
                 Resource: !Sub arn:${AWS::Partition}:route53:::healthcheck/*
-              # The VPC and the Aurora cluster (infra/app.yaml). Network
-              # resources are created account-wide but only this stage's
-              # stack's (tagged by CloudFormation) can be deleted.
+              # This stage's DynamoDB table (infra/tables.yaml)
               - Effect: Allow
-                Action:
-                  - ec2:Describe*
-                  - ec2:CreateVpc
-                  - ec2:ModifyVpcAttribute
-                  - ec2:AssociateVpcCidrBlock
-                  - ec2:CreateSubnet
-                  - ec2:ModifySubnetAttribute
-                  - ec2:CreateRouteTable
-                  - ec2:CreateRoute
-                  - ec2:AssociateRouteTable
-                  - ec2:CreateEgressOnlyInternetGateway
-                  - ec2:CreateSecurityGroup
-                  - ec2:AuthorizeSecurityGroupIngress
-                  - ec2:AuthorizeSecurityGroupEgress
-                  - ec2:CreateTags
-                Resource: '*'
-              - Effect: Allow
-                Action:
-                  - ec2:DeleteVpc
-                  - ec2:DisassociateVpcCidrBlock
-                  - ec2:DeleteSubnet
-                  - ec2:DeleteRouteTable
-                  - ec2:DeleteRoute
-                  - ec2:ReplaceRoute
-                  - ec2:DisassociateRouteTable
-                  - ec2:DeleteEgressOnlyInternetGateway
-                  - ec2:DeleteSecurityGroup
-                  - ec2:RevokeSecurityGroupIngress
-                  - ec2:RevokeSecurityGroupEgress
-                  - ec2:DeleteTags
-                Resource: '*'
-                Condition:
-                  StringEquals:
-                    aws:ResourceTag/aws:cloudformation:stack-name: rbacr
-              - Effect: Allow
-                Action: rds:*
+                Action: dynamodb:*
                 Resource:
-                  - !Sub arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:cluster:rbacr-db
-                  - !Sub arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:db:rbacr-db-*
-                  - !Sub arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:subgrp:rbacr-db
-              # The defaults the cluster uses, and its final snapshot.
-              - Effect: Allow
-                Action:
-                  - rds:CreateDBCluster
-                  - rds:CreateDBInstance
-                  - rds:ModifyDBCluster
-                  - rds:ModifyDBInstance
-                  - rds:CreateDBClusterSnapshot
-                  - rds:AddTagsToResource
-                Resource:
-                  - !Sub arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:cluster-pg:default.*
-                  - !Sub arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:pg:default.*
-                  - !Sub arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:og:default:*
-                  - !Sub arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:cluster-snapshot:*
-              - Effect: Allow
-                Action:
-                  - rds:Describe*
-                  - rds:ListTagsForResource
-                Resource: '*'
-              - Effect: Allow
-                Action: iam:CreateServiceLinkedRole
-                Resource: '*'
-                Condition:
-                  StringEquals:
-                    iam:AWSServiceName: rds.amazonaws.com
-              # The cluster's generated credentials
-              - Effect: Allow
-                Action:
-                  - secretsmanager:CreateSecret
-                  - secretsmanager:DeleteSecret
-                  - secretsmanager:DescribeSecret
-                  - secretsmanager:GetSecretValue
-                  - secretsmanager:PutSecretValue
-                  - secretsmanager:UpdateSecret
-                  - secretsmanager:TagResource
-                  - secretsmanager:UntagResource
-                Resource: !Sub arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:rbacr-db-*
+                  - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/rbacr
+                  - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/rbacr/*
               - Effect: Allow
                 Action:
                   - route53:GetChange
@@ -362,6 +293,7 @@ Resources:
                 Resource:
                   - !Sub arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/rbacr-rc/*
                   - !Sub arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/rbacr-rc-artifacts/*
+                  - !Sub arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/rbacr-rc-tables/*
               - Effect: Allow
                 Action:
                   - cloudformation:ValidateTemplate
@@ -400,7 +332,7 @@ Resources:
                 Action: logs:DescribeLogGroups
                 Resource: '*'
               # Its execution role: only ever with the boundary attached, so
-              # a deploy can't create a role more powerful than "write logs".
+              # a deploy can't create a role beyond "write logs, use the rbacr tables".
               - Effect: Allow
                 Action:
                   - iam:CreateRole
@@ -505,87 +437,12 @@ Resources:
                   - route53:ChangeTagsForResource
                   - route53:ListTagsForResource
                 Resource: !Sub arn:${AWS::Partition}:route53:::healthcheck/*
-              # The VPC and the Aurora cluster (infra/app.yaml). Network
-              # resources are created account-wide but only this stage's
-              # stack's (tagged by CloudFormation) can be deleted.
+              # This stage's DynamoDB table (infra/tables.yaml)
               - Effect: Allow
-                Action:
-                  - ec2:Describe*
-                  - ec2:CreateVpc
-                  - ec2:ModifyVpcAttribute
-                  - ec2:AssociateVpcCidrBlock
-                  - ec2:CreateSubnet
-                  - ec2:ModifySubnetAttribute
-                  - ec2:CreateRouteTable
-                  - ec2:CreateRoute
-                  - ec2:AssociateRouteTable
-                  - ec2:CreateEgressOnlyInternetGateway
-                  - ec2:CreateSecurityGroup
-                  - ec2:AuthorizeSecurityGroupIngress
-                  - ec2:AuthorizeSecurityGroupEgress
-                  - ec2:CreateTags
-                Resource: '*'
-              - Effect: Allow
-                Action:
-                  - ec2:DeleteVpc
-                  - ec2:DisassociateVpcCidrBlock
-                  - ec2:DeleteSubnet
-                  - ec2:DeleteRouteTable
-                  - ec2:DeleteRoute
-                  - ec2:ReplaceRoute
-                  - ec2:DisassociateRouteTable
-                  - ec2:DeleteEgressOnlyInternetGateway
-                  - ec2:DeleteSecurityGroup
-                  - ec2:RevokeSecurityGroupIngress
-                  - ec2:RevokeSecurityGroupEgress
-                  - ec2:DeleteTags
-                Resource: '*'
-                Condition:
-                  StringEquals:
-                    aws:ResourceTag/aws:cloudformation:stack-name: rbacr-rc
-              - Effect: Allow
-                Action: rds:*
+                Action: dynamodb:*
                 Resource:
-                  - !Sub arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:cluster:rbacr-rc-db
-                  - !Sub arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:db:rbacr-rc-db-*
-                  - !Sub arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:subgrp:rbacr-rc-db
-              # The defaults the cluster uses, and its final snapshot.
-              - Effect: Allow
-                Action:
-                  - rds:CreateDBCluster
-                  - rds:CreateDBInstance
-                  - rds:ModifyDBCluster
-                  - rds:ModifyDBInstance
-                  - rds:CreateDBClusterSnapshot
-                  - rds:AddTagsToResource
-                Resource:
-                  - !Sub arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:cluster-pg:default.*
-                  - !Sub arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:pg:default.*
-                  - !Sub arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:og:default:*
-                  - !Sub arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:cluster-snapshot:*
-              - Effect: Allow
-                Action:
-                  - rds:Describe*
-                  - rds:ListTagsForResource
-                Resource: '*'
-              - Effect: Allow
-                Action: iam:CreateServiceLinkedRole
-                Resource: '*'
-                Condition:
-                  StringEquals:
-                    iam:AWSServiceName: rds.amazonaws.com
-              # The cluster's generated credentials
-              - Effect: Allow
-                Action:
-                  - secretsmanager:CreateSecret
-                  - secretsmanager:DeleteSecret
-                  - secretsmanager:DescribeSecret
-                  - secretsmanager:GetSecretValue
-                  - secretsmanager:PutSecretValue
-                  - secretsmanager:UpdateSecret
-                  - secretsmanager:TagResource
-                  - secretsmanager:UntagResource
-                Resource: !Sub arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:rbacr-rc-db-*
+                  - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/rbacr-rc
+                  - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/rbacr-rc/*
               - Effect: Allow
                 Action:
                   - route53:GetChange

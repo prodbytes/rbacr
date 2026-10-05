@@ -17,7 +17,6 @@
 		"deploy": "bash scripts/deploy.sh"
 	},
 	"devDependencies": {
-		"@electric-sql/pglite": "^0.5.8",
 		"@sveltejs/adapter-node": "^6.0.0",
 		"@sveltejs/kit": "^3.0.0",
 		"@sveltejs/vite-plugin-svelte": "^7.2.0",
@@ -34,7 +33,8 @@
 		"#lib/*": "./src/lib/*"
 	},
 	"dependencies": {
-		"postgres": "^3.4.9",
+		"@aws-sdk/client-dynamodb": "^3.1146.0",
+		"@aws-sdk/lib-dynamodb": "^3.1146.0",
 		"serverless-http": "^4.0.0"
 	},
 	"engines": {

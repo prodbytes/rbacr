@@ -8,7 +8,8 @@ rbacr's AWS infrastructure, as CloudFormation templates. Everything lives in
 | [zone.yaml](zone.yaml) | `rbacr-zone` | The public hosted zone `rbacr.nu01.com`, its NS delegation in the `nu01.com` zone, a CAA record (only Amazon issues certificates), and `local.rbacr.nu01.com → 127.0.0.1` for local HTTPS | An administrator, once |
 | [github-deploy.yaml](github-deploy.yaml) | `rbacr-github-deploy` | The `rbacr-github-deploy` role (`*GA` tags), the `rbacr-github-deploy-rc` role (`*RC*` tags and manual runs from `main`), and the `rbacr-lambda-boundary` permissions boundary | An administrator, once |
 | [artifacts.yaml](artifacts.yaml) | `rbacr-artifacts`, `rbacr-rc-artifacts` | A private bucket for the Lambda zips; old zips expire after 90 days | [scripts/deploy.sh](../scripts/deploy.sh) |
-| [app.yaml](app.yaml) | `rbacr`, `rbacr-rc` | The VPC, the Aurora PostgreSQL Serverless v2 cluster and its Secrets Manager credentials, the ACM certificate, the origin secret, the Lambda with its function URL and log group, the CloudFront distribution, the A/AAAA aliases, and the Route 53 health check of `/health` with its alarm and e-mail topic | [scripts/deploy.sh](../scripts/deploy.sh) |
+| [tables.yaml](tables.yaml) | `rbacr-tables`, `rbacr-rc-tables` | The DynamoDB table (`rbacr`, `rbacr-rc`): on demand, point-in-time recovery, deletion protection, kept if the stack is deleted | [scripts/deploy.sh](../scripts/deploy.sh) |
+| [app.yaml](app.yaml) | `rbacr`, `rbacr-rc` | The ACM certificate, the origin secret, the Lambda with its function URL and log group, the CloudFront distribution, the A/AAAA aliases, and the Route 53 health check of `/health` with its alarm and e-mail topic | [scripts/deploy.sh](../scripts/deploy.sh) |
 
 ## How a request flows
 
@@ -20,8 +21,7 @@ browser ──https──▶ CloudFront (rbacr.nu01.com, ACM certificate)
                    Lambda function URL ──▶ lambda.js ──▶ SvelteKit (adapter-node)
                                                            │
                                                            ▼
-                                                     Aurora PostgreSQL Serverless v2
-                                                     (same VPC, private subnets)
+                                                     DynamoDB table rbacr / rbacr-rc
 ```
 
 - **Caching.** `/_app/immutable/*` holds content-hashed assets and is cached
@@ -38,16 +38,14 @@ browser ──https──▶ CloudFront (rbacr.nu01.com, ACM certificate)
   function URL's host. CloudFront therefore sends the site's host in
   `x-rbacr-host`, and adapter-node reads it (`HOST_HEADER`). That keeps
   SvelteKit's CSRF origin check and the Google redirect URI correct.
-- **Secrets.** `RBACR_GOOGLE_CLIENT_SECRET` is a `NoEcho` stack parameter.
-  The database credentials are generated into the `<stack>-db` Secrets
-  Manager secret (username, password, and the host and port once the
-  cluster exists), and CloudFormation builds `RBACR_DATABASE_URL` from it.
-  Both reach the function as environment variables (encrypted at rest). The
-  password isn't rotated: rotating it means redeploying.
+- **Secrets.** `RBACR_GOOGLE_CLIENT_SECRET` is a `NoEcho` stack parameter,
+  stored as a Lambda environment variable (encrypted at rest). The function
+  reaches DynamoDB with its execution role, so there are no database
+  credentials.
 - **Health check.** Route 53 polls `https://<domain>/health` over HTTPS
   through CloudFront, every 30 s from three regions, and fails it after 3
-  failed polls. `/health` answers 503 unless the database answers and the
-  Google client is configured. The `<stack>-health` alarm fires when the
+  failed polls. `/health` answers 503 unless the Google client is
+  configured; it doesn't touch DynamoDB, so polls cost nothing there. The `<stack>-health` alarm fires when the
   check is unhealthy (or reports no data) for 2 minutes, and it notifies
   the `<stack>-health` SNS topic, again on recovery. The topic e-mails the
   `HealthNotificationEmails` parameter (comma-separated, default
@@ -56,22 +54,13 @@ browser ──https──▶ CloudFront (rbacr.nu01.com, ACM certificate)
   deploy. The template uses the `AWS::LanguageExtensions` transform
   (`Fn::ForEach` over the addresses), so deploys pass
   `CAPABILITY_AUTO_EXPAND`.
-- **Database.** Each stage has an Aurora PostgreSQL Serverless v2 cluster,
-  `<stack>-db` (version `DbEngineVersion`, default 18.6, matching the local
-  `postgres:18` container). It scales from 0 ACU, when it pauses after 5 idle
-  minutes, up to 2 ACU for `rc` and 4 for `prod` (`DbMaxCapacity`). It is
-  encrypted, takes daily backups for 7 days, has deletion protection, and
-  leaves a final snapshot if the stack deletes it. Connections use TLS
-  (`sslmode=require`), and each Lambda instance holds one. A request that
-  wakes a paused cluster waits about 15 s, so the function timeout is 30 s.
-  The `/health` polls (about one every 10 s) count as activity, so as long
-  as the health check runs, the cluster stays at its 0.5 ACU floor rather
-  than pausing.
-- **Network.** The function runs in the stage's VPC: two private
-  dual-stack subnets with no NAT gateway. It reaches the database
-  privately; the database accepts PostgreSQL only from the function's
-  security group. Outbound internet (Google's token endpoint) goes over
-  IPv6 through an egress-only internet gateway, so nothing can connect in.
+- **Database.** Each stage has one DynamoDB table (`infra/tables.yaml`,
+  stack `<stack>-tables`), deployed before the app, which gets its name and
+  ARN. On-demand billing, so an idle stage costs only storage (the first
+  25 GB are free). Point-in-time recovery, deletion protection and
+  `DeletionPolicy: Retain` keep the data safe from a mistaken stack
+  deletion. The function's role may only read and write that table and its
+  index. Expired sessions are removed by DynamoDB's TTL (`ttl` attribute).
 
 ## Releases
 

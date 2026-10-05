@@ -1,22 +1,15 @@
 services:
-  postgres:
-    # Same major version as Aurora (infra/app.yaml DbEngineVersion).
-    image: postgres:18-alpine
-    container_name: devbox-db
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: postgres
+  # The app's table (RBACR_DYNAMODB_TABLE) on DynamoDB Local, persisted in a
+  # volume. The app creates the table on first use.
+  dynamodb:
+    image: amazon/dynamodb-local:3.1.0
+    container_name: devbox-dynamodb
+    command: ["-jar", "DynamoDBLocal.jar", "-sharedDb", "-dbPath", "/home/dynamodblocal/data"]
+    user: root
     ports:
-      - "5432:5432"
+      - "${RBACR_DYNAMODB_PORT:-8642}:8000"
     volumes:
-      # Postgres 18 images keep their data under /var/lib/postgresql/<major>.
-      - postgres18-data:/var/lib/postgresql
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 2s
-      timeout: 3s
-      retries: 30
+      - dynamodb-data:/home/dynamodblocal/data
 
 volumes:
-  postgres18-data:
+  dynamodb-data:

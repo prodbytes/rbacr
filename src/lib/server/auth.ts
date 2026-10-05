@@ -7,7 +7,6 @@ export const OAUTH_COOKIE = 'rbacr_oauth';
 
 /** Starts a session for `email` and sets the session cookie. */
 export async function signIn(sessions: Sessions, cookies: Cookies, email: string): Promise<void> {
-	await sessions.purgeExpired();
 	const { token, expiresAt } = await sessions.create(email);
 	cookies.set(SESSION_COOKIE, token, {
 		path: '/',

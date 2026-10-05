@@ -1,4 +1,5 @@
-import type { Db } from './db';
+import { PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { queryIndex, type Item, type Table } from './dynamo';
 import { RbacError } from './rbac';
 import { hashToken } from './session';
 
@@ -26,26 +27,21 @@ export interface ApiToken {
 	revokedAt: Date | null;
 }
 
-type Row = {
-	id: string;
-	name: string;
-	prefix: string;
-	created_at: Date;
-	expires_at: Date | null;
-	last_used_at: Date | null;
-	revoked_at: Date | null;
-};
+/**
+ * A token item: PK `TOKEN#<sha256>` (so authenticating is one key lookup),
+ * listed per person through GSI1 (`TOKENS#<email>`, newest last by
+ * `<createdAt>#<id>`). Dates are ISO strings; absent means null.
+ */
+const tokenKey = (hash: string) => ({ PK: `TOKEN#${hash}`, SK: 'META' });
 
-const COLUMNS = 'id, name, prefix, created_at, expires_at, last_used_at, revoked_at';
-
-const toToken = (r: Row): ApiToken => ({
-	id: r.id,
-	name: r.name,
-	prefix: r.prefix,
-	createdAt: new Date(r.created_at),
-	expiresAt: r.expires_at && new Date(r.expires_at),
-	lastUsedAt: r.last_used_at && new Date(r.last_used_at),
-	revokedAt: r.revoked_at && new Date(r.revoked_at)
+const toToken = (it: Item): ApiToken => ({
+	id: it.id as string,
+	name: it.name as string,
+	prefix: it.prefix as string,
+	createdAt: new Date(it.createdAt as string),
+	expiresAt: it.expiresAt ? new Date(it.expiresAt as string) : null,
+	lastUsedAt: it.lastUsedAt ? new Date(it.lastUsedAt as string) : null,
+	revokedAt: it.revokedAt ? new Date(it.revokedAt as string) : null
 });
 
 /** 256 random bits, e.g. `rbacr_q3V…`. */
@@ -55,9 +51,13 @@ export function generateToken(): string {
 
 export class ApiTokens {
 	constructor(
-		private readonly db: Db,
+		private readonly table: Table,
 		private readonly now: () => Date = () => new Date()
 	) {}
+
+	private items(email: string): Promise<Item[]> {
+		return queryIndex(this.table, `TOKENS#${email}`, { newestFirst: true });
+	}
 
 	/** Creates a token for `email`. The plain token is returned only here. */
 	async create(email: string, input: { name: string; expiresInDays?: number | null }): Promise<{ token: string; apiToken: ApiToken }> {
@@ -68,52 +68,71 @@ export class ApiTokens {
 			throw new RbacError(400, `Expiry must be a whole number of days from 1 to ${MAX_DAYS}, or empty for never`);
 		}
 		const now = this.now();
-		const [{ n }] = await this.db.query<{ n: number }>(
-			`SELECT count(*)::int AS n FROM api_tokens
-			 WHERE email = $1 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > $2)`,
-			[email, now]
+		const active = (await this.items(email)).filter(
+			(it) => !it.revokedAt && (!it.expiresAt || new Date(it.expiresAt as string) > now)
 		);
-		if (n >= MAX_ACTIVE_TOKENS) throw new RbacError(409, `You can have at most ${MAX_ACTIVE_TOKENS} active tokens`);
+		if (active.length >= MAX_ACTIVE_TOKENS) throw new RbacError(409, `You can have at most ${MAX_ACTIVE_TOKENS} active tokens`);
 		const token = generateToken();
-		const expiresAt = days === null ? null : new Date(now.getTime() + days * 86_400_000);
-		const [row] = await this.db.query<Row>(
-			`INSERT INTO api_tokens (id, token_hash, prefix, name, email, created_at, expires_at)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING ${COLUMNS}`,
-			[crypto.randomUUID(), await hashToken(token), token.slice(0, 12), name, email, now, expiresAt]
+		const id = crypto.randomUUID();
+		const item: Item = {
+			...tokenKey(await hashToken(token)),
+			GSI1PK: `TOKENS#${email}`,
+			GSI1SK: `${now.toISOString()}#${id}`,
+			id,
+			prefix: token.slice(0, 12),
+			name,
+			email,
+			createdAt: now.toISOString(),
+			expiresAt: days === null ? undefined : new Date(now.getTime() + days * 86_400_000).toISOString()
+		};
+		await this.table.doc.send(
+			new PutCommand({ TableName: this.table.name, Item: item, ConditionExpression: 'attribute_not_exists(PK)' })
 		);
-		return { token, apiToken: toToken(row) };
+		return { token, apiToken: toToken(item) };
 	}
 
 	/** The person's tokens, newest first; revoked and expired ones stay listed. */
 	async list(email: string): Promise<ApiToken[]> {
-		const rows = await this.db.query<Row>(
-			`SELECT ${COLUMNS} FROM api_tokens WHERE email = $1 ORDER BY created_at DESC, id`,
-			[email]
-		);
-		return rows.map(toToken);
+		return (await this.items(email)).map(toToken);
 	}
 
 	/** Revokes one of the person's own tokens for good. */
 	async revoke(email: string, id: string): Promise<ApiToken> {
-		const [row] = await this.db.query<Row>(
-			`UPDATE api_tokens SET revoked_at = coalesce(revoked_at, $3)
-			 WHERE id = $1 AND email = $2 RETURNING ${COLUMNS}`,
-			[id, email, this.now()]
+		const found = (await this.items(email)).find((it) => it.id === id);
+		if (!found) throw new RbacError(404, 'Token not found');
+		const { Attributes } = await this.table.doc.send(
+			new UpdateCommand({
+				TableName: this.table.name,
+				Key: { PK: found.PK, SK: found.SK },
+				UpdateExpression: 'SET revokedAt = if_not_exists(revokedAt, :now)',
+				ExpressionAttributeValues: { ':now': this.now().toISOString() },
+				ReturnValues: 'ALL_NEW'
+			})
 		);
-		if (!row) throw new RbacError(404, 'Token not found');
-		return toToken(row);
+		return toToken(Attributes!);
 	}
 
 	/** The e-mail a live token belongs to, or null (unknown, revoked or expired). Records its use. */
 	async authenticate(token: string): Promise<string | null> {
 		if (!token.startsWith(TOKEN_PREFIX)) return null;
-		const now = this.now();
-		const [row] = await this.db.query<{ email: string }>(
-			`UPDATE api_tokens SET last_used_at = $2
-			 WHERE token_hash = $1 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > $2)
-			 RETURNING email`,
-			[await hashToken(token), now]
-		);
-		return row?.email ?? null;
+		const now = this.now().toISOString();
+		try {
+			const { Attributes } = await this.table.doc.send(
+				new UpdateCommand({
+					TableName: this.table.name,
+					Key: tokenKey(await hashToken(token)),
+					UpdateExpression: 'SET lastUsedAt = :now',
+					// ISO-8601 UTC strings compare in time order.
+					ConditionExpression:
+						'attribute_exists(PK) AND attribute_not_exists(revokedAt) AND (attribute_not_exists(expiresAt) OR expiresAt > :now)',
+					ExpressionAttributeValues: { ':now': now },
+					ReturnValues: 'ALL_NEW'
+				})
+			);
+			return (Attributes?.email as string) ?? null;
+		} catch (err) {
+			if ((err as Error).name === 'ConditionalCheckFailedException') return null;
+			throw err;
+		}
 	}
 }

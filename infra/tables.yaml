@@ -1,0 +1,63 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  rbacr-tables (and rbacr-rc-tables): the DynamoDB table holding all of a
+  stage's rbacr data (systems, roles, grants, vouchers, sessions, API
+  tokens). On-demand billing, point-in-time recovery, deletion protection,
+  and kept (Retain) if the stack goes away. Its shape matches
+  tableDefinition() in src/lib/server/dynamo.ts. Deployed by
+  scripts/deploy.sh before the app stack (infra/app.yaml), which reads the
+  table name and ARN from its outputs.
+
+Parameters:
+  TableName:
+    Type: String
+    AllowedPattern: '[a-zA-Z0-9_.-]{3,255}'
+    Description: rbacr for prod, rbacr-rc for the release candidate
+
+Resources:
+  Table:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Ref TableName
+      BillingMode: PAY_PER_REQUEST
+      DeletionProtectionEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+        - AttributeName: GSI1PK
+          AttributeType: S
+        - AttributeName: GSI1SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: GSI1
+          KeySchema:
+            - AttributeName: GSI1PK
+              KeyType: HASH
+            - AttributeName: GSI1SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      # Sessions carry their expiry here (Unix seconds); DynamoDB deletes
+      # them some time after it passes.
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+Outputs:
+  TableName:
+    Value: !Ref Table
+  TableArn:
+    Value: !GetAtt Table.Arn

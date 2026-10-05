@@ -1,16 +1,16 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import type { Db } from './db';
+import type { Table } from './dynamo';
 import { SESSION_TTL_MS, Sessions, hashToken } from './session';
-import { createTestDb } from './testing/pglite';
+import { createTestTable, scanAll } from './testing/dynamodb';
 
-let db: Db;
+let table: Table;
 let clock: Date;
 let sessions: Sessions;
 
 beforeEach(async () => {
-	db = await createTestDb();
+	table = await createTestTable();
 	clock = new Date('2026-01-01T00:00:00Z');
-	sessions = new Sessions(db, () => clock);
+	sessions = new Sessions(table, () => clock);
 });
 
 describe('Sessions', () => {
@@ -18,9 +18,11 @@ describe('Sessions', () => {
 		const { token, expiresAt } = await sessions.create('ana@example.com');
 		expect(expiresAt.getTime() - clock.getTime()).toBe(SESSION_TTL_MS);
 		expect(await sessions.validate(token)).toBe('ana@example.com');
-		const rows = await db.query<{ token_hash: string }>('SELECT token_hash FROM sessions');
-		expect(rows).toEqual([{ token_hash: await hashToken(token) }]);
-		expect(rows[0].token_hash).not.toContain(token);
+		const items = await scanAll(table);
+		expect(items.map((it) => it.PK)).toEqual([`SESSION#${await hashToken(token)}`]);
+		expect(JSON.stringify(items)).not.toContain(token);
+		// DynamoDB's TTL removes the item after expiry.
+		expect(items[0].ttl).toBe(Math.ceil(expiresAt.getTime() / 1000));
 	});
 
 	it('rejects unknown, deleted and expired tokens', async () => {

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import type { Db } from './db';
+import type { Table } from './dynamo';
 import { Allowlist } from './identity';
 import {
 	ADMIN_ROLE,
@@ -11,13 +11,13 @@ import {
 	voucherStatus,
 	type Actor
 } from './rbac';
-import { createTestDb } from './testing/pglite';
+import { createTestTable, scanAll } from './testing/dynamodb';
 
 const ROOT = 'root@corp.com';
 const ADMIN = 'admin@partner.com';
 const USER = 'user@partner.com';
 
-let db: Db;
+let table: Table;
 let clock: Date;
 let rbac: Rbac;
 let root: Actor;
@@ -33,9 +33,9 @@ async function expectError(promise: Promise<unknown>, status: number, message?: 
 }
 
 beforeEach(async () => {
-	db = await createTestDb();
+	table = await createTestTable();
 	clock = new Date('2026-01-10T12:00:00Z');
-	rbac = new Rbac(db, Allowlist.parse('corp.com'), () => clock);
+	rbac = new Rbac(table, Allowlist.parse('corp.com'), () => clock);
 	root = await rbac.actor(ROOT);
 	await rbac.createSystem(root, { id: 'billing', name: 'Billing', roles: ['viewer', 'editor'] });
 	await rbac.createSystem(root, { id: 'crm' });
@@ -243,8 +243,7 @@ describe('vouchers', () => {
 		const v = await rbac.createVoucher(root, { systemId: 'billing', role: 'viewer' });
 		await rbac.redeemVoucher(USER, v.code);
 		await expectError(rbac.redeemVoucher(USER, v.code), 409, /already/);
-		const [row] = await db.query<{ uses: number }>('SELECT uses FROM vouchers WHERE code = $1', [v.code]);
-		expect(row.uses).toBe(1);
+		expect((await rbac.listVouchers(root, 'billing')).find((x) => x.code === v.code)?.uses).toBe(1);
 	});
 
 	it('respect the usage count', async () => {
@@ -370,8 +369,8 @@ describe('voucher discounts', () => {
 			discountPercent: 50
 		});
 		expect(await rbac.rolesOf(USER)).toEqual({});
-		const [row] = await db.query<{ uses: number }>('SELECT uses FROM vouchers WHERE code = $1', [v.code]);
-		expect(row.uses).toBe(0);
+		expect((await rbac.listVouchers(root, 'billing')).find((x) => x.code === v.code)?.uses).toBe(0);
+		expect(await scanAll(table).then((items) => items.some((it) => String(it.SK).startsWith('REDEEMED#')))).toBe(false);
 	});
 
 	it('expired paid vouchers report expiry, not payment', async () => {

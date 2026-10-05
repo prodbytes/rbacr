@@ -1,14 +1,14 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import type { Db } from './db';
+import type { Table } from './dynamo';
 import { RbacError } from './rbac';
 import { hashToken } from './session';
-import { createTestDb } from './testing/pglite';
+import { createTestTable, scanAll } from './testing/dynamodb';
 import { ApiTokens } from './tokens';
 
 const ANA = 'ana@example.com';
 const BOB = 'bob@example.com';
 
-let db: Db;
+let table: Table;
 let clock: Date;
 let tokens: ApiTokens;
 
@@ -23,9 +23,9 @@ async function expectError(promise: Promise<unknown>, status: number, message?: 
 }
 
 beforeEach(async () => {
-	db = await createTestDb();
+	table = await createTestTable();
 	clock = new Date('2026-01-10T12:00:00Z');
-	tokens = new ApiTokens(db, () => clock);
+	tokens = new ApiTokens(table, () => clock);
 });
 
 describe('personal API tokens', () => {
@@ -42,8 +42,9 @@ describe('personal API tokens', () => {
 		});
 		expect(await tokens.list(ANA)).toEqual([apiToken]);
 		expect(await tokens.list(BOB)).toEqual([]);
-		const rows = await db.query<{ token_hash: string }>('SELECT token_hash FROM api_tokens');
-		expect(rows).toEqual([{ token_hash: await hashToken(token) }]);
+		const items = await scanAll(table);
+		expect(items.map((it) => it.PK)).toEqual([`TOKEN#${await hashToken(token)}`]);
+		expect(JSON.stringify(items)).not.toContain(token);
 	});
 
 	it('authenticate as their owner, recording the last use', async () => {

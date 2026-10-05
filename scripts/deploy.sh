@@ -4,14 +4,14 @@
 #   1. builds the app and packages the Lambda zip (scripts/package-lambda.sh,
 #      which smoke-tests it)
 #   2. deploys the artifacts bucket (infra/artifacts.yaml, stack
-#      rbacr[-rc]-artifacts) and uploads the zip
+#      rbacr[-rc]-artifacts) and uploads the zip, and the DynamoDB table
+#      (infra/tables.yaml, stack rbacr[-rc]-tables, table rbacr[-rc])
 #   3. deploys the app (infra/app.yaml, stack rbacr[-rc]: certificate,
-#      VPC, Aurora PostgreSQL Serverless v2 with its credentials in Secrets
-#      Manager, Lambda + function URL, CloudFront, DNS, and the Route 53 health check
+#      Lambda + function URL, CloudFront, DNS, and the Route 53 health check
 #      of /health with its e-mail alarm)
 #   4. smoke-tests the live site: /health must be healthy and report this
-#      version, /
-#      must be the sign-in page, /api/me must refuse anonymous calls (401),
+#      version, / must be the sign-in page, /api/me must refuse anonymous
+#      calls and unknown tokens (401; the latter is looked up in DynamoDB),
 #      /login/dev must not exist (404), and the function URL must refuse
 #      direct calls (403)
 #
@@ -46,11 +46,12 @@ if [[ "$AWS_REGION" != us-east-1 ]]; then
 fi
 STAGE="${STAGE:-prod}"
 case "$STAGE" in
-  prod) STACK=rbacr; DOMAIN=rbacr.nu01.com; DB_MAX_ACU=4 ;;
-  rc) STACK=rbacr-rc; DOMAIN=rc.rbacr.nu01.com; DB_MAX_ACU=2 ;;
+  prod) STACK=rbacr; DOMAIN=rbacr.nu01.com ;;
+  rc) STACK=rbacr-rc; DOMAIN=rc.rbacr.nu01.com ;;
   *) echo "error: STAGE must be prod or rc (got '$STAGE')" >&2; exit 2 ;;
 esac
 ARTIFACTS_STACK=$STACK-artifacts
+TABLES_STACK=$STACK-tables
 
 # Read KEY=value lines (not sourced, so nothing in it runs); the environment wins.
 if [[ -f ".env.$STAGE" ]]; then
@@ -103,7 +104,7 @@ fi
 # The parameters: settings that are set override; unset secrets keep their
 # deployed values, but a stage's first deploy needs all of them.
 params=("DomainName=$DOMAIN" "HostedZoneId=$HOSTED_ZONE_ID" "Version=$RELEASE"
-  "RootList=${RBACR_ROOT_LIST:-}" "DbMaxCapacity=$DB_MAX_ACU")
+  "RootList=${RBACR_ROOT_LIST:-}")
 first_deploy=true; stack_exists "$STACK" && first_deploy=false
 for pair in GoogleClientId:RBACR_GOOGLE_CLIENT_ID GoogleClientSecret:RBACR_GOOGLE_CLIENT_SECRET; do
   param="${pair%%:*}" name="${pair#*:}"
@@ -138,11 +139,19 @@ key="lambda/rbacr-$RELEASE-$(git rev-parse --short HEAD 2>/dev/null || echo loca
 aws s3 cp "$zip" "s3://$bucket/$key" --only-show-errors
 echo "    code: s3://$bucket/$key"
 
+echo "==> deploying $TABLES_STACK"
+aws cloudformation deploy --stack-name "$TABLES_STACK" \
+  --template-file infra/tables.yaml --parameter-overrides "TableName=$STACK" \
+  --no-fail-on-empty-changeset
+table_arn="$(stack_output "$TABLES_STACK" TableArn)"
+echo "    table: $table_arn"
+
 # 3. The app
 echo "==> deploying $STACK"
 aws cloudformation deploy --stack-name "$STACK" \
   --template-file infra/app.yaml --capabilities CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND \
   --parameter-overrides "${params[@]}" "CodeBucket=$bucket" "CodeKey=$key" \
+    "TableName=$STACK" "TableArn=$table_arn" \
   --no-fail-on-empty-changeset
 function_url="$(stack_output "$STACK" FunctionUrl)"
 
@@ -152,12 +161,15 @@ status() { curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$@"; }
 check() {
   local health
   health="$(curl -fsS --max-time 20 "https://$DOMAIN/health")" || { echo "    /health failed"; return 1; }
-  [[ "$health" == "{\"ok\":true,\"version\":\"$RELEASE\",\"checks\":{\"database\":\"ok\",\"google\":\"ok\"}}" ]] \
+  [[ "$health" == "{\"ok\":true,\"version\":\"$RELEASE\",\"checks\":{\"google\":\"ok\"}}" ]] \
     || { echo "    /health says $health, want healthy and version $RELEASE"; return 1; }
   curl -fsS --max-time 20 -H 'accept: text/html' "https://$DOMAIN/" | grep -q 'Sign in with Google' \
     || { echo "    / isn't the sign-in page"; return 1; }
   local code
   code="$(status "https://$DOMAIN/api/me")"; [[ "$code" == 401 ]] || { echo "    /api/me answered $code, want 401"; return 1; }
+  # An unknown token is looked up in DynamoDB: 401 (not 500) proves the table works.
+  code="$(status -H 'authorization: Bearer rbacr_smoke-test-unknown-token' "https://$DOMAIN/api/me")"
+  [[ "$code" == 401 ]] || { echo "    /api/me with an unknown token answered $code, want 401"; return 1; }
   code="$(status -H 'accept: text/html' "https://$DOMAIN/login/dev")"; [[ "$code" == 404 ]] || { echo "    /login/dev answered $code, want 404"; return 1; }
   code="$(status "${function_url%/}/health")"; [[ "$code" == 403 ]] || { echo "    the function URL answered $code, want 403"; return 1; }
 }
