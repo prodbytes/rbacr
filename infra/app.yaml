@@ -40,6 +40,12 @@ Parameters:
     Type: String
     NoEcho: true
     Description: RBACR_GOOGLE_CLIENT_SECRET
+  HealthNotificationEmails:
+    Type: CommaDelimitedList
+    Default: julio+health@nu01.com
+    Description: >
+      Addresses e-mailed when the /health check fails and recovers. Each one
+      must confirm the SNS subscription e-mail before it gets notifications.
   TableName:
     Type: String
     Description: The stage's DynamoDB table (the rbacr(-rc)-tables stack, infra/tables.yaml)
