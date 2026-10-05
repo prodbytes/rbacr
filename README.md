@@ -119,7 +119,9 @@ revoke it on `/me` when it's no longer needed.
 
 ```bash
 npm test                 # unit/domain tests (DynamoDB Local in Docker) + Lambda smoke test of the production build
-npm run test:e2e         # API + pages against a running dev server (devbox services up)
+                         # (safe while `devbox services up` runs: vitest uses its own .svelte-kit-vitest/)
+npm run test:e2e         # API + pages against a running dev server (devbox services up); through local HTTPS:
+                         # NODE_EXTRA_CA_CERTS="$(mkcert -CAROOT)/rootCA.pem" RBACR_E2E_URL=https://local.rbacr.nu01.com:8444 npm run test:e2e
 npm run check            # svelte-check / TypeScript
 bash scripts/package-lambda.sh   # the deployable zip, smoke-tested with production dependencies only
 ```

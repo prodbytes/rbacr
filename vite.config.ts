@@ -41,6 +41,12 @@ const encodeRouteBrackets: Plugin = {
 const hmrHost = process.env.RBACR_HMR_HOST;
 const hmrPort = Number(process.env.RBACR_APP_PORT ?? 5173);
 
+// Vitest gets its own SvelteKit output directory. Otherwise running the tests
+// rewrites .svelte-kit/generated/dev/env with the test process's environment,
+// and a running dev server hot-reloads it, losing the RBACR_* settings that
+// process-compose gave it.
+const outDir = process.env.VITEST ? '.svelte-kit-vitest' : '.svelte-kit';
+
 export default defineConfig({
 	server: hmrHost ? { hmr: { protocol: 'ws', host: hmrHost, clientPort: hmrPort } } : {},
 	plugins: [
@@ -51,7 +57,8 @@ export default defineConfig({
 				runes: ({ filename }) =>
 					filename.split(/[/\\]/).includes('node_modules') ? undefined : true
 			},
-			adapter: adapter()
+			adapter: adapter(),
+			outDir
 		})
 	],
 	test: {
