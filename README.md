@@ -49,7 +49,7 @@ exists. `devbox services up` starts these processes, defined in
 
 | Process | What it does |
 |---------|--------------|
-| `1-postgresql` | PostgreSQL 17 in Docker as `devbox-db` ([compose.yaml](compose.yaml)) |
+| `1-postgresql` | PostgreSQL 18 in Docker as `devbox-db` ([compose.yaml](compose.yaml)), the same major version as the Aurora clusters in AWS |
 | `2-app` | `npm install`, then `vite dev` on http://localhost:5173 once Postgres is healthy. `RBACR_DATABASE_URL` defaults to the local container. |
 | `3-floci` | [Floci](floci/README.md), the local AWS emulator, as the CloudFront distribution in front of the app over HTTPS (mkcert certificate, ports 4567/8444) |
 | `0-health-check` | Logs `🐘 database ✅ 🔐 app ✅ 🔒 https ✅` every 15 s (set `HEALTH_CHECK_INTERVAL` to change) |
@@ -69,7 +69,7 @@ Devbox scripts: `devbox run dev | test | check | build | certs | release-rc | re
 
 | Variable | Required | Purpose |
 |----------|----------|---------|
-| `RBACR_DATABASE_URL` | yes | PostgreSQL URL (use `?sslmode=require` for managed databases) |
+| `RBACR_DATABASE_URL` | yes | PostgreSQL URL (use `?sslmode=require` for managed databases). Locally it defaults to the container; in AWS the stack builds it from its Aurora cluster |
 | `RBACR_ROOT_LIST` | no | Comma-separated root addresses and/or domains, e.g. `ana@example.com, example.org`. An invalid entry stops the app from starting. |
 | `RBACR_GOOGLE_CLIENT_ID` / `RBACR_GOOGLE_CLIENT_SECRET` | for sign-in | Google OAuth web client |
 | `RBACR_PUBLIC_ORIGIN` | no | The origin users browse, used for the Google redirect URI (default: the request's origin) |

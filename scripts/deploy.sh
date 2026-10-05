@@ -6,7 +6,8 @@
 #   2. deploys the artifacts bucket (infra/artifacts.yaml, stack
 #      rbacr[-rc]-artifacts) and uploads the zip
 #   3. deploys the app (infra/app.yaml, stack rbacr[-rc]: certificate,
-#      Lambda + function URL, CloudFront, DNS, and the Route 53 health check
+#      VPC, Aurora PostgreSQL Serverless v2 with its credentials in Secrets
+#      Manager, Lambda + function URL, CloudFront, DNS, and the Route 53 health check
 #      of /health with its e-mail alarm)
 #   4. smoke-tests the live site: /health must be healthy and report this
 #      version, /
@@ -28,7 +29,7 @@
 #   HOSTED_ZONE_ID the rbacr.nu01.com zone (default: the rbacr-zone stack's output)
 #   RBACR_ROOT_LIST   root addresses/domains; passed on every deploy, so
 #                 the stack never keeps an old value (empty: no roots)
-#   RBACR_GOOGLE_CLIENT_ID, RBACR_GOOGLE_CLIENT_SECRET, RBACR_DATABASE_URL
+#   RBACR_GOOGLE_CLIENT_ID, RBACR_GOOGLE_CLIENT_SECRET
 #                 required on the first deploy of a stage; afterwards, unset
 #                 ones keep their deployed values
 #   HEALTH_EMAILS comma-separated addresses the health alarm e-mails
@@ -45,8 +46,8 @@ if [[ "$AWS_REGION" != us-east-1 ]]; then
 fi
 STAGE="${STAGE:-prod}"
 case "$STAGE" in
-  prod) STACK=rbacr; DOMAIN=rbacr.nu01.com ;;
-  rc) STACK=rbacr-rc; DOMAIN=rc.rbacr.nu01.com ;;
+  prod) STACK=rbacr; DOMAIN=rbacr.nu01.com; DB_MAX_ACU=4 ;;
+  rc) STACK=rbacr-rc; DOMAIN=rc.rbacr.nu01.com; DB_MAX_ACU=2 ;;
   *) echo "error: STAGE must be prod or rc (got '$STAGE')" >&2; exit 2 ;;
 esac
 ARTIFACTS_STACK=$STACK-artifacts
@@ -102,9 +103,9 @@ fi
 # The parameters: settings that are set override; unset secrets keep their
 # deployed values, but a stage's first deploy needs all of them.
 params=("DomainName=$DOMAIN" "HostedZoneId=$HOSTED_ZONE_ID" "Version=$RELEASE"
-  "RootList=${RBACR_ROOT_LIST:-}")
+  "RootList=${RBACR_ROOT_LIST:-}" "DbMaxCapacity=$DB_MAX_ACU")
 first_deploy=true; stack_exists "$STACK" && first_deploy=false
-for pair in GoogleClientId:RBACR_GOOGLE_CLIENT_ID GoogleClientSecret:RBACR_GOOGLE_CLIENT_SECRET DatabaseUrl:RBACR_DATABASE_URL; do
+for pair in GoogleClientId:RBACR_GOOGLE_CLIENT_ID GoogleClientSecret:RBACR_GOOGLE_CLIENT_SECRET; do
   param="${pair%%:*}" name="${pair#*:}"
   if [[ -n "${!name:-}" ]]; then
     params+=("$param=${!name}")
