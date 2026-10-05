@@ -62,6 +62,10 @@ export default defineConfig({
 				test: {
 					name: 'server',
 					environment: 'node',
+					// DynamoDB Local for the domain tests (a container unless RBACR_TEST_DYNAMODB_ENDPOINT is set).
+					globalSetup: ['src/lib/server/testing/setup.ts'],
+					testTimeout: 20_000,
+					hookTimeout: 30_000,
 					include: ['src/**/*.{test,spec}.{js,ts}'],
 					exclude: ['src/**/*.svelte.{test,spec}.{js,ts}']
 				}

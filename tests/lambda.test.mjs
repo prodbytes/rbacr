@@ -1,12 +1,12 @@
 // Smoke test for the packaged Lambda: invokes lambda.js (the deployed entrypoint)
 // with Lambda function URL events (payload v2, as CloudFront forwards them)
 // against the production build.
-// Run `npm run build` first. Only exercises routes that need no database.
+// Run `npm run build` first. Only exercises routes that need no DynamoDB.
 import assert from 'node:assert/strict';
 import { readdirSync } from 'node:fs';
 import { before, describe, it } from 'node:test';
 
-process.env.RBACR_DATABASE_URL = 'postgres://unused@127.0.0.1:1/unused';
+process.env.RBACR_DYNAMODB_TABLE = 'unused';
 process.env.RBACR_ROOT_LIST = 'example.com';
 process.env.RBACR_GOOGLE_CLIENT_ID = 'test-client-id';
 process.env.RBACR_GOOGLE_CLIENT_SECRET = 'test-client-secret';
@@ -50,15 +50,11 @@ async function invoke(target, { method = 'GET', headers = {}, viaCloudFront = tr
 }
 
 describe('lambda handler', () => {
-	it('serves the JSON health check, outside /api: 503 without the database', async () => {
+	it('serves the JSON health check, outside /api, with the deployed version', async () => {
 		const res = await invoke('/health');
-		assert.equal(res.statusCode, 503);
+		assert.equal(res.statusCode, 200);
 		assert.equal(res.headers['cache-control'], 'no-store');
-		assert.deepEqual(JSON.parse(res.body), {
-			ok: false,
-			version: '1.2.3-RC',
-			checks: { database: 'error', google: 'ok' }
-		});
+		assert.deepEqual(JSON.parse(res.body), { ok: true, version: '1.2.3-RC', checks: { google: 'ok' } });
 	});
 
 	it('refuses requests that bypass CloudFront', async () => {

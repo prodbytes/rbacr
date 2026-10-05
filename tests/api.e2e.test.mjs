@@ -59,11 +59,11 @@ async function tokenFor(email) {
 describe('rbacr API', { skip: !(await fetch(`${BASE}/health`).then((r) => r.ok, () => false)) && `no server at ${BASE}` }, () => {
 	let root, admin, user, other, voucher, creds;
 
-	it('reports itself healthy, with its dependencies', async () => {
+	it('reports itself healthy, with its configuration', async () => {
 		const res = await call('/health');
 		assert.equal(res.status, 200);
 		assert.equal(res.body.ok, true);
-		assert.equal(res.body.checks.database, 'ok');
+		assert.equal(res.body.checks.google, 'ok');
 	});
 
 	it('signs in roots, admins and users, who mint API tokens', async () => {

@@ -50,7 +50,7 @@ Every behaviour change must update, in the same commit:
   (presence's Floci uses 4566/8443).
 - Toolchain is managed by [devbox.json](devbox.json); enter it with
   `devbox shell` and keep [devbox.lock](devbox.lock) committed.
-- `devbox services up` starts PostgreSQL as the `devbox-db` Docker container
+- `devbox services up` starts DynamoDB Local as the `devbox-dynamodb` Docker container
   ([compose.yaml](compose.yaml)) plus the health monitor
   ([scripts/health-check.sh](scripts/health-check.sh)); stop with
   `devbox services stop`. In non-interactive contexts pass

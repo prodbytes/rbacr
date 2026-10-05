@@ -1,19 +1,19 @@
 import {
-	RBACR_DATABASE_URL,
+	RBACR_DYNAMODB_ENDPOINT,
+	RBACR_DYNAMODB_TABLE,
 	RBACR_GOOGLE_CLIENT_ID,
 	RBACR_GOOGLE_CLIENT_SECRET,
 	RBACR_PUBLIC_ORIGIN,
 	RBACR_ROOT_LIST
 } from '$app/env/private';
-import { createPostgresDb, type Db } from './db';
+import { createTable, ensureTable, type Table } from './dynamo';
 import { Allowlist } from './identity';
 import { Rbac } from './rbac';
-import { migrate } from './schema';
 import { Sessions } from './session';
 import { ApiTokens } from './tokens';
 
 export interface Services {
-	db: Db;
+	table: Table;
 	rbac: Rbac;
 	sessions: Sessions;
 	tokens: ApiTokens;
@@ -21,13 +21,19 @@ export interface Services {
 
 let services: Promise<Services> | undefined;
 
-/** Lazily connects and migrates once per process (i.e. once per Lambda cold start). */
+/** Created once per process (i.e. once per Lambda cold start). */
 export function getServices(): Promise<Services> {
 	services ??= (async () => {
-		if (!RBACR_DATABASE_URL) throw new Error('RBACR_DATABASE_URL is not set');
-		const db = createPostgresDb(RBACR_DATABASE_URL);
-		await migrate(db);
-		return { db, rbac: new Rbac(db, Allowlist.parse(RBACR_ROOT_LIST)), sessions: new Sessions(db), tokens: new ApiTokens(db) };
+		if (!RBACR_DYNAMODB_TABLE) throw new Error('RBACR_DYNAMODB_TABLE is not set');
+		const table = createTable(RBACR_DYNAMODB_TABLE, RBACR_DYNAMODB_ENDPOINT);
+		// Locally (DynamoDB Local) the app creates its table; in AWS infra/tables.yaml does.
+		if (RBACR_DYNAMODB_ENDPOINT) await ensureTable(table);
+		return {
+			table,
+			rbac: new Rbac(table, Allowlist.parse(RBACR_ROOT_LIST)),
+			sessions: new Sessions(table),
+			tokens: new ApiTokens(table)
+		};
 	})().catch((err) => {
 		services = undefined; // retry on the next request instead of caching the failure
 		throw err;

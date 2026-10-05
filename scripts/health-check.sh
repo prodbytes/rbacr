@@ -6,12 +6,12 @@ set -uo pipefail
 
 INTERVAL="${HEALTH_CHECK_INTERVAL:-15}"
 
+# DynamoDB Local answers an unsigned request with 400, which means it's up.
 check_database() {
-    if pg_isready -q -h "${PGHOST:-localhost}" -p "${PGPORT:-5432}" \
-            -U "${POSTGRES_USER:-postgres}" 2>/dev/null; then
-        echo "🐘 database ✅"
+    if curl -sS -o /dev/null --max-time 3 "${RBACR_DYNAMODB_ENDPOINT:-http://127.0.0.1:${RBACR_DYNAMODB_PORT:-8642}}" 2>/dev/null; then
+        echo "🗄️ dynamodb ✅"
     else
-        echo "🐘 database ❌"
+        echo "🗄️ dynamodb ❌"
     fi
 }
 

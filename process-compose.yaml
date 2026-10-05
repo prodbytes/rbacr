@@ -19,14 +19,16 @@ processes:
       restart: on_failure
       backoff_seconds: 5
 
-  1-postgresql:
-    command: docker compose up postgres
+  # DynamoDB Local (compose.yaml); the app creates its table on first use.
+  1-dynamodb:
+    command: docker compose up dynamodb
     shutdown:
-      command: docker stop devbox-db
+      command: docker stop devbox-dynamodb
       timeout_seconds: 30
     readiness_probe:
       exec:
-        command: docker exec devbox-db pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-postgres}
+        # Any HTTP answer (unsigned requests get 400) means it's up.
+        command: curl -s -o /dev/null --max-time 2 http://127.0.0.1:${RBACR_DYNAMODB_PORT:-8642}
       initial_delay_seconds: 3
       period_seconds: 3
       timeout_seconds: 5
@@ -43,14 +45,15 @@ processes:
   2-app:
     command: npm install --no-audit --no-fund && npm run dev -- --host ${RBACR_BIND_HOST:-127.0.0.1} --port ${RBACR_APP_PORT:-5173} --strictPort
     environment:
-      - RBACR_DATABASE_URL=${RBACR_DATABASE_URL:-postgres://postgres:postgres@localhost:5432/postgres}
+      - RBACR_DYNAMODB_TABLE=${RBACR_DYNAMODB_TABLE:-rbacr}
+      - RBACR_DYNAMODB_ENDPOINT=http://127.0.0.1:${RBACR_DYNAMODB_PORT:-8642}
       # Google redirects back to the HTTPS URL, so sign in through it.
       - RBACR_PUBLIC_ORIGIN=${RBACR_PUBLIC_ORIGIN:-https://local.rbacr.nu01.com:8444}
       # vite's HMR socket bypasses Floci (see vite.config.ts).
       - RBACR_HMR_HOST=${RBACR_HMR_HOST:-dev.rbacr.localhost}
       - RBACR_APP_PORT=${RBACR_APP_PORT:-5173}
     depends_on:
-      1-postgresql:
+      1-dynamodb:
         condition: process_healthy
     readiness_probe:
       http_get:

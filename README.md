@@ -39,7 +39,7 @@ app on AWS Lambda.
 ```bash
 cp .env.example .env          # set RBACR_ROOT_LIST to your address
 devbox run mkcert -install    # once: trust the local HTTPS certificate
-devbox services up            # Postgres, app, Floci (HTTPS) and health monitor
+devbox services up            # DynamoDB Local, app, Floci (HTTPS) and health monitor
 ```
 
 Then open **https://local.rbacr.nu01.com:8444/**, or
@@ -49,10 +49,10 @@ exists. `devbox services up` starts these processes, defined in
 
 | Process | What it does |
 |---------|--------------|
-| `1-postgresql` | PostgreSQL 18 in Docker as `devbox-db` ([compose.yaml](compose.yaml)), the same major version as the Aurora clusters in AWS |
-| `2-app` | `npm install`, then `vite dev` on http://localhost:5173 once Postgres is healthy. `RBACR_DATABASE_URL` defaults to the local container. |
+| `1-dynamodb` | DynamoDB Local in Docker as `devbox-dynamodb` on port 8642 (`RBACR_DYNAMODB_PORT`) ([compose.yaml](compose.yaml)), data kept in a volume |
+| `2-app` | `npm install`, then `vite dev` on http://localhost:5173 once DynamoDB Local is up. It uses the `rbacr` table there (`RBACR_DYNAMODB_TABLE`, `RBACR_DYNAMODB_ENDPOINT`) and creates it on first use. |
 | `3-floci` | [Floci](floci/README.md), the local AWS emulator, as the CloudFront distribution in front of the app over HTTPS (mkcert certificate, ports 4567/8444) |
-| `0-health-check` | Logs `🐘 database ✅ 🔐 app ✅ 🔒 https ✅` every 15 s (set `HEALTH_CHECK_INTERVAL` to change) |
+| `0-health-check` | Logs `🗄️ dynamodb ✅ 🔐 app ✅ 🔒 https ✅` every 15 s (set `HEALTH_CHECK_INTERVAL` to change) |
 
 Stop everything with `devbox services stop`. In non-interactive shells, add
 `--pcflags "--tui=false"`.
@@ -69,15 +69,14 @@ Devbox scripts: `devbox run dev | test | check | build | certs | release-rc | re
 
 | Variable | Required | Purpose |
 |----------|----------|---------|
-| `RBACR_DATABASE_URL` | yes | PostgreSQL URL (use `?sslmode=require` for managed databases). Locally it defaults to the container; in AWS the stack builds it from its Aurora cluster |
+| `RBACR_DYNAMODB_TABLE` | yes | The DynamoDB table holding all data. Locally `rbacr` on DynamoDB Local; in AWS the stage's table (`rbacr`, `rbacr-rc`) |
+| `RBACR_DYNAMODB_ENDPOINT` | no | DynamoDB Local's URL in development (process-compose sets `http://127.0.0.1:8642`); the app creates the table there |
 | `RBACR_ROOT_LIST` | no | Comma-separated root addresses and/or domains, e.g. `ana@example.com, example.org`. An invalid entry stops the app from starting. |
 | `RBACR_GOOGLE_CLIENT_ID` / `RBACR_GOOGLE_CLIENT_SECRET` | for sign-in | Google OAuth web client |
 | `RBACR_PUBLIC_ORIGIN` | no | The origin users browse, used for the Google redirect URI (default: the request's origin) |
 | `RBACR_ORIGIN_SECRET` | no | When set, every request must carry it in `x-rbacr-origin-secret`. In AWS, CloudFront adds it, so the Lambda URL can't be called directly. |
 | `RBACR_VERSION` | no | The release version, reported by `/health` (default `dev`) |
 | `RBACR_DEV_LOGIN` | no | `1` enables `/login/dev` under `vite dev` |
-
-Migrations run automatically on the first request.
 
 ## JSON APIs
 
@@ -118,7 +117,7 @@ revoke it on `/me` when it's no longer needed.
 ## Tests
 
 ```bash
-npm test                 # unit/domain tests (PGlite) + Lambda smoke test of the production build
+npm test                 # unit/domain tests (DynamoDB Local in Docker) + Lambda smoke test of the production build
 npm run test:e2e         # API + pages against a running dev server (devbox services up)
 npm run check            # svelte-check / TypeScript
 bash scripts/package-lambda.sh   # the deployable zip, smoke-tested with production dependencies only
@@ -162,7 +161,7 @@ src/lib/server/tokens.ts        personal API tokens (/api auth)
 src/lib/server/vpiguard.ts      the "frontend only" check for /vpi
 src/lib/vpi.ts                  the pages' /vpi client
 src/lib/server/identity.ts      e-mail/domain parsing, root allow list
-src/lib/server/{db,schema}.ts   Postgres access and migrations
+src/lib/server/dynamo.ts        the DynamoDB table: definition, client, query helpers
 src/lib/server/{session,google,auth}.ts  sign-in and sessions
 src/routes/api/**               external API (tokens)
 src/routes/vpi/**               VPI (session, frontend only)

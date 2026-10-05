@@ -3,13 +3,12 @@ AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::LanguageExtensions
 Description: >
   rbacr (and rbacr-rc): the role manager at https://rbacr.nu01.com (or
-  https://rc.rbacr.nu01.com). One Lambda (the SvelteKit app, lambda.js) in
-  a private VPC with an Aurora PostgreSQL Serverless v2 cluster (credentials
-  in Secrets Manager; IPv6 egress for Google sign-in), behind a function
+  https://rc.rbacr.nu01.com). One Lambda (the SvelteKit app, lambda.js)
+  using the stage's DynamoDB table (infra/tables.yaml), behind a function
   URL, fronted by CloudFront with an ACM certificate and Route 53 aliases in
   the rbacr.nu01.com zone. CloudFront adds a generated secret header that
   the app requires, so the function URL is useless when called directly. A
-  Route 53 health check polls https://<domain>/health (database and sign-in
+  Route 53 health check polls https://<domain>/health (sign-in
   configuration) and an alarm e-mails HealthNotificationEmails when it
   fails. Deploy in us-east-1 (CloudFront certificates live there) with
   scripts/deploy.sh.
@@ -41,183 +40,20 @@ Parameters:
     Type: String
     NoEcho: true
     Description: RBACR_GOOGLE_CLIENT_SECRET
-  DbEngineVersion:
-    Type: String
-    Default: '18.6'
-    Description: Aurora PostgreSQL version (the newest offered for db.serverless)
-  DbMaxCapacity:
-    Type: Number
-    Default: 4
-    MinValue: 1
-    MaxValue: 256
-    Description: Aurora Serverless v2 maximum ACUs (scripts/deploy.sh passes 2 for rc, 4 for prod); the minimum is 0, so it pauses when idle
   HealthNotificationEmails:
     Type: CommaDelimitedList
     Default: julio+health@nu01.com
     Description: >
       Addresses e-mailed when the /health check fails and recovers. Each one
       must confirm the SNS subscription e-mail before it gets notifications.
+  TableName:
+    Type: String
+    Description: The stage's DynamoDB table (the rbacr(-rc)-tables stack, infra/tables.yaml)
+  TableArn:
+    Type: String
+    Description: Its ARN
 
 Resources:
-  # --- Network: private dual-stack subnets, no NAT. The Lambda reaches the
-  # database privately and the internet (Google sign-in) over IPv6 through an
-  # egress-only gateway; nothing can connect in from outside.
-  Vpc:
-    Type: AWS::EC2::VPC
-    Properties:
-      CidrBlock: 10.42.0.0/16
-      EnableDnsSupport: true
-      EnableDnsHostnames: true
-      Tags:
-        - Key: Name
-          Value: !Ref AWS::StackName
-
-  VpcIpv6:
-    Type: AWS::EC2::VPCCidrBlock
-    Properties:
-      VpcId: !Ref Vpc
-      AmazonProvidedIpv6CidrBlock: true
-
-  EgressOnlyGateway:
-    Type: AWS::EC2::EgressOnlyInternetGateway
-    Properties:
-      VpcId: !Ref Vpc
-
-  RouteTable:
-    Type: AWS::EC2::RouteTable
-    Properties:
-      VpcId: !Ref Vpc
-      Tags:
-        - Key: Name
-          Value: !Ref AWS::StackName
-
-  Ipv6EgressRoute:
-    Type: AWS::EC2::Route
-    Properties:
-      RouteTableId: !Ref RouteTable
-      DestinationIpv6CidrBlock: ::/0
-      EgressOnlyInternetGatewayId: !Ref EgressOnlyGateway
-
-  SubnetA:
-    Type: AWS::EC2::Subnet
-    DependsOn: VpcIpv6
-    Properties:
-      VpcId: !Ref Vpc
-      AvailabilityZone: !Select [0, !GetAZs '']
-      CidrBlock: 10.42.0.0/20
-      Ipv6CidrBlock: !Select [0, !Cidr [!Select [0, !GetAtt Vpc.Ipv6CidrBlocks], 2, 64]]
-      AssignIpv6AddressOnCreation: true
-      Tags:
-        - Key: Name
-          Value: !Sub ${AWS::StackName}-a
-
-  SubnetB:
-    Type: AWS::EC2::Subnet
-    DependsOn: VpcIpv6
-    Properties:
-      VpcId: !Ref Vpc
-      AvailabilityZone: !Select [1, !GetAZs '']
-      CidrBlock: 10.42.16.0/20
-      Ipv6CidrBlock: !Select [1, !Cidr [!Select [0, !GetAtt Vpc.Ipv6CidrBlocks], 2, 64]]
-      AssignIpv6AddressOnCreation: true
-      Tags:
-        - Key: Name
-          Value: !Sub ${AWS::StackName}-b
-
-  SubnetARoutes:
-    Type: AWS::EC2::SubnetRouteTableAssociation
-    Properties:
-      SubnetId: !Ref SubnetA
-      RouteTableId: !Ref RouteTable
-
-  SubnetBRoutes:
-    Type: AWS::EC2::SubnetRouteTableAssociation
-    Properties:
-      SubnetId: !Ref SubnetB
-      RouteTableId: !Ref RouteTable
-
-  FunctionSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupDescription: !Sub ${AWS::StackName} Lambda (outbound only)
-      VpcId: !Ref Vpc
-      SecurityGroupEgress:
-        - IpProtocol: '-1'
-          CidrIp: 0.0.0.0/0
-        - IpProtocol: '-1'
-          CidrIpv6: ::/0
-
-  DatabaseSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupDescription: !Sub ${AWS::StackName} database (PostgreSQL from the Lambda only)
-      VpcId: !Ref Vpc
-      SecurityGroupIngress:
-        - IpProtocol: tcp
-          FromPort: 5432
-          ToPort: 5432
-          SourceSecurityGroupId: !Ref FunctionSecurityGroup
-
-  # --- Database: Aurora PostgreSQL Serverless v2, 0 ACU (paused) up to
-  # DbMaxCapacity. The master credentials are generated into Secrets
-  # Manager; the attachment adds the host, port and engine to the secret.
-  DatabaseSecret:
-    Type: AWS::SecretsManager::Secret
-    Properties:
-      Name: !Sub ${AWS::StackName}-db
-      Description: !Sub Master credentials of the ${AWS::StackName} Aurora cluster
-      GenerateSecretString:
-        SecretStringTemplate: '{"username": "rbacr"}'
-        GenerateStringKey: password
-        PasswordLength: 40
-        # URL-safe: the password goes into RBACR_DATABASE_URL.
-        ExcludePunctuation: true
-
-  DatabaseSubnetGroup:
-    Type: AWS::RDS::DBSubnetGroup
-    Properties:
-      DBSubnetGroupName: !Sub ${AWS::StackName}-db
-      DBSubnetGroupDescription: !Sub ${AWS::StackName} database subnets
-      SubnetIds: [!Ref SubnetA, !Ref SubnetB]
-
-  DatabaseCluster:
-    Type: AWS::RDS::DBCluster
-    DeletionPolicy: Snapshot
-    UpdateReplacePolicy: Snapshot
-    Properties:
-      DBClusterIdentifier: !Sub ${AWS::StackName}-db
-      Engine: aurora-postgresql
-      EngineVersion: !Ref DbEngineVersion
-      DatabaseName: rbacr
-      MasterUsername: !Sub '{{resolve:secretsmanager:${DatabaseSecret}:SecretString:username}}'
-      MasterUserPassword: !Sub '{{resolve:secretsmanager:${DatabaseSecret}:SecretString:password}}'
-      DBSubnetGroupName: !Ref DatabaseSubnetGroup
-      VpcSecurityGroupIds: [!Ref DatabaseSecurityGroup]
-      StorageEncrypted: true
-      DeletionProtection: true
-      BackupRetentionPeriod: 7
-      CopyTagsToSnapshot: true
-      ServerlessV2ScalingConfiguration:
-        MinCapacity: 0
-        MaxCapacity: !Ref DbMaxCapacity
-        SecondsUntilAutoPause: 300
-
-  DatabaseInstance:
-    Type: AWS::RDS::DBInstance
-    Properties:
-      DBInstanceIdentifier: !Sub ${AWS::StackName}-db-1
-      DBClusterIdentifier: !Ref DatabaseCluster
-      DBInstanceClass: db.serverless
-      Engine: aurora-postgresql
-      PubliclyAccessible: false
-
-  DatabaseSecretAttachment:
-    Type: AWS::SecretsManager::SecretTargetAttachment
-    Properties:
-      SecretId: !Ref DatabaseSecret
-      TargetId: !Ref DatabaseCluster
-      TargetType: AWS::RDS::DBCluster
-
   Certificate:
     Type: AWS::CertificateManager::Certificate
     Properties:
@@ -248,7 +84,7 @@ Resources:
     Properties:
       RoleName: !Sub ${AWS::StackName}-lambda
       # Created by infra/github-deploy.yaml; the deploy roles may only create
-      # roles bounded by it (logs only).
+      # roles bounded by it (logs and the rbacr tables).
       PermissionsBoundary: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/rbacr-lambda-boundary
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
@@ -267,20 +103,23 @@ Resources:
                   - logs:CreateLogStream
                   - logs:PutLogEvents
                 Resource: !Sub ${LogGroup.Arn}
-        # Network interfaces in the VPC (AWSLambdaVPCAccessExecutionRole).
-        - PolicyName: vpc
+        # The stage's table and its index; nothing else.
+        - PolicyName: dynamodb
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
               - Effect: Allow
                 Action:
-                  - ec2:CreateNetworkInterface
-                  - ec2:DescribeNetworkInterfaces
-                  - ec2:DescribeSubnets
-                  - ec2:DeleteNetworkInterface
-                  - ec2:AssignPrivateIpAddresses
-                  - ec2:UnassignPrivateIpAddresses
-                Resource: '*'
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:BatchWriteItem
+                  - dynamodb:ConditionCheckItem
+                Resource:
+                  - !Ref TableArn
+                  - !Sub ${TableArn}/index/*
 
   Function:
     Type: AWS::Lambda::Function
@@ -291,18 +130,13 @@ Resources:
       Architectures: [arm64]
       Handler: lambda.handler
       MemorySize: 1024
-      # Room for the database to resume from a pause (about 15 s).
-      Timeout: 30
+      Timeout: 15
       Role: !GetAtt FunctionRole.Arn
       Code:
         S3Bucket: !Ref CodeBucket
         S3Key: !Ref CodeKey
       LoggingConfig:
         LogGroup: !Ref LogGroup
-      VpcConfig:
-        SubnetIds: [!Ref SubnetA, !Ref SubnetB]
-        SecurityGroupIds: [!Ref FunctionSecurityGroup]
-        Ipv6AllowedForDualStack: true
       Environment:
         Variables:
           NODE_OPTIONS: --enable-source-maps
@@ -315,7 +149,7 @@ Resources:
           RBACR_ROOT_LIST: !Ref RootList
           RBACR_GOOGLE_CLIENT_ID: !Ref GoogleClientId
           RBACR_GOOGLE_CLIENT_SECRET: !Ref GoogleClientSecret
-          RBACR_DATABASE_URL: !Sub 'postgres://{{resolve:secretsmanager:${DatabaseSecret}:SecretString:username}}:{{resolve:secretsmanager:${DatabaseSecret}:SecretString:password}}@${DatabaseCluster.Endpoint.Address}:${DatabaseCluster.Endpoint.Port}/rbacr?sslmode=require'
+          RBACR_DYNAMODB_TABLE: !Ref TableName
 
   FunctionUrl:
     Type: AWS::Lambda::Url
@@ -416,9 +250,11 @@ Resources:
         EvaluateTargetHealth: false
 
   # Route 53 polls /health through CloudFront, like a visitor. The app
-  # answers 503 when the database or the Google client is missing.
+  # answers 503 when the Google client is missing.
   HealthCheck:
     Type: AWS::Route53::HealthCheck
+    # Created after the DNS records, so checkers don't cache NXDOMAIN.
+    DependsOn: [DnsRecordA, DnsRecordAAAA]
     Properties:
       HealthCheckConfig:
         Type: HTTPS
@@ -456,7 +292,7 @@ Resources:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub ${AWS::StackName}-health
-      AlarmDescription: !Sub https://${DomainName}/health is failing (database, sign-in configuration or the site itself)
+      AlarmDescription: !Sub https://${DomainName}/health is failing (sign-in configuration or the site itself)
       Namespace: AWS/Route53
       MetricName: HealthCheckStatus
       Dimensions:
@@ -487,8 +323,3 @@ Outputs:
     Value: !Ref HealthCheck
   HealthTopicArn:
     Value: !Ref HealthTopic
-  DatabaseEndpoint:
-    Value: !GetAtt DatabaseCluster.Endpoint.Address
-  DatabaseSecretArn:
-    Description: Master credentials (username, password, host, port)
-    Value: !Ref DatabaseSecret
