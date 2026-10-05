@@ -50,10 +50,15 @@ async function invoke(target, { method = 'GET', headers = {}, viaCloudFront = tr
 }
 
 describe('lambda handler', () => {
-	it('serves the JSON health check, outside /api, with the deployed version', async () => {
+	it('serves the JSON health check, outside /api: 503 without the database', async () => {
 		const res = await invoke('/health');
-		assert.equal(res.statusCode, 200);
-		assert.deepEqual(JSON.parse(res.body), { ok: true, version: '1.2.3-RC' });
+		assert.equal(res.statusCode, 503);
+		assert.equal(res.headers['cache-control'], 'no-store');
+		assert.deepEqual(JSON.parse(res.body), {
+			ok: false,
+			version: '1.2.3-RC',
+			checks: { database: 'error', google: 'ok' }
+		});
 	});
 
 	it('refuses requests that bypass CloudFront', async () => {

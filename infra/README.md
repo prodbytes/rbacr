@@ -8,7 +8,7 @@ rbacr's AWS infrastructure, as CloudFormation templates. Everything lives in
 | [zone.yaml](zone.yaml) | `rbacr-zone` | The public hosted zone `rbacr.nu01.com`, its NS delegation in the `nu01.com` zone, a CAA record (only Amazon issues certificates), and `local.rbacr.nu01.com → 127.0.0.1` for local HTTPS | An administrator, once |
 | [github-deploy.yaml](github-deploy.yaml) | `rbacr-github-deploy` | The `rbacr-github-deploy` role (`*GA` tags), the `rbacr-github-deploy-rc` role (`*RC*` tags and manual runs from `main`), and the `rbacr-lambda-boundary` permissions boundary | An administrator, once |
 | [artifacts.yaml](artifacts.yaml) | `rbacr-artifacts`, `rbacr-rc-artifacts` | A private bucket for the Lambda zips; old zips expire after 90 days | [scripts/deploy.sh](../scripts/deploy.sh) |
-| [app.yaml](app.yaml) | `rbacr`, `rbacr-rc` | The ACM certificate, the origin secret, the Lambda with its function URL and log group, the CloudFront distribution, and the A/AAAA aliases | [scripts/deploy.sh](../scripts/deploy.sh) |
+| [app.yaml](app.yaml) | `rbacr`, `rbacr-rc` | The ACM certificate, the origin secret, the Lambda with its function URL and log group, the CloudFront distribution, the A/AAAA aliases, and the Route 53 health check of `/health` with its alarm and e-mail topic | [scripts/deploy.sh](../scripts/deploy.sh) |
 
 ## How a request flows
 
@@ -40,6 +40,18 @@ browser ──https──▶ CloudFront (rbacr.nu01.com, ACM certificate)
 - **Secrets.** `RBACR_DATABASE_URL` and `RBACR_GOOGLE_CLIENT_SECRET` are
   `NoEcho` stack parameters, stored as Lambda environment variables
   (encrypted at rest).
+- **Health check.** Route 53 polls `https://<domain>/health` over HTTPS
+  through CloudFront, every 30 s from three regions, and fails it after 3
+  failed polls. `/health` answers 503 unless the database answers and the
+  Google client is configured. The `<stack>-health` alarm fires when the
+  check is unhealthy (or reports no data) for 2 minutes, and it notifies
+  the `<stack>-health` SNS topic, again on recovery. The topic e-mails the
+  `HealthNotificationEmails` parameter (comma-separated, default
+  `julio+health@nu01.com`; `HEALTH_EMAILS` for scripts/deploy.sh). Each
+  address must click the confirmation link SNS sends it after the first
+  deploy. The template uses the `AWS::LanguageExtensions` transform
+  (`Fn::ForEach` over the addresses), so deploys pass
+  `CAPABILITY_AUTO_EXPAND`.
 - **Database.** It is external to these templates: any PostgreSQL that the
   Lambda can reach over the internet (Neon, Supabase, RDS with TLS…). Use
   `?sslmode=require`. Each Lambda instance holds one connection.
@@ -67,12 +79,15 @@ touch the app run the Release workflow's build and tests, without publishing.
    dependencies only, smoke-tested through `lambda.js`).
 2. Deploys `artifacts.yaml` and uploads the zip.
 3. Deploys `app.yaml`.
-4. Checks the live site: `/health` must report the tag; `/` must be the
+4. Checks the live site: `/health` must be healthy and report the tag; `/` must be the
    sign-in page; anonymous `/api/me` must return 401; `/login/dev` must
    return 404; and the bare function URL must return 403.
 
 You can also run it by hand with admin credentials (inside devbox):
-`STAGE=rc TAG=0.1.<Z>-RC bash scripts/deploy.sh`.
+`STAGE=rc TAG=0.1.<Z>-RC bash scripts/deploy.sh`. Settings not already in
+the environment are read from the git-ignored `.env.$STAGE` (`.env.prod`,
+`.env.rc`): `KEY=value` lines for `RBACR_*`, `HEALTH_EMAILS` and
+`HOSTED_ZONE_ID`. The file is parsed, not sourced.
 
 ## One-time setup
 
@@ -103,9 +118,11 @@ You can also run it by hand with admin credentials (inside devbox):
    Each one may manage only its own stage's stacks, function, log group,
    secret, bucket and DNS names. The roles can create the Lambda's execution
    role only with the `rbacr-lambda-boundary` boundary attached, so a deploy
-   can never create a role that does more than write logs. CloudFront and ACM
-   permissions are account-wide, because their resource ids aren't known in
-   advance.
+   can never create a role that does more than write logs. CloudFront, ACM
+   and Route 53 health check permissions are account-wide, because their
+   resource ids aren't known in advance. Redeploy this stack whenever
+   `github-deploy.yaml` changes (for example, the health check permissions);
+   the deploy roles can't update themselves.
 
 3. **Repository settings.** Variables are public identifiers; secrets are
    not.
