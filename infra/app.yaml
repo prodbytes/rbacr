@@ -253,6 +253,8 @@ Resources:
   # answers 503 when the Google client is missing.
   HealthCheck:
     Type: AWS::Route53::HealthCheck
+    # Created after the DNS records, so checkers don't cache NXDOMAIN.
+    DependsOn: [DnsRecordA, DnsRecordAAAA]
     Properties:
       HealthCheckConfig:
         Type: HTTPS
