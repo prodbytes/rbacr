@@ -92,5 +92,4 @@ jobs:
           HEALTH_EMAILS: ${{ vars.RBACR_RC_HEALTH_EMAILS }}
           # Secrets; when unset, the stack keeps its deployed values.
           RBACR_GOOGLE_CLIENT_SECRET: ${{ secrets.RBACR_RC_GOOGLE_CLIENT_SECRET }}
-          RBACR_DATABASE_URL: ${{ secrets.RBACR_RC_DATABASE_URL }}
         run: bash scripts/deploy.sh

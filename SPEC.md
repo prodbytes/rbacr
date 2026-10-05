@@ -273,7 +273,7 @@ All settings come from environment variables prefixed `RBACR_`:
 
 | Variable | Required | Purpose |
 |----------|----------|---------|
-| `RBACR_DATABASE_URL` | yes | PostgreSQL URL (append `?sslmode=require` for managed databases) |
+| `RBACR_DATABASE_URL` | yes | PostgreSQL URL (append `?sslmode=require` for managed databases). In AWS, built from the stage's Aurora cluster and secret |
 | `RBACR_ROOT_LIST` | no (no roots if empty) | Root addresses and domains (R1) |
 | `RBACR_GOOGLE_CLIENT_ID`, `RBACR_GOOGLE_CLIENT_SECRET` | for Google sign-in | OAuth web client. Without them `/login/google` returns 503. |
 | `RBACR_PUBLIC_ORIGIN` | no | Origin for the Google redirect URI (`<origin>/login/google/callback`); default: the request's origin |
@@ -288,7 +288,9 @@ All settings come from environment variables prefixed `RBACR_`:
   fronted by CloudFront ([infra/app.yaml](infra/app.yaml)). The request's
   host comes from the `x-rbacr-host` header (adapter-node's `HOST_HEADER`),
   which CloudFront sets, and the protocol is assumed to be `https`.
-- PostgreSQL. Migrations in `src/lib/server/schema.ts` are append-only. They
+- PostgreSQL 18: Aurora PostgreSQL Serverless v2 in AWS (one cluster per
+  stage, credentials in Secrets Manager), a `postgres:18` container locally
+  ([compose.yaml](compose.yaml)), PGlite in unit tests. Migrations in `src/lib/server/schema.ts` are append-only. They
   run automatically on the first request of each process, under an advisory
   lock.
 

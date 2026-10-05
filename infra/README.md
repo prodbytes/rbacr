@@ -8,7 +8,7 @@ rbacr's AWS infrastructure, as CloudFormation templates. Everything lives in
 | [zone.yaml](zone.yaml) | `rbacr-zone` | The public hosted zone `rbacr.nu01.com`, its NS delegation in the `nu01.com` zone, a CAA record (only Amazon issues certificates), and `local.rbacr.nu01.com → 127.0.0.1` for local HTTPS | An administrator, once |
 | [github-deploy.yaml](github-deploy.yaml) | `rbacr-github-deploy` | The `rbacr-github-deploy` role (`*GA` tags), the `rbacr-github-deploy-rc` role (`*RC*` tags and manual runs from `main`), and the `rbacr-lambda-boundary` permissions boundary | An administrator, once |
 | [artifacts.yaml](artifacts.yaml) | `rbacr-artifacts`, `rbacr-rc-artifacts` | A private bucket for the Lambda zips; old zips expire after 90 days | [scripts/deploy.sh](../scripts/deploy.sh) |
-| [app.yaml](app.yaml) | `rbacr`, `rbacr-rc` | The ACM certificate, the origin secret, the Lambda with its function URL and log group, the CloudFront distribution, the A/AAAA aliases, and the Route 53 health check of `/health` with its alarm and e-mail topic | [scripts/deploy.sh](../scripts/deploy.sh) |
+| [app.yaml](app.yaml) | `rbacr`, `rbacr-rc` | The VPC, the Aurora PostgreSQL Serverless v2 cluster and its Secrets Manager credentials, the ACM certificate, the origin secret, the Lambda with its function URL and log group, the CloudFront distribution, the A/AAAA aliases, and the Route 53 health check of `/health` with its alarm and e-mail topic | [scripts/deploy.sh](../scripts/deploy.sh) |
 
 ## How a request flows
 
@@ -20,7 +20,8 @@ browser ──https──▶ CloudFront (rbacr.nu01.com, ACM certificate)
                    Lambda function URL ──▶ lambda.js ──▶ SvelteKit (adapter-node)
                                                            │
                                                            ▼
-                                                     PostgreSQL (RBACR_DATABASE_URL)
+                                                     Aurora PostgreSQL Serverless v2
+                                                     (same VPC, private subnets)
 ```
 
 - **Caching.** `/_app/immutable/*` holds content-hashed assets and is cached
@@ -37,9 +38,12 @@ browser ──https──▶ CloudFront (rbacr.nu01.com, ACM certificate)
   function URL's host. CloudFront therefore sends the site's host in
   `x-rbacr-host`, and adapter-node reads it (`HOST_HEADER`). That keeps
   SvelteKit's CSRF origin check and the Google redirect URI correct.
-- **Secrets.** `RBACR_DATABASE_URL` and `RBACR_GOOGLE_CLIENT_SECRET` are
-  `NoEcho` stack parameters, stored as Lambda environment variables
-  (encrypted at rest).
+- **Secrets.** `RBACR_GOOGLE_CLIENT_SECRET` is a `NoEcho` stack parameter.
+  The database credentials are generated into the `<stack>-db` Secrets
+  Manager secret (username, password, and the host and port once the
+  cluster exists), and CloudFormation builds `RBACR_DATABASE_URL` from it.
+  Both reach the function as environment variables (encrypted at rest). The
+  password isn't rotated: rotating it means redeploying.
 - **Health check.** Route 53 polls `https://<domain>/health` over HTTPS
   through CloudFront, every 30 s from three regions, and fails it after 3
   failed polls. `/health` answers 503 unless the database answers and the
@@ -52,9 +56,22 @@ browser ──https──▶ CloudFront (rbacr.nu01.com, ACM certificate)
   deploy. The template uses the `AWS::LanguageExtensions` transform
   (`Fn::ForEach` over the addresses), so deploys pass
   `CAPABILITY_AUTO_EXPAND`.
-- **Database.** It is external to these templates: any PostgreSQL that the
-  Lambda can reach over the internet (Neon, Supabase, RDS with TLS…). Use
-  `?sslmode=require`. Each Lambda instance holds one connection.
+- **Database.** Each stage has an Aurora PostgreSQL Serverless v2 cluster,
+  `<stack>-db` (version `DbEngineVersion`, default 18.6, matching the local
+  `postgres:18` container). It scales from 0 ACU, when it pauses after 5 idle
+  minutes, up to 2 ACU for `rc` and 4 for `prod` (`DbMaxCapacity`). It is
+  encrypted, takes daily backups for 7 days, has deletion protection, and
+  leaves a final snapshot if the stack deletes it. Connections use TLS
+  (`sslmode=require`), and each Lambda instance holds one. A request that
+  wakes a paused cluster waits about 15 s, so the function timeout is 30 s.
+  The `/health` polls (about one every 10 s) count as activity, so as long
+  as the health check runs, the cluster stays at its 0.5 ACU floor rather
+  than pausing.
+- **Network.** The function runs in the stage's VPC: two private
+  dual-stack subnets with no NAT gateway. It reaches the database
+  privately; the database accepts PostgreSQL only from the function's
+  security group. Outbound internet (Google's token endpoint) goes over
+  IPv6 through an egress-only internet gateway, so nothing can connect in.
 
 ## Releases
 
@@ -143,7 +160,6 @@ the environment are read from the git-ignored `.env.$STAGE` (`.env.prod`,
      gh variable set "RBACR_${t}_GOOGLE_CLIENT_ID" --body "<client id>.apps.googleusercontent.com"
      gh variable set "RBACR_${t}_HEALTH_EMAILS" --body "julio+health@nu01.com"  # optional
      gh secret set "RBACR_${t}_GOOGLE_CLIENT_SECRET"
-     gh secret set "RBACR_${t}_DATABASE_URL"   # that tenant's database
    done
    # LOCAL, for codespaces (optional; local machines use .env directly)
    gh secret set --app codespaces RBACR_LOCAL_ROOT_LIST --body "nu01.com"
