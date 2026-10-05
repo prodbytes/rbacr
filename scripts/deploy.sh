@@ -7,7 +7,7 @@
 #      rbacr[-rc]-artifacts) and uploads the zip
 #   3. deploys the app (infra/app.yaml, stack rbacr[-rc]: certificate,
 #      Lambda + function URL, CloudFront, DNS)
-#   4. smoke-tests the live site: /api/health must report this version, /
+#   4. smoke-tests the live site: /health must report this version, /
 #      must be the sign-in page, /api/me must refuse anonymous calls (401),
 #      /login/dev must not exist (404), and the function URL must refuse
 #      direct calls (403)
@@ -131,14 +131,14 @@ echo "==> checking https://$DOMAIN/"
 status() { curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$@"; }
 check() {
   local health
-  health="$(curl -fsS --max-time 20 "https://$DOMAIN/api/health")" || { echo "    /api/health failed"; return 1; }
-  [[ "$health" == "{\"ok\":true,\"version\":\"$RELEASE\"}" ]] || { echo "    /api/health says $health, want version $RELEASE"; return 1; }
+  health="$(curl -fsS --max-time 20 "https://$DOMAIN/health")" || { echo "    /health failed"; return 1; }
+  [[ "$health" == "{\"ok\":true,\"version\":\"$RELEASE\"}" ]] || { echo "    /health says $health, want version $RELEASE"; return 1; }
   curl -fsS --max-time 20 -H 'accept: text/html' "https://$DOMAIN/" | grep -q 'Sign in with Google' \
     || { echo "    / isn't the sign-in page"; return 1; }
   local code
   code="$(status "https://$DOMAIN/api/me")"; [[ "$code" == 401 ]] || { echo "    /api/me answered $code, want 401"; return 1; }
   code="$(status -H 'accept: text/html' "https://$DOMAIN/login/dev")"; [[ "$code" == 404 ]] || { echo "    /login/dev answered $code, want 404"; return 1; }
-  code="$(status "${function_url%/}/api/health")"; [[ "$code" == 403 ]] || { echo "    the function URL answered $code, want 403"; return 1; }
+  code="$(status "${function_url%/}/health")"; [[ "$code" == 403 ]] || { echo "    the function URL answered $code, want 403"; return 1; }
 }
 for attempt in $(seq 1 30); do
   if check; then

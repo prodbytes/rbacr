@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
-	import { formValues, uxFetch, UxError } from '#lib/uxapi.js';
+	import { formValues, vpiFetch, VpiError } from '#lib/vpi.js';
 	import type { PageProps } from './$types';
 
 	let { data }: PageProps = $props();
@@ -9,10 +9,10 @@
 	async function onCreate(e: SubmitEvent) {
 		const { id, name, roles } = formValues(e);
 		try {
-			const system = await uxFetch<{ id: string }>(fetch, '/systems', { method: 'POST', body: { id, name, roles } });
+			const system = await vpiFetch<{ id: string }>(fetch, '/systems', { method: 'POST', body: { id, name, roles } });
 			await goto(`/systems/${system.id}`);
 		} catch (err) {
-			if (!(err instanceof UxError)) throw err;
+			if (!(err instanceof VpiError)) throw err;
 			error = err.message;
 		}
 	}

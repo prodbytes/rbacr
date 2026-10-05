@@ -36,7 +36,7 @@ export const variables = defineEnvVars({
 			'When set, every request must carry it in the x-rbacr-origin-secret header (added by CloudFront), so the Lambda URL cannot be called directly.',
 		schema: optional
 	},
-	RBACR_VERSION: { description: 'The deployed version, reported by /api/health', schema: (value) => value || 'dev' },
+	RBACR_VERSION: { description: 'The deployed version, reported by /health', schema: (value) => value || 'dev' },
 	RBACR_DEV_LOGIN: {
 		description: 'Set to 1 to enable password-less /login/dev. Only honoured by `vite dev`.',
 		schema: (value) => value === '1' || value === 'true'

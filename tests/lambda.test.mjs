@@ -50,15 +50,15 @@ async function invoke(target, { method = 'GET', headers = {}, viaCloudFront = tr
 }
 
 describe('lambda handler', () => {
-	it('serves the JSON health check with the deployed version', async () => {
-		const res = await invoke('/api/health');
+	it('serves the JSON health check, outside /api, with the deployed version', async () => {
+		const res = await invoke('/health');
 		assert.equal(res.statusCode, 200);
 		assert.deepEqual(JSON.parse(res.body), { ok: true, version: '1.2.3-RC' });
 	});
 
 	it('refuses requests that bypass CloudFront', async () => {
 		for (const headers of [{}, { 'x-rbacr-origin-secret': 'wrong' }]) {
-			const res = await invoke('/api/health', { viaCloudFront: false, headers });
+			const res = await invoke('/health', { viaCloudFront: false, headers });
 			assert.equal(res.statusCode, 403);
 		}
 	});
@@ -82,32 +82,40 @@ describe('lambda handler', () => {
 		assert.equal(res.statusCode, 401);
 	});
 
-	it('refuses /uxapi calls that do not come from the frontend', async () => {
+	it('refuses every /api path without a token, unknown ones included', async () => {
+		for (const path of ['/api', '/api/health', '/api/nope', '/api/systems/x/roles/y']) {
+			const res = await invoke(path);
+			assert.equal(res.statusCode, 401, path);
+			assert.equal(res.headers['cache-control'], 'no-store');
+		}
+	});
+
+	it('refuses /vpi calls that do not come from the frontend', async () => {
 		const attempts = [
 			{},
-			{ 'x-rbacr-ux': '1' },
-			{ 'x-rbacr-ux': '1', 'sec-fetch-site': 'cross-site' },
+			{ 'x-rbacr-vpi': '1' },
+			{ 'x-rbacr-vpi': '1', 'sec-fetch-site': 'cross-site' },
 			{ 'sec-fetch-site': 'same-origin' }
 		];
 		for (const headers of attempts) {
-			const res = await invoke('/uxapi/session', { headers });
+			const res = await invoke('/vpi/session', { headers });
 			assert.equal(res.statusCode, 403, JSON.stringify(headers));
 			assert.match(JSON.parse(res.body).error, /only for the rbacr frontend/);
 		}
-		const write = await invoke('/uxapi/me/redeem', {
+		const write = await invoke('/vpi/me/redeem', {
 			method: 'POST',
-			headers: { 'x-rbacr-ux': '1', 'sec-fetch-site': 'same-origin', origin: 'https://evil.example', 'content-type': 'application/json' }
+			headers: { 'x-rbacr-vpi': '1', 'sec-fetch-site': 'same-origin', origin: 'https://evil.example', 'content-type': 'application/json' }
 		});
 		assert.equal(write.statusCode, 403);
 	});
 
-	it('serves /uxapi to the frontend', async () => {
-		const headers = { 'x-rbacr-ux': '1', 'sec-fetch-site': 'same-origin' };
-		const session = await invoke('/uxapi/session', { headers });
+	it('serves /vpi to the frontend', async () => {
+		const headers = { 'x-rbacr-vpi': '1', 'sec-fetch-site': 'same-origin' };
+		const session = await invoke('/vpi/session', { headers });
 		assert.equal(session.statusCode, 200);
 		assert.equal(session.headers['cache-control'], 'no-store');
 		assert.deepEqual(JSON.parse(session.body), { user: null, devLogin: false });
-		const me = await invoke('/uxapi/me', { headers });
+		const me = await invoke('/vpi/me', { headers });
 		assert.equal(me.statusCode, 401);
 		assert.deepEqual(JSON.parse(me.body), { error: 'Not signed in' });
 	});

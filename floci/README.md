@@ -50,7 +50,7 @@ runs side by side with presence's Floci.
 - **To make browsers trust the certificate, run once:**
   `devbox run mkcert -install`. This asks for your password, because it adds
   mkcert's CA to the system trust store.
-- The health monitor's `🔒 https` check calls `/api/health` through Floci
+- The health monitor's `🔒 https` check calls `/health` through Floci
   and validates the certificate against mkcert's CA.
 - Node (for example the end-to-end tests) needs the CA as well:
   `NODE_EXTRA_CA_CERTS="$(mkcert -CAROOT)/rootCA.pem" RBACR_E2E_URL=https://rbacr.localhost:8444 npm run test:e2e`.

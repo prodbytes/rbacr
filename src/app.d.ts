@@ -3,7 +3,10 @@
 declare global {
 	namespace App {
 		interface Locals {
-			/** The signed-in identity's e-mail, or null. */
+			/**
+			 * The authenticated identity's e-mail, or null: from the session cookie
+			 * outside /api, from the personal API token on /api.
+			 */
 			email: string | null;
 		}
 	}

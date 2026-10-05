@@ -14,6 +14,9 @@ app on AWS Lambda.
   (`@nu01.com` means everyone at nu01.com). They hold the single global
   `root` role and every role in every system. They create systems and roles, and can
   grant any role to an address or a whole domain.
+- **Implied roles**: a role can imply other roles of its system, so holding
+  `premium` can also give `free`, and `admin` can give both. Implication is
+  transitive; only roots set it, and no role can imply `admin`.
 - **Admins** hold a system's `admin` role. They can grant that system's other
   roles to individual addresses, and create vouchers for them. Only roots can
   hand out `admin`, whether directly or through an admin voucher.
@@ -71,22 +74,25 @@ Devbox scripts: `devbox run dev | test | check | build | certs | release-rc | re
 | `RBACR_GOOGLE_CLIENT_ID` / `RBACR_GOOGLE_CLIENT_SECRET` | for sign-in | Google OAuth web client |
 | `RBACR_PUBLIC_ORIGIN` | no | The origin users browse, used for the Google redirect URI (default: the request's origin) |
 | `RBACR_ORIGIN_SECRET` | no | When set, every request must carry it in `x-rbacr-origin-secret`. In AWS, CloudFront adds it, so the Lambda URL can't be called directly. |
-| `RBACR_VERSION` | no | The release version, reported by `/api/health` (default `dev`) |
+| `RBACR_VERSION` | no | The release version, reported by `/health` (default `dev`) |
 | `RBACR_DEV_LOGIN` | no | `1` enables `/login/dev` under `vite dev` |
 
 Migrations run automatically on the first request.
 
 ## JSON APIs
 
-rbacr has two APIs:
+rbacr has two interfaces:
 
-| | `/api`: external | `/uxapi`: frontend only |
+| | `/api`: the API (external) | `/vpi`: the VPI (view programming interface, frontend only) |
 |---|---|---|
 | For | scripts and other applications | rbacr's own pages |
 | Auth | personal API token, `Authorization: Bearer rbacr_…` | the browser session cookie |
 | Contract | stable, documented in [SPEC.md](SPEC.md#api-the-external-api-personal-api-token-a1) | shaped for the pages, may change |
 
-`/api` ignores the session cookie. `/uxapi` refuses anything that isn't a
+Every `/api` request, unknown paths included, needs a valid personal API
+token (401 otherwise); `/api` ignores the session cookie. The only
+unauthenticated JSON endpoint is `GET /health` (`{ ok, version }`), outside
+both. `/vpi` refuses anything that isn't a
 same-origin request from rbacr's pages (403), so another site, a script, or
 a caller holding only a token can't use it.
 
@@ -149,17 +155,17 @@ one-time AWS, GitHub and Google setup is in
 
 ```
 src/env.ts                      RBACR_* variable definitions
-src/hooks.server.ts             session cookie -> locals.email, security headers
+src/hooks.server.ts             /api token or session cookie -> locals.email, security headers
 src/lib/server/rbac.ts          all role and voucher rules (the domain model)
 src/lib/server/tokens.ts        personal API tokens (/api auth)
-src/lib/server/uxguard.ts       the "frontend only" check for /uxapi
-src/lib/uxapi.ts                the pages' /uxapi client
+src/lib/server/vpiguard.ts      the "frontend only" check for /vpi
+src/lib/vpi.ts                  the pages' /vpi client
 src/lib/server/identity.ts      e-mail/domain parsing, root allow list
 src/lib/server/{db,schema}.ts   Postgres access and migrations
 src/lib/server/{session,google,auth}.ts  sign-in and sessions
 src/routes/api/**               external API (tokens)
-src/routes/uxapi/**             frontend API (session, frontend only)
-src/routes/{me,systems,global}/**  UI pages (load and change data through /uxapi)
+src/routes/vpi/**               VPI (session, frontend only)
+src/routes/{me,systems,global}/**  UI pages (load and change data through /vpi)
 lambda.js                       Lambda entrypoint (serverless-http + adapter-node)
 infra/                          CloudFormation: zone, deploy roles, artifacts, app
 floci/                          local CloudFront (HTTPS) on Floci

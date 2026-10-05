@@ -3,7 +3,7 @@ import type { Handle } from '@sveltejs/kit/hooks';
 import { RBACR_ORIGIN_SECRET, RBACR_PUBLIC_ORIGIN } from '$app/env/private';
 import { getServices } from '#lib/server/services.js';
 import { SESSION_COOKIE } from '#lib/server/session.js';
-import { rejectNonFrontend } from '#lib/server/uxguard.js';
+import { rejectNonFrontend } from '#lib/server/vpiguard.js';
 
 const ORIGIN_SECRET_HEADER = 'x-rbacr-origin-secret';
 
@@ -20,17 +20,32 @@ export const handle: Handle = async ({ event, resolve }) => {
 	// page that already passed this check.
 	if (!event.isSubRequest && !fromOrigin(event.request)) return new Response('Forbidden', { status: 403 });
 	const path = event.url.pathname;
-	const uxapi = path === '/uxapi' || path.startsWith('/uxapi/');
-	if (uxapi) {
+	const vpi = path === '/vpi' || path.startsWith('/vpi/');
+	if (vpi) {
 		const own = [event.url.origin, ...(RBACR_PUBLIC_ORIGIN ? [RBACR_PUBLIC_ORIGIN] : [])];
 		const reason = rejectNonFrontend(event.request, event.isSubRequest, own);
 		if (reason) {
-			return Response.json({ error: `/uxapi is only for the rbacr frontend (${reason}); use /api with an API token` }, { status: 403 });
+			return Response.json({ error: `/vpi is only for the rbacr frontend (${reason}); use /api with an API token` }, { status: 403 });
 		}
 	}
 	event.locals.email = null;
-	// The external API authenticates with API tokens only; never look at the session there.
-	const token = path === '/api' || path.startsWith('/api/') ? undefined : event.cookies.get(SESSION_COOKIE);
+	const api = path === '/api' || path.startsWith('/api/');
+	if (api) {
+		// The external API takes personal API tokens only, never the session, and
+		// refuses everything else before routing, unknown paths included.
+		const [scheme, bearer] = (event.request.headers.get('authorization') ?? '').trim().split(/\s+/);
+		if (scheme?.toLowerCase() === 'bearer' && bearer) {
+			const { tokens } = await getServices();
+			event.locals.email = await tokens.authenticate(bearer);
+		}
+		if (!event.locals.email) {
+			return Response.json(
+				{ error: 'A valid API token is required' },
+				{ status: 401, headers: { 'www-authenticate': 'Bearer', 'cache-control': 'no-store' } }
+			);
+		}
+	}
+	const token = api ? undefined : event.cookies.get(SESSION_COOKIE);
 	if (token) {
 		const { sessions } = await getServices();
 		event.locals.email = await sessions.validate(token);
@@ -40,6 +55,6 @@ export const handle: Handle = async ({ event, resolve }) => {
 	response.headers.set('x-content-type-options', 'nosniff');
 	response.headers.set('referrer-policy', 'same-origin');
 	response.headers.set('x-frame-options', 'DENY');
-	if (uxapi) response.headers.set('cache-control', 'no-store');
+	if (vpi || api) response.headers.set('cache-control', 'no-store');
 	return response;
 };

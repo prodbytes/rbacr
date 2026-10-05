@@ -144,6 +144,67 @@ describe('regular users', () => {
 	});
 });
 
+describe('role implications', () => {
+	let admin: Actor;
+	beforeEach(async () => {
+		await rbac.createSystem(root, { id: 'presence', roles: ['free', 'premium'] });
+		await rbac.setImplications(root, 'presence', 'premium', ['free']);
+		await rbac.setImplications(root, 'presence', ADMIN_ROLE, ['premium']);
+		admin = await rbac.actor(ADMIN);
+	});
+
+	it('are listed with the system', async () => {
+		expect((await rbac.getSystem(root, 'presence')).implies).toEqual({ admin: ['premium'], premium: ['free'] });
+		expect((await rbac.getSystem(root, 'crm')).implies).toEqual({});
+	});
+
+	it('give the implied roles, transitively', async () => {
+		await rbac.grant(root, 'presence', 'premium', USER);
+		await rbac.grant(root, 'presence', ADMIN_ROLE, 'boss@partner.com');
+		expect(await rbac.rolesOf(USER)).toEqual({ presence: ['free', 'premium'] });
+		expect(await rbac.rolesOf('boss@partner.com')).toEqual({ presence: ['admin', 'free', 'premium'] });
+		expect(await rbac.hasRole(root, USER, 'presence', 'free')).toBe(true);
+		expect(await rbac.hasRole(root, USER, 'presence', ADMIN_ROLE)).toBe(false);
+		expect(await rbac.rolesIn(root, 'boss@partner.com', 'presence')).toEqual(['admin', 'free', 'premium']);
+	});
+
+	it('apply to global grants in each system that defines the role', async () => {
+		await rbac.addRole(root, 'billing', 'premium');
+		await rbac.grantGlobal(root, 'premium', USER);
+		expect(await rbac.rolesOf(USER)).toEqual({ billing: ['premium'], presence: ['free', 'premium'] });
+	});
+
+	it('are replaced as a whole, and go away with the role', async () => {
+		await rbac.grant(root, 'presence', 'premium', USER);
+		await rbac.setImplications(root, 'presence', 'premium', []);
+		expect(await rbac.rolesOf(USER)).toEqual({ presence: ['premium'] });
+		await rbac.setImplications(root, 'presence', 'premium', ['free']);
+		await rbac.removeRole(root, 'presence', 'free');
+		expect((await rbac.getSystem(root, 'presence')).implies).toEqual({ admin: ['premium'] });
+	});
+
+	it('refuse cycles, self-implication, implying admin and unknown roles', async () => {
+		await expectError(rbac.setImplications(root, 'presence', 'free', ['premium']), 400, /itself/);
+		await expectError(rbac.setImplications(root, 'presence', 'free', ['free']), 400, /itself/);
+		await expectError(rbac.setImplications(root, 'presence', 'free', [ADMIN_ROLE]), 400, /admin/);
+		await expectError(rbac.setImplications(root, 'presence', 'free', ['ghost']), 404);
+		await expectError(rbac.setImplications(root, 'presence', 'ghost', ['free']), 404);
+		await expectError(rbac.setImplications(root, 'nope', 'free', []), 404);
+	});
+
+	it('are changed only by roots', async () => {
+		await expectError(rbac.setImplications(admin, 'billing', 'editor', ['viewer']), 403);
+	});
+
+	it('let admins hand out implied roles only through grantable roles', async () => {
+		await rbac.grant(root, 'presence', ADMIN_ROLE, ADMIN);
+		const presenceAdmin = await rbac.actor(ADMIN);
+		await rbac.grant(presenceAdmin, 'presence', 'premium', USER);
+		expect(await rbac.rolesOf(USER)).toEqual({ presence: ['free', 'premium'] });
+		expect((await rbac.actor(USER)).adminOf).toEqual([]);
+	});
+});
+
 describe('canAssign', () => {
 	const admin: Actor = { email: ADMIN, root: false, adminOf: ['billing'] };
 	it('encodes the propagation rules', () => {

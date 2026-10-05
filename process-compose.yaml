@@ -56,7 +56,7 @@ processes:
       http_get:
         host: 127.0.0.1
         port: ${RBACR_APP_PORT:-5173}
-        path: /api/health
+        path: /health
       initial_delay_seconds: 3
       period_seconds: 3
       failure_threshold: 30

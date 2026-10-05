@@ -1,9 +1,9 @@
 // End-to-end test of the external API (/api, personal API tokens), the
-// frontend's API (/uxapi, session cookie, frontend only) and the pages,
+// VPI (/vpi, view programming interface: session cookie, frontend only) and the pages,
 // against a running dev server (`devbox services up` or `npm run dev`) with
 // RBACR_DEV_LOGIN=1 and RBACR_ROOT_LIST containing the root below (default:
 // e2e.test). Each person signs in through /login/dev, then mints an API token
-// through /uxapi the way the /me page does, and uses it on /api.
+// through /vpi the way the /me page does, and uses it on /api.
 //
 //   RBACR_E2E_URL=http://127.0.0.1:5173 npm run test:e2e
 import assert from 'node:assert/strict';
@@ -39,24 +39,24 @@ async function call(path, { method = 'GET', headers = {}, body } = {}) {
 	return { status: res.status, body: text && res.headers.get('content-type')?.includes('json') ? JSON.parse(text) : text };
 }
 
-// What the frontend's fetches look like (src/lib/uxapi.ts plus the browser's own headers).
-const FRONTEND = { 'x-rbacr-ux': '1', 'sec-fetch-site': 'same-origin', origin: BASE };
-const ux = (cookie, method, path, body) => call(`/uxapi${path}`, { method, body, headers: { cookie, ...FRONTEND } });
+// What the frontend's fetches look like (src/lib/vpi.ts plus the browser's own headers).
+const FRONTEND = { 'x-rbacr-vpi': '1', 'sec-fetch-site': 'same-origin', origin: BASE };
+const vpi = (cookie, method, path, body) => call(`/vpi${path}`, { method, body, headers: { cookie, ...FRONTEND } });
 
 /** An /api client acting as the token's owner. */
 function client(token) {
 	return (method, path, body) => call(path, { method, body, headers: { authorization: `Bearer ${token}` } });
 }
 
-/** Signs in and mints a personal API token through the frontend API. */
+/** Signs in and mints a personal API token through the VPI. */
 async function tokenFor(email) {
 	const cookie = await login(email);
-	const res = await ux(cookie, 'POST', '/tokens', { name: 'e2e', expiresInDays: 1 });
+	const res = await vpi(cookie, 'POST', '/tokens', { name: 'e2e', expiresInDays: 1 });
 	assert.equal(res.status, 201, JSON.stringify(res.body));
 	return { cookie, token: res.body.token, id: res.body.id };
 }
 
-describe('rbacr API', { skip: !(await fetch(`${BASE}/api/health`).then((r) => r.ok, () => false)) && `no server at ${BASE}` }, () => {
+describe('rbacr API', { skip: !(await fetch(`${BASE}/health`).then((r) => r.ok, () => false)) && `no server at ${BASE}` }, () => {
 	let root, admin, user, other, voucher, creds;
 
 	it('signs in roots, admins and users, who mint API tokens', async () => {
@@ -69,28 +69,30 @@ describe('rbacr API', { skip: !(await fetch(`${BASE}/api/health`).then((r) => r.
 		assert.deepEqual((await user('GET', '/api/me')).body.globalRoles, []);
 	});
 
-	it('keeps /api and /uxapi apart', async () => {
+	it('keeps /api and /vpi apart', async () => {
 		const { cookie, token } = creds[2];
 		// /api: tokens only; the session cookie means nothing there.
 		assert.equal((await call('/api/me', { headers: { cookie } })).status, 401);
 		assert.equal((await call('/api/me', { headers: { authorization: 'Bearer rbacr_bogus' } })).status, 401);
-		// /uxapi: only the frontend, only with the session.
-		assert.equal((await ux(cookie, 'GET', '/me')).status, 200);
-		assert.equal((await call('/uxapi/me', { headers: { cookie } })).status, 403);
-		assert.equal((await call('/uxapi/me', { headers: { cookie, ...FRONTEND, 'sec-fetch-site': 'cross-site' } })).status, 403);
-		assert.equal((await call('/uxapi/me', { method: 'POST', headers: { cookie, ...FRONTEND, origin: 'https://evil.example' } })).status, 403);
-		assert.equal((await call('/uxapi/me', { headers: { authorization: `Bearer ${token}`, ...FRONTEND } })).status, 401);
-		assert.equal((await call('/uxapi/tokens', { headers: { authorization: `Bearer ${token}` } })).status, 403);
+		assert.equal((await call('/api/nope')).status, 401);
+		assert.equal((await client(token)('GET', '/api/nope')).status, 404);
+		// /vpi: only the frontend, only with the session.
+		assert.equal((await vpi(cookie, 'GET', '/me')).status, 200);
+		assert.equal((await call('/vpi/me', { headers: { cookie } })).status, 403);
+		assert.equal((await call('/vpi/me', { headers: { cookie, ...FRONTEND, 'sec-fetch-site': 'cross-site' } })).status, 403);
+		assert.equal((await call('/vpi/me', { method: 'POST', headers: { cookie, ...FRONTEND, origin: 'https://evil.example' } })).status, 403);
+		assert.equal((await call('/vpi/me', { headers: { authorization: `Bearer ${token}`, ...FRONTEND } })).status, 401);
+		assert.equal((await call('/vpi/tokens', { headers: { authorization: `Bearer ${token}` } })).status, 403);
 	});
 
 	it('lets people list and revoke their own tokens', async () => {
 		const { cookie } = creds[3];
-		const extra = await ux(cookie, 'POST', '/tokens', { name: 'short-lived' });
+		const extra = await vpi(cookie, 'POST', '/tokens', { name: 'short-lived' });
 		assert.equal((await client(extra.body.token)('GET', '/api/me')).status, 200);
-		const listed = (await ux(cookie, 'GET', '/tokens')).body.tokens.map((t) => t.name);
+		const listed = (await vpi(cookie, 'GET', '/tokens')).body.tokens.map((t) => t.name);
 		assert.ok(listed.includes('short-lived') && listed.includes('e2e'));
-		assert.equal((await ux(creds[2].cookie, 'DELETE', `/tokens/${extra.body.id}`)).status, 404); // not theirs
-		assert.equal((await ux(cookie, 'DELETE', `/tokens/${extra.body.id}`)).status, 200);
+		assert.equal((await vpi(creds[2].cookie, 'DELETE', `/tokens/${extra.body.id}`)).status, 404); // not theirs
+		assert.equal((await vpi(cookie, 'DELETE', `/tokens/${extra.body.id}`)).status, 200);
 		assert.equal((await client(extra.body.token)('GET', '/api/me')).status, 401);
 	});
 
@@ -136,6 +138,22 @@ describe('rbacr API', { skip: !(await fetch(`${BASE}/api/health`).then((r) => r.
 		assert.equal((await admin('DELETE', `/api/vouchers/${adminVoucher.body.code}`)).status, 404);
 		assert.equal((await root('DELETE', `/api/vouchers/${adminVoucher.body.code}`)).body.status, 'disabled');
 		assert.deepEqual((await admin('GET', '/api/systems')).body.systems.map((s) => s.id), [SYSTEM]);
+	});
+
+	it('gives implied roles, set only by roots', async () => {
+		for (const role of ['free', 'premium']) await root('POST', `/api/systems/${SYSTEM}/roles`, { role });
+		const set = await root('PUT', `/api/systems/${SYSTEM}/roles/premium`, { implies: ['free'] });
+		assert.equal(set.status, 200, JSON.stringify(set.body));
+		assert.deepEqual(set.body.implies, { premium: ['free'] });
+		assert.equal((await admin('PUT', `/api/systems/${SYSTEM}/roles/premium`, { implies: [] })).status, 403);
+		assert.equal((await root('PUT', `/api/systems/${SYSTEM}/roles/free`, { implies: ['premium'] })).status, 400);
+		assert.equal((await root('PUT', `/api/systems/${SYSTEM}/roles/free`, { implies: ['admin'] })).status, 400);
+		assert.equal((await admin('POST', `/api/systems/${SYSTEM}/grants`, { role: 'premium', grantee: OTHER })).status, 201);
+		assert.deepEqual((await other('GET', '/api/me')).body.roles[SYSTEM], ['free', 'premium']);
+		assert.equal((await admin('POST', '/api/check', { email: OTHER, systemId: SYSTEM, role: 'free' })).body.allowed, true);
+		assert.equal((await root('DELETE', `/api/systems/${SYSTEM}/roles/premium`)).status, 204);
+		assert.equal((await root('DELETE', `/api/systems/${SYSTEM}/roles/free`)).status, 204);
+		assert.equal((await other('GET', '/api/me')).body.roles[SYSTEM], undefined);
 	});
 
 	it('lets roots issue global vouchers; paid ones answer 402', async () => {

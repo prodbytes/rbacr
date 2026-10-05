@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { invalidateAll } from '$app/navigation';
-	import { formatDate, formValues, utcIso, uxFetch, UxError } from '#lib/uxapi.js';
+	import { formatDate, formValues, utcIso, vpiFetch, VpiError } from '#lib/vpi.js';
 	import type { PageProps } from './$types';
 
 	let { data }: PageProps = $props();
@@ -10,11 +10,11 @@
 	async function call(path: string, method: string, body?: unknown): Promise<unknown> {
 		error = '';
 		try {
-			const result = await uxFetch(fetch, path, { method, body });
+			const result = await vpiFetch(fetch, path, { method, body });
 			await invalidateAll();
 			return result;
 		} catch (err) {
-			if (!(err instanceof UxError)) throw err;
+			if (!(err instanceof VpiError)) throw err;
 			error = err.message;
 			return undefined;
 		}

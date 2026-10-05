@@ -19,25 +19,24 @@ async function run(ctx: Ctx, fn: (ctx: Ctx) => Promise<unknown>): Promise<Respon
 /**
  * The external API (/api): authenticated only by a personal API token,
  * `Authorization: Bearer rbacr_…`, acting as the person who created it.
- * Session cookies never count here.
+ * hooks.server.ts has already checked the token (and refused the request
+ * without a valid one); session cookies never count here.
  */
 export async function api(event: RequestEvent, fn: (ctx: Ctx) => Promise<unknown>): Promise<Response> {
-	const unauthorized = () =>
-		json({ error: 'A valid API token is required' }, { status: 401, headers: { 'www-authenticate': 'Bearer' } });
-	const [scheme, token] = (event.request.headers.get('authorization') ?? '').trim().split(/\s+/);
-	if (scheme?.toLowerCase() !== 'bearer' || !token) return unauthorized();
+	const email = event.url.pathname.startsWith('/api/') ? event.locals.email : null;
+	if (!email) {
+		return json({ error: 'A valid API token is required' }, { status: 401, headers: { 'www-authenticate': 'Bearer' } });
+	}
 	const services = await getServices();
-	const email = await services.tokens.authenticate(token);
-	if (!email) return unauthorized();
 	return run({ ...services, actor: await services.rbac.actor(email) }, fn);
 }
 
 /**
- * The frontend's API (/uxapi): authenticated only by the browser session
- * cookie. hooks.server.ts has already refused anything not coming from the
- * frontend itself.
+ * The VPI (/vpi, view programming interface), the frontend's own API:
+ * authenticated only by the browser session cookie. hooks.server.ts has
+ * already refused anything not coming from the frontend itself.
  */
-export async function ux(event: RequestEvent, fn: (ctx: Ctx) => Promise<unknown>): Promise<Response> {
+export async function vpi(event: RequestEvent, fn: (ctx: Ctx) => Promise<unknown>): Promise<Response> {
 	if (!event.locals.email) return json({ error: 'Not signed in' }, { status: 401 });
 	const services = await getServices();
 	return run({ ...services, actor: await services.rbac.actor(event.locals.email) }, fn);
@@ -63,6 +62,13 @@ export function optStr(value: unknown, field: string): string | null {
 	if (value === undefined || value === null || value === '') return null;
 	if (typeof value !== 'string') throw new RbacError(400, `"${field}" must be a string`);
 	return value.trim() || null;
+}
+
+export function strList(value: unknown, field: string): string[] {
+	if (!(Array.isArray(value) && value.every((v) => typeof v === 'string'))) {
+		throw new RbacError(400, `"${field}" must be an array of strings`);
+	}
+	return value;
 }
 
 /** Optional ISO date; blank or missing means "no limit". */

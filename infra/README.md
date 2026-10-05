@@ -67,7 +67,7 @@ touch the app run the Release workflow's build and tests, without publishing.
    dependencies only, smoke-tested through `lambda.js`).
 2. Deploys `artifacts.yaml` and uploads the zip.
 3. Deploys `app.yaml`.
-4. Checks the live site: `/api/health` must report the tag; `/` must be the
+4. Checks the live site: `/health` must report the tag; `/` must be the
    sign-in page; anonymous `/api/me` must return 401; `/login/dev` must
    return 404; and the bare function URL must return 403.
 

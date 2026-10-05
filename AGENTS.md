@@ -32,10 +32,12 @@ Every behaviour change must update, in the same commit:
   are declared in [src/env.ts](src/env.ts) and must be prefixed `RBACR_`).
   Authorization rules live only in
   [src/lib/server/rbac.ts](src/lib/server/rbac.ts); routes stay thin.
-- Two APIs (SPEC.md "Two APIs"): `/api` is external (personal API tokens via
-  `api()` in src/lib/server/http.ts); `/uxapi` is the frontend's only backend
-  (session cookie via `ux()`, guarded by src/lib/server/uxguard.ts). Pages use
-  universal `+page.ts` loads and `src/lib/uxapi.ts`; don't add `+page.server.ts`
+- Two APIs (SPEC.md "Two APIs"): `/api` is the external API (personal API
+  tokens, checked for every `/api` path in src/hooks.server.ts, then `api()`
+  in src/lib/server/http.ts); `/vpi`, the VPI (view programming interface),
+  is the frontend's only backend
+  (session cookie via `vpi()`, guarded by src/lib/server/vpiguard.ts). Pages use
+  universal `+page.ts` loads and `src/lib/vpi.ts`; don't add `+page.server.ts`
   loads or form actions, which would bypass that split.
 - Deployed to AWS (Lambda + CloudFront, CloudFormation in [infra/](infra/))
   by [scripts/deploy.sh](scripts/deploy.sh), from the tag workflows in
