@@ -1,11 +1,15 @@
 AWSTemplateFormatVersion: '2010-09-09'
+# Fn::ForEach (one e-mail subscription per HealthNotificationEmails address).
+Transform: AWS::LanguageExtensions
 Description: >
   rbacr (and rbacr-rc): the role manager at https://rbacr.nu01.com (or
   https://rc.rbacr.nu01.com). One Lambda (the SvelteKit app, lambda.js)
   behind a function URL, fronted by CloudFront with an ACM certificate and
   Route 53 aliases in the rbacr.nu01.com zone. CloudFront adds a generated
   secret header that the app requires, so the function URL is useless when
-  called directly. Deploy in us-east-1 (CloudFront certificates live there)
+  called directly. A Route 53 health check polls https://<domain>/health
+  (database and sign-in configuration) and an alarm e-mails
+  HealthNotificationEmails when it fails. Deploy in us-east-1 (CloudFront certificates live there)
   with scripts/deploy.sh.
 
 Parameters:
@@ -39,6 +43,12 @@ Parameters:
     Type: String
     NoEcho: true
     Description: RBACR_DATABASE_URL, e.g. postgres://user:pass@host/db?sslmode=require
+  HealthNotificationEmails:
+    Type: CommaDelimitedList
+    Default: julio+health@nu01.com
+    Description: >
+      Addresses e-mailed when the /health check fails and recovers. Each one
+      must confirm the SNS subscription e-mail before it gets notifications.
 
 Resources:
   Certificate:
@@ -219,6 +229,62 @@ Resources:
         HostedZoneId: Z2FDTNDATAQYW2
         EvaluateTargetHealth: false
 
+  # Route 53 polls /health through CloudFront, like a visitor. The app
+  # answers 503 when the database or the Google client is missing.
+  HealthCheck:
+    Type: AWS::Route53::HealthCheck
+    Properties:
+      HealthCheckConfig:
+        Type: HTTPS
+        FullyQualifiedDomainName: !Ref DomainName
+        Port: 443
+        ResourcePath: /health
+        EnableSNI: true
+        RequestInterval: 30
+        FailureThreshold: 3
+        # The minimum of three checker regions keeps the load at ~6 requests a minute.
+        Regions: [us-east-1, us-west-2, eu-west-1]
+      HealthCheckTags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName} https://${DomainName}/health
+
+  HealthTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub ${AWS::StackName}-health
+      DisplayName: !Sub rbacr health (${DomainName})
+
+  Fn::ForEach::HealthEmails:
+    - Email
+    - !Ref HealthNotificationEmails
+    - HealthEmail&{Email}:
+        Type: AWS::SNS::Subscription
+        Properties:
+          TopicArn: !Ref HealthTopic
+          Protocol: email
+          Endpoint: !Ref Email
+
+  # Route 53 publishes health check metrics in us-east-1 only, where this
+  # stack lives.
+  HealthAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${AWS::StackName}-health
+      AlarmDescription: !Sub https://${DomainName}/health is failing (database, sign-in configuration or the site itself)
+      Namespace: AWS/Route53
+      MetricName: HealthCheckStatus
+      Dimensions:
+        - Name: HealthCheckId
+          Value: !Ref HealthCheck
+      Statistic: Minimum
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions: [!Ref HealthTopic]
+      OKActions: [!Ref HealthTopic]
+
 Outputs:
   SiteUrl:
     Value: !Sub https://${DomainName}/
@@ -231,3 +297,7 @@ Outputs:
   FunctionUrl:
     Description: Direct calls are refused (403); use SiteUrl
     Value: !GetAtt FunctionUrl.FunctionUrl
+  HealthCheckId:
+    Value: !Ref HealthCheck
+  HealthTopicArn:
+    Value: !Ref HealthTopic

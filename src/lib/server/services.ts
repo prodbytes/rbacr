@@ -5,7 +5,7 @@ import {
 	RBACR_PUBLIC_ORIGIN,
 	RBACR_ROOT_LIST
 } from '$app/env/private';
-import { createPostgresDb } from './db';
+import { createPostgresDb, type Db } from './db';
 import { Allowlist } from './identity';
 import { Rbac } from './rbac';
 import { migrate } from './schema';
@@ -13,6 +13,7 @@ import { Sessions } from './session';
 import { ApiTokens } from './tokens';
 
 export interface Services {
+	db: Db;
 	rbac: Rbac;
 	sessions: Sessions;
 	tokens: ApiTokens;
@@ -26,7 +27,7 @@ export function getServices(): Promise<Services> {
 		if (!RBACR_DATABASE_URL) throw new Error('RBACR_DATABASE_URL is not set');
 		const db = createPostgresDb(RBACR_DATABASE_URL);
 		await migrate(db);
-		return { rbac: new Rbac(db, Allowlist.parse(RBACR_ROOT_LIST)), sessions: new Sessions(db), tokens: new ApiTokens(db) };
+		return { db, rbac: new Rbac(db, Allowlist.parse(RBACR_ROOT_LIST)), sessions: new Sessions(db), tokens: new ApiTokens(db) };
 	})().catch((err) => {
 		services = undefined; // retry on the next request instead of caching the failure
 		throw err;

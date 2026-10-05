@@ -218,10 +218,22 @@ addresses stay out of URLs and access logs.
 
 ### Outside both APIs
 
-`GET /health` answers `{ ok: true, version }` with no authentication and no
-database access. It is the only JSON endpoint outside `/api` and `/vpi`,
-for liveness probes and deploy checks, and it reveals nothing but the
-version.
+- **HC1** `GET /health` reports whether rbacr can serve, with no
+  authentication. It is the only JSON endpoint outside `/api` and `/vpi`. It
+  answers `{ ok, version, checks: { database, google } }`, with
+  `Cache-Control: no-store`:
+  - `database`: `ok` when PostgreSQL answers a query within 3 seconds
+    (connecting and migrating first if needed), else `error`;
+  - `google`: `ok` when the Google OAuth client is configured, else
+    `missing`.
+- **HC2** The status is 200 when every required check is `ok`, else 503.
+  Both checks are required, except `google` under `vite dev`, which has the
+  dev login (S4). The response names checks and states only, never error
+  details, which go to the server log.
+- **HC3** In AWS, a Route 53 health check polls `https://<domain>/health`
+  through CloudFront every 30 seconds from three regions. When it fails, a
+  CloudWatch alarm e-mails the stack's `HealthNotificationEmails` (default
+  `julio+health@nu01.com`), and e-mails again on recovery.
 
 ### `/vpi`: the view programming interface (session cookie, A2/A3)
 

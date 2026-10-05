@@ -6,16 +6,19 @@
 #   2. deploys the artifacts bucket (infra/artifacts.yaml, stack
 #      rbacr[-rc]-artifacts) and uploads the zip
 #   3. deploys the app (infra/app.yaml, stack rbacr[-rc]: certificate,
-#      Lambda + function URL, CloudFront, DNS)
-#   4. smoke-tests the live site: /health must report this version, /
+#      Lambda + function URL, CloudFront, DNS, and the Route 53 health check
+#      of /health with its e-mail alarm)
+#   4. smoke-tests the live site: /health must be healthy and report this
+#      version, /
 #      must be the sign-in page, /api/me must refuse anonymous calls (401),
 #      /login/dev must not exist (404), and the function URL must refuse
 #      direct calls (403)
 #
 # Run by .github/workflows/deploy.yml (*GA tags) and deploy-rc.yml (*RC*
 # tags), or by hand with admin credentials. Needs the AWS CLI, Node, zip and
-# curl (all in devbox). Settings, from the environment (never from .env,
-# which holds local development values):
+# curl (all in devbox). Settings, from the environment, falling back to the
+# git-ignored .env.$STAGE (e.g. .env.prod) for manual deploys; never from
+# .env, which holds local development values:
 #   TAG           the release tag, X.Y.Z-GA / X.Y.Z-RC: its X.Y must match
 #                 the version files and its Z becomes the version's Z
 #                 (default: none, so Z is the current time)
@@ -28,6 +31,9 @@
 #   RBACR_GOOGLE_CLIENT_ID, RBACR_GOOGLE_CLIENT_SECRET, RBACR_DATABASE_URL
 #                 required on the first deploy of a stage; afterwards, unset
 #                 ones keep their deployed values
+#   HEALTH_EMAILS comma-separated addresses the health alarm e-mails
+#                 (default: the template's, on the first deploy; afterwards
+#                 unset keeps the deployed value)
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -44,6 +50,14 @@ case "$STAGE" in
   *) echo "error: STAGE must be prod or rc (got '$STAGE')" >&2; exit 2 ;;
 esac
 ARTIFACTS_STACK=$STACK-artifacts
+
+# Read KEY=value lines (not sourced, so nothing in it runs); the environment wins.
+if [[ -f ".env.$STAGE" ]]; then
+  while IFS='=' read -r key value; do
+    [[ "$key" =~ ^(RBACR_[A-Z_]+|HEALTH_EMAILS|HOSTED_ZONE_ID)$ ]] || continue
+    [[ -n "${!key:-}" ]] || export "$key=$value"
+  done < ".env.$STAGE"
+fi
 
 if [[ "${TAG:-}" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)(-.*)?$ ]]; then
   export VERSION_Z="${BASH_REMATCH[3]}"
@@ -76,6 +90,10 @@ fi
   echo "error: HOSTED_ZONE_ID isn't set (environment, or the rbacr-zone stack; see infra/README.md)" >&2
   exit 1
 }
+if [[ ! "${HEALTH_EMAILS:-}" =~ ^[A-Za-z0-9._%+@,-]*$ ]]; then
+  echo "error: HEALTH_EMAILS must be comma-separated addresses" >&2
+  exit 1
+fi
 if [[ ! "${RBACR_ROOT_LIST:-}" =~ ^[A-Za-z0-9._%+@,\ -]*$ ]]; then
   echo "error: RBACR_ROOT_LIST must be comma-separated addresses or domains" >&2
   exit 1
@@ -95,6 +113,7 @@ for pair in GoogleClientId:RBACR_GOOGLE_CLIENT_ID GoogleClientSecret:RBACR_GOOGL
     exit 1
   fi
 done
+[[ -n "${HEALTH_EMAILS:-}" ]] && params+=("HealthNotificationEmails=$HEALTH_EMAILS")
 # Addresses are people's: logged only as a count.
 roots=0; [[ -n "${RBACR_ROOT_LIST:-}" ]] && roots=$(tr ',' '\n' <<<"$RBACR_ROOT_LIST" | grep -c .)
 echo "    root allow list: $roots entr(ies)"
@@ -121,7 +140,7 @@ echo "    code: s3://$bucket/$key"
 # 3. The app
 echo "==> deploying $STACK"
 aws cloudformation deploy --stack-name "$STACK" \
-  --template-file infra/app.yaml --capabilities CAPABILITY_NAMED_IAM \
+  --template-file infra/app.yaml --capabilities CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND \
   --parameter-overrides "${params[@]}" "CodeBucket=$bucket" "CodeKey=$key" \
   --no-fail-on-empty-changeset
 function_url="$(stack_output "$STACK" FunctionUrl)"
@@ -132,7 +151,8 @@ status() { curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$@"; }
 check() {
   local health
   health="$(curl -fsS --max-time 20 "https://$DOMAIN/health")" || { echo "    /health failed"; return 1; }
-  [[ "$health" == "{\"ok\":true,\"version\":\"$RELEASE\"}" ]] || { echo "    /health says $health, want version $RELEASE"; return 1; }
+  [[ "$health" == "{\"ok\":true,\"version\":\"$RELEASE\",\"checks\":{\"database\":\"ok\",\"google\":\"ok\"}}" ]] \
+    || { echo "    /health says $health, want healthy and version $RELEASE"; return 1; }
   curl -fsS --max-time 20 -H 'accept: text/html' "https://$DOMAIN/" | grep -q 'Sign in with Google' \
     || { echo "    / isn't the sign-in page"; return 1; }
   local code

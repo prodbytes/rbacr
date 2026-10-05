@@ -91,8 +91,9 @@ rbacr has two interfaces:
 
 Every `/api` request, unknown paths included, needs a valid personal API
 token (401 otherwise); `/api` ignores the session cookie. The only
-unauthenticated JSON endpoint is `GET /health` (`{ ok, version }`), outside
-both. `/vpi` refuses anything that isn't a
+unauthenticated JSON endpoint is `GET /health`, outside both: it checks the
+database and the Google client and answers 503 when one is missing (SPEC
+HC1-HC3). In AWS a Route 53 health check polls it and e-mails alerts. `/vpi` refuses anything that isn't a
 same-origin request from rbacr's pages (403), so another site, a script, or
 a caller holding only a token can't use it.
 

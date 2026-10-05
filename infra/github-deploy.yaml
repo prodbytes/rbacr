@@ -198,6 +198,39 @@ Resources:
                     route53:ChangeResourceRecordSetsNormalizedRecordNames:
                       - rbacr.nu01.com
                       - _*.rbacr.nu01.com
+              # The /health check, its alarm and e-mail topic (infra/app.yaml).
+              # The template uses the AWS::LanguageExtensions transform.
+              - Effect: Allow
+                Action: cloudformation:CreateChangeSet
+                Resource: !Sub arn:${AWS::Partition}:cloudformation:${AWS::Region}:aws:transform/LanguageExtensions
+              - Effect: Allow
+                Action: sns:*
+                Resource:
+                  - !Sub arn:${AWS::Partition}:sns:${AWS::Region}:${AWS::AccountId}:rbacr-health
+                  - !Sub arn:${AWS::Partition}:sns:${AWS::Region}:${AWS::AccountId}:rbacr-health:*
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricAlarm
+                  - cloudwatch:DeleteAlarms
+                  - cloudwatch:TagResource
+                  - cloudwatch:UntagResource
+                  - cloudwatch:ListTagsForResource
+                Resource: !Sub arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:rbacr-health
+              - Effect: Allow
+                Action:
+                  - cloudwatch:DescribeAlarms
+                  - route53:CreateHealthCheck
+                Resource: '*'
+              # Health checks have no names to scope by; both stages' roles
+              # can change any health check in the account.
+              - Effect: Allow
+                Action:
+                  - route53:GetHealthCheck
+                  - route53:UpdateHealthCheck
+                  - route53:DeleteHealthCheck
+                  - route53:ChangeTagsForResource
+                  - route53:ListTagsForResource
+                Resource: !Sub arn:${AWS::Partition}:route53:::healthcheck/*
               - Effect: Allow
                 Action:
                   - route53:GetChange
@@ -348,6 +381,39 @@ Resources:
                     route53:ChangeResourceRecordSetsNormalizedRecordNames:
                       - rc.rbacr.nu01.com
                       - _*.rc.rbacr.nu01.com
+              # The /health check, its alarm and e-mail topic (infra/app.yaml).
+              # The template uses the AWS::LanguageExtensions transform.
+              - Effect: Allow
+                Action: cloudformation:CreateChangeSet
+                Resource: !Sub arn:${AWS::Partition}:cloudformation:${AWS::Region}:aws:transform/LanguageExtensions
+              - Effect: Allow
+                Action: sns:*
+                Resource:
+                  - !Sub arn:${AWS::Partition}:sns:${AWS::Region}:${AWS::AccountId}:rbacr-rc-health
+                  - !Sub arn:${AWS::Partition}:sns:${AWS::Region}:${AWS::AccountId}:rbacr-rc-health:*
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricAlarm
+                  - cloudwatch:DeleteAlarms
+                  - cloudwatch:TagResource
+                  - cloudwatch:UntagResource
+                  - cloudwatch:ListTagsForResource
+                Resource: !Sub arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:rbacr-rc-health
+              - Effect: Allow
+                Action:
+                  - cloudwatch:DescribeAlarms
+                  - route53:CreateHealthCheck
+                Resource: '*'
+              # Health checks have no names to scope by; both stages' roles
+              # can change any health check in the account.
+              - Effect: Allow
+                Action:
+                  - route53:GetHealthCheck
+                  - route53:UpdateHealthCheck
+                  - route53:DeleteHealthCheck
+                  - route53:ChangeTagsForResource
+                  - route53:ListTagsForResource
+                Resource: !Sub arn:${AWS::Partition}:route53:::healthcheck/*
               - Effect: Allow
                 Action:
                   - route53:GetChange
