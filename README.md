@@ -177,7 +177,7 @@ tests/                          Lambda smoke test and end-to-end suite
 ## Dev container
 
 The toolchain is pinned by [devbox.json](devbox.json) and locked in
-[devbox.lock](devbox.lock): Node.js, PostgreSQL client, AWS CLI, mkcert, plus Python,
+[devbox.lock](devbox.lock): Node.js, AWS CLI, mkcert, plus Python,
 Go and GraalVM CE (musl, Linux only). The container also ships the
 [docker-in-docker feature](https://github.com/devcontainers/features/tree/main/src/docker-in-docker),
 so `docker ps` works out of the box.
