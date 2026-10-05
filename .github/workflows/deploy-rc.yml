@@ -86,9 +86,11 @@ jobs:
           STAGE: rc
           TAG: ${{ steps.tag.outputs.tag }}
           HOSTED_ZONE_ID: ${{ vars.HOSTED_ZONE_ID }}
-          RBACR_ROOT_LIST: ${{ vars.RBACR_ROOT_LIST }}
-          RBACR_GOOGLE_CLIENT_ID: ${{ vars.RBACR_GOOGLE_CLIENT_ID }}
+          # This tenant's settings: RBACR_RC_<NAME> becomes RBACR_<NAME>.
+          RBACR_ROOT_LIST: ${{ vars.RBACR_RC_ROOT_LIST }}
+          RBACR_GOOGLE_CLIENT_ID: ${{ vars.RBACR_RC_GOOGLE_CLIENT_ID }}
+          HEALTH_EMAILS: ${{ vars.RBACR_RC_HEALTH_EMAILS }}
           # Secrets; when unset, the stack keeps its deployed values.
-          RBACR_GOOGLE_CLIENT_SECRET: ${{ secrets.RBACR_GOOGLE_CLIENT_SECRET }}
+          RBACR_GOOGLE_CLIENT_SECRET: ${{ secrets.RBACR_RC_GOOGLE_CLIENT_SECRET }}
           RBACR_DATABASE_URL: ${{ secrets.RBACR_RC_DATABASE_URL }}
         run: bash scripts/deploy.sh

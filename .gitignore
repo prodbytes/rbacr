@@ -83,8 +83,9 @@ Thumbs.db
 
 # --- SvelteKit / Lambda packaging ---
 .svelte-kit/
-.env
-.env.*
+# Secrets: .env is local development, .env.<stage> feeds scripts/deploy.sh
+*.env
+*.env.*
 !.env.example
 vite.config.ts.timestamp-*
 

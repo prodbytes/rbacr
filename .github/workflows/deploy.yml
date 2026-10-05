@@ -54,9 +54,11 @@ jobs:
           STAGE: prod
           TAG: ${{ github.ref_name }}
           HOSTED_ZONE_ID: ${{ vars.HOSTED_ZONE_ID }}
-          RBACR_ROOT_LIST: ${{ vars.RBACR_ROOT_LIST }}
-          RBACR_GOOGLE_CLIENT_ID: ${{ vars.RBACR_GOOGLE_CLIENT_ID }}
+          # This tenant's settings: RBACR_GA_<NAME> becomes RBACR_<NAME>.
+          RBACR_ROOT_LIST: ${{ vars.RBACR_GA_ROOT_LIST }}
+          RBACR_GOOGLE_CLIENT_ID: ${{ vars.RBACR_GA_GOOGLE_CLIENT_ID }}
+          HEALTH_EMAILS: ${{ vars.RBACR_GA_HEALTH_EMAILS }}
           # Secrets; when unset, the stack keeps its deployed values.
-          RBACR_GOOGLE_CLIENT_SECRET: ${{ secrets.RBACR_GOOGLE_CLIENT_SECRET }}
-          RBACR_DATABASE_URL: ${{ secrets.RBACR_DATABASE_URL }}
+          RBACR_GOOGLE_CLIENT_SECRET: ${{ secrets.RBACR_GA_GOOGLE_CLIENT_SECRET }}
+          RBACR_DATABASE_URL: ${{ secrets.RBACR_GA_DATABASE_URL }}
         run: bash scripts/deploy.sh
