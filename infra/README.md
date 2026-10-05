@@ -49,7 +49,8 @@ browser ──https──▶ CloudFront (rbacr.nu01.com, ACM certificate)
   check is unhealthy (or reports no data) for 2 minutes, and it notifies
   the `<stack>-health` SNS topic, again on recovery. The topic e-mails the
   `HealthNotificationEmails` parameter (comma-separated, default
-  `julio+health@nu01.com`; `HEALTH_EMAILS` for scripts/deploy.sh). Each
+  `julio+health@nu01.com`; `HEALTH_EMAILS` for scripts/deploy.sh, which
+  always passes it: `Fn::ForEach` doesn't resolve parameter defaults). Each
   address must click the confirmation link SNS sends it after the first
   deploy. The template uses the `AWS::LanguageExtensions` transform
   (`Fn::ForEach` over the addresses), so deploys pass

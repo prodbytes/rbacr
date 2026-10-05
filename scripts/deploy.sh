@@ -33,8 +33,8 @@
 #                 required on the first deploy of a stage; afterwards, unset
 #                 ones keep their deployed values
 #   HEALTH_EMAILS comma-separated addresses the health alarm e-mails
-#                 (default: the template's, on the first deploy; afterwards
-#                 unset keeps the deployed value)
+#                 (default julio+health@nu01.com); passed on every deploy,
+#                 because the template's Fn::ForEach can't see defaults
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -115,7 +115,7 @@ for pair in GoogleClientId:RBACR_GOOGLE_CLIENT_ID GoogleClientSecret:RBACR_GOOGL
     exit 1
   fi
 done
-[[ -n "${HEALTH_EMAILS:-}" ]] && params+=("HealthNotificationEmails=$HEALTH_EMAILS")
+params+=("HealthNotificationEmails=${HEALTH_EMAILS:-julio+health@nu01.com}")
 # Addresses are people's: logged only as a count.
 roots=0; [[ -n "${RBACR_ROOT_LIST:-}" ]] && roots=$(tr ',' '\n' <<<"$RBACR_ROOT_LIST" | grep -c .)
 echo "    root allow list: $roots entr(ies)"
