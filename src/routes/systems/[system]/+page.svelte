@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { goto, invalidateAll } from '$app/navigation';
-	import { formatDate, formValues, utcIso, uxFetch, UxError } from '#lib/uxapi.js';
+	import { formatDate, formValues, utcIso, vpiFetch, VpiError } from '#lib/vpi.js';
 	import type { PageProps } from './$types';
 
 	let { data }: PageProps = $props();
@@ -8,15 +8,15 @@
 	let error = $state('');
 	let created = $state('');
 
-	/** Calls /uxapi, refreshes the page data, and shows any error. */
+	/** Calls /vpi, refreshes the page data, and shows any error. */
 	async function call(path: string, method: string, body?: unknown): Promise<unknown> {
 		error = '';
 		try {
-			const result = await uxFetch(fetch, path, { method, body });
+			const result = await vpiFetch(fetch, path, { method, body });
 			await invalidateAll();
 			return result;
 		} catch (err) {
-			if (!(err instanceof UxError)) throw err;
+			if (!(err instanceof VpiError)) throw err;
 			error = err.message;
 			return undefined;
 		}
@@ -33,6 +33,16 @@
 		if (confirm(`Remove ${role} and all its grants and vouchers?`)) {
 			await call(`${base}/roles/${encodeURIComponent(role)}`, 'DELETE');
 		}
+	}
+	let implRole = $state('');
+	let implied = $state<string[]>([]);
+	// Start from the selected role's current implications.
+	$effect(() => {
+		implied = [...(data.system.implies[implRole] ?? [])];
+	});
+	async function setImplications(e: SubmitEvent) {
+		e.preventDefault();
+		await call(`${base}/roles/${encodeURIComponent(implRole)}`, 'PUT', { implies: implied });
 	}
 	async function grant(e: SubmitEvent) {
 		const form = e.currentTarget as HTMLFormElement;
@@ -57,10 +67,10 @@
 		if (!confirm(`Delete ${data.system.id} with all its roles, grants and vouchers?`)) return;
 		try {
 			// No invalidateAll() here: it would reload the deleted system.
-			await uxFetch(fetch, base, { method: 'DELETE' });
+			await vpiFetch(fetch, base, { method: 'DELETE' });
 			await goto('/systems');
 		} catch (err) {
-			if (!(err instanceof UxError)) throw err;
+			if (!(err instanceof VpiError)) throw err;
 			error = err.message;
 		}
 	}
@@ -77,6 +87,9 @@
 		<span class="badge">{role}</span>{' '}
 	{/each}
 </p>
+{#each Object.entries(data.system.implies) as [role, implies] (role)}
+	<p class="muted"><span class="badge">{role}</span> implies {implies.join(', ')}</p>
+{/each}
 {#if data.root}
 	<div class="row">
 		<form class="row" onsubmit={addRole}>
@@ -90,6 +103,22 @@
 			<button class="danger">Remove role</button>
 		</form>
 	</div>
+	<form class="row" onsubmit={setImplications}>
+		<label>
+			Role
+			<select bind:value={implRole} required>
+				<option value="" disabled>choose…</option>
+				{#each data.system.roles as role (role)}<option>{role}</option>{/each}
+			</select>
+		</label>
+		{#if implRole}
+			implies
+			{#each data.system.roles.filter((r) => r !== 'admin' && r !== implRole) as role (role)}
+				<label><input type="checkbox" value={role} bind:group={implied} /> {role}</label>
+			{/each}
+		{/if}
+		<button disabled={!implRole}>Set implied roles</button>
+	</form>
 {/if}
 
 <h2>Grants</h2>

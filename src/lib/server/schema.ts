@@ -109,6 +109,18 @@ export const MIGRATIONS: string[] = [
 		revoked_at   timestamptz
 	);
 	CREATE INDEX api_tokens_email_idx ON api_tokens (email);
+	`,
+	// 5: role implications. Holding `role` in a system also gives `implies` there.
+	`
+	CREATE TABLE role_implications (
+		system_id text NOT NULL,
+		role      text NOT NULL,
+		implies   text NOT NULL,
+		PRIMARY KEY (system_id, role, implies),
+		FOREIGN KEY (system_id, role) REFERENCES roles(system_id, name) ON DELETE CASCADE,
+		FOREIGN KEY (system_id, implies) REFERENCES roles(system_id, name) ON DELETE CASCADE,
+		CHECK (role <> implies)
+	);
 	`
 ];
 

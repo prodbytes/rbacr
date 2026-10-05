@@ -46,6 +46,8 @@ export interface System {
 	id: string;
 	name: string;
 	roles: string[];
+	/** Direct implications: holding the key role also gives these roles (transitively). Roles implying nothing are left out. */
+	implies: Record<string, string[]>;
 }
 
 /** A grant; systemId null is a global grant (the role in every system that defines it). */
@@ -217,7 +219,10 @@ export class Rbac {
 		return rows.map((r) => r.role);
 	}
 
-	/** Roles an identity holds: everything for roots, otherwise its own and its domain's grants. */
+	/**
+	 * Roles an identity holds: everything for roots, otherwise its own and its
+	 * domain's grants plus the roles those imply.
+	 */
 	async rolesOf(email: string): Promise<RoleMap> {
 		if (!this.isRoot(email)) return this.grantedRoles(email);
 		const systems = await this.allSystems();
@@ -225,13 +230,21 @@ export class Rbac {
 	}
 
 	private async grantedRoles(email: string): Promise<RoleMap> {
-		// Direct grants, plus global grants in every system whose catalog has the role.
+		// Direct grants, plus global grants in every system whose catalog has the
+		// role, then everything those roles imply in their system (transitively).
 		const rows = await this.db.query<{ system_id: string; role: string }>(
-			`SELECT system_id, role FROM grants WHERE grantee = ANY($1)
-			 UNION
-			 SELECT r.system_id, r.name FROM global_grants g JOIN roles r ON r.name = g.role
-			 WHERE g.grantee = ANY($1)
-			 ORDER BY system_id, role`,
+			`WITH RECURSIVE held (system_id, role) AS (
+				SELECT * FROM (
+					SELECT system_id, role FROM grants WHERE grantee = ANY($1)
+					UNION
+					SELECT r.system_id, r.name FROM global_grants g JOIN roles r ON r.name = g.role
+					WHERE g.grantee = ANY($1)
+				) direct
+				UNION
+				SELECT i.system_id, i.implies FROM held h
+				JOIN role_implications i ON i.system_id = h.system_id AND i.role = h.role
+			 )
+			 SELECT system_id, role FROM held ORDER BY system_id, role`,
 			[granteesFor(email)]
 		);
 		const map: RoleMap = {};
@@ -249,7 +262,14 @@ export class Rbac {
 			 GROUP BY s.id, s.name ORDER BY s.id`,
 			[ids ?? null]
 		);
-		return rows.map((r) => ({ id: r.id, name: r.name, roles: r.roles ?? [] }));
+		const edges = await this.db.query<{ system_id: string; role: string; implies: string }>(
+			`SELECT system_id, role, implies FROM role_implications
+			 WHERE $1::text[] IS NULL OR system_id = ANY($1) ORDER BY system_id, role, implies`,
+			[ids ?? null]
+		);
+		const implies: Record<string, Record<string, string[]>> = {};
+		for (const e of edges) ((implies[e.system_id] ??= {})[e.role] ??= []).push(e.implies);
+		return rows.map((r) => ({ id: r.id, name: r.name, roles: r.roles ?? [], implies: implies[r.id] ?? {} }));
 	}
 
 	/** Systems the actor can manage: all for roots, administered ones for admins. */
@@ -280,7 +300,7 @@ export class Rbac {
 			for (const role of roles) {
 				await tx.query('INSERT INTO roles (system_id, name) VALUES ($1, $2)', [id, role]);
 			}
-			return { id, name, roles: [...roles].sort() };
+			return { id, name, roles: [...roles].sort(), implies: {} };
 		});
 	}
 
@@ -310,6 +330,53 @@ export class Rbac {
 			[systemId, role]
 		);
 		if (!rows.length) throw notFound(`Role "${role}" not found in "${systemId}"`);
+	}
+
+	/**
+	 * Sets the roles that `role` directly implies in a system, replacing the
+	 * previous ones. Implications are transitive. Nothing may imply the admin
+	 * role (admins could otherwise hand it out), and cycles are refused.
+	 */
+	async setImplications(actor: Actor, systemId: string, rawRole: string, rawImplies: string[]): Promise<System> {
+		if (!actor.root) throw forbidden('Only roots can change role implications');
+		const role = rawRole.trim().toLowerCase();
+		const implies = [...new Set(rawImplies.map((r) => r.trim().toLowerCase()))].sort();
+		await this.db.transaction(async (tx) => {
+			// Lock the system so concurrent edits can't combine into a cycle.
+			const locked = await tx.query('SELECT 1 FROM systems WHERE id = $1 FOR UPDATE', [systemId]);
+			if (!locked.length) throw notFound(`System "${systemId}" not found`);
+			await this.requireRole(tx, systemId, role);
+			for (const r of implies) {
+				if (r === role) throw badRequest(`A role cannot imply itself`);
+				if (r === ADMIN_ROLE) throw badRequest(`No role can imply the ${ADMIN_ROLE} role`);
+				await this.requireRole(tx, systemId, r);
+			}
+			const edges = await tx.query<{ role: string; implies: string }>(
+				'SELECT role, implies FROM role_implications WHERE system_id = $1 AND role <> $2',
+				[systemId, role]
+			);
+			const graph = new Map<string, string[]>([[role, implies]]);
+			for (const e of edges) graph.set(e.role, [...(graph.get(e.role) ?? []), e.implies]);
+			// A cycle through `role` exists if `role` is reachable from what it implies.
+			const seen = new Set<string>();
+			const stack = [...implies];
+			while (stack.length) {
+				const r = stack.pop()!;
+				if (r === role) throw badRequest(`"${role}" would end up implying itself`);
+				if (seen.has(r)) continue;
+				seen.add(r);
+				stack.push(...(graph.get(r) ?? []));
+			}
+			await tx.query('DELETE FROM role_implications WHERE system_id = $1 AND role = $2', [systemId, role]);
+			for (const r of implies) {
+				await tx.query('INSERT INTO role_implications (system_id, role, implies) VALUES ($1, $2, $3)', [
+					systemId,
+					role,
+					r
+				]);
+			}
+		});
+		return this.getSystem(actor, systemId);
 	}
 
 	private async requireRole(db: Db, systemId: string, role: string): Promise<void> {
@@ -551,8 +618,9 @@ export class Rbac {
 	}
 
 	/**
-	 * Whether `email` holds `role` in `systemId`, or holds the global role
-	 * `role` when systemId is null. Same rules as rolesOf/globalRolesOf.
+	 * Whether `email` holds `role` in `systemId` (granted or implied), or holds
+	 * the global role `role` when systemId is null. Same rules as
+	 * rolesOf/globalRolesOf.
 	 */
 	async hasRole(actor: Actor, rawEmail: string, systemId: string | null, rawRole: string): Promise<boolean> {
 		const email = this.queriedEmail(rawEmail);
@@ -562,14 +630,7 @@ export class Rbac {
 		await this.requireSystem(systemId);
 		await this.requireRole(this.db, systemId, role);
 		if (this.isRoot(email)) return true;
-		const rows = await this.db.query(
-			`SELECT 1 FROM grants WHERE system_id = $1 AND role = $2 AND grantee = ANY($3)
-			 UNION ALL
-			 SELECT 1 FROM global_grants WHERE role = $2 AND grantee = ANY($3)
-			 LIMIT 1`,
-			[systemId, role, granteesFor(email)]
-		);
-		return rows.length > 0;
+		return ((await this.grantedRoles(email))[systemId] ?? []).includes(role);
 	}
 
 	/** An identity's roles in one system (sorted). */

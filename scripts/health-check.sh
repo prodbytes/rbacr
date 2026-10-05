@@ -16,7 +16,7 @@ check_database() {
 }
 
 check_app() {
-    if curl -fsS -o /dev/null --max-time 3 "http://127.0.0.1:${RBACR_APP_PORT:-5173}/api/health"; then
+    if curl -fsS -o /dev/null --max-time 3 "http://127.0.0.1:${RBACR_APP_PORT:-5173}/health"; then
         echo "🔐 app ✅"
     else
         echo "🔐 app ❌"
@@ -31,7 +31,7 @@ check_https() {
     local ca
     ca="$(mkcert -CAROOT 2>/dev/null)/rootCA.pem"
     if curl -fsS -o /dev/null --max-time 5 --cacert "$ca" \
-            --resolve "$host:$port:127.0.0.1" "https://$host:$port/api/health"; then
+            --resolve "$host:$port:127.0.0.1" "https://$host:$port/health"; then
         echo "🔒 https ✅"
     else
         echo "🔒 https ❌"

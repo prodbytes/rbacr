@@ -13,7 +13,7 @@ and the README in sync with the code.
 | Domain | The part of an address after `@`. Matching is exact: `example.com` does not cover `sub.example.com`. |
 | Grantee | Who a grant applies to: one address (`ana@example.com`) or a whole domain (stored as `@example.com`; input `example.com` is accepted too). |
 | System | An application whose roles rbacr manages. Its id is a slug: 1-63 characters from `a-z 0-9 _ . : -`, starting with a letter or digit. |
-| Role | A name in a system's role catalog, with the same slug rules. Every system has the reserved `admin` role. |
+| Role | A name in a system's role catalog, with the same slug rules. Every system has the reserved `admin` role. A role may **imply** other roles of the same system (R6). |
 | Grant | Gives (system, role) to a grantee. A **global grant** gives a role in every system whose catalog has a role of that name, now or later. |
 | Voucher | A code that grants a role to whoever redeems it: in one system, or globally (a global grant). |
 | API token | A person's secret token for the external API (`/api`). It acts as that person, with their current roles. |
@@ -50,6 +50,20 @@ and the README in sync with the code.
   **admin** of that system. Admin is per system.
 - **R5** Roles are granted per system per grantee. Granting a role that is not
   in the system's catalog fails (404).
+- **R6 Implied roles.** A role may imply other roles of its system: whoever
+  holds it also holds them, with all they can do. Implication is transitive.
+  For example, with `premium → free` and `admin → premium`, holding `premium`
+  gives `free`, and holding `admin` gives `premium` and `free`. Effective
+  roles (R3, `/api/me`, `/api/check`, `/api/roles`) include implied roles,
+  also for roles that come from global grants. Grants themselves stay as
+  given: listing grants shows only what was granted, and revoking an implied
+  role that wasn't granted gives 404. Roots already hold every role (R2).
+- **R7** Only roots set implications, per role, replacing that role's previous
+  list. A role cannot imply itself, implications can't form a cycle, and
+  **nothing can imply `admin`** (otherwise an admin could hand out admin by
+  granting a role that implies it, against P1); these give 400. Implied roles
+  must be in the catalog (404). Removing a role removes its implications in
+  both directions.
 
 ## Permissions
 
@@ -57,7 +71,7 @@ and the README in sync with the code.
 |--------|:----:|:-------------------:|:----------------:|
 | See own roles, redeem a voucher | ✓ | ✓ | ✓ |
 | List or see a system, its grants and vouchers | all systems | own systems | — |
-| Create or delete systems; add or remove catalog roles | ✓ | — | — |
+| Create or delete systems; add or remove catalog roles; set implied roles | ✓ | — | — |
 | Grant or revoke non-admin roles to an **address** | ✓ | ✓ | — |
 | Grant or revoke non-admin roles to a **domain** | ✓ | — | — |
 | Grant or revoke the `admin` role (address or domain) | ✓ | — | — |
@@ -108,28 +122,32 @@ and the README in sync with the code.
 
 ## Two APIs
 
-- **A1** `/api` is the **external API**, for scripts and other applications.
-  It authenticates only with a personal API token (T3). The session cookie is
-  ignored there, even when the browser sends it.
-- **A2** `/uxapi` is the **frontend's API**: every page loads its data from it
+- **A1** `/api` is the **external API** (API), for scripts and other
+  applications. It authenticates only with a personal API token (T3). Every
+  request under `/api`, unknown paths included, is refused with 401 before
+  routing unless it carries a valid token, so no `/api` endpoint is public.
+  The session cookie is ignored there, even when the browser sends it.
+  `/api` responses are `Cache-Control: no-store`.
+- **A2** `/vpi` is the **view programming interface** (VPI), the frontend's
+  own interface: every page loads its data from it
   and makes its changes through it. Pages have no server load functions or
   form actions, so the frontend has no other API. It authenticates only with
   the session cookie (S3).
-- **A3** `/uxapi` accepts only requests from rbacr's own pages; anything else
+- **A3** `/vpi` accepts only requests from rbacr's own pages; anything else
   gets 403 before authentication:
   - SvelteKit's in-process fetch while rendering a page (a sub-request), or
-  - a browser request carrying `x-rbacr-ux: 1` and `Sec-Fetch-Site:
+  - a browser request carrying `x-rbacr-vpi: 1` and `Sec-Fetch-Site:
     same-origin`. A write must also carry an `Origin` that is the app's own
     (or `RBACR_PUBLIC_ORIGIN`); a read may omit `Origin`, but if it sends one
     it must match.
 
   The custom header forces a CORS preflight from any other origin, and rbacr
   never answers preflights. Browser scripts can't forge `Sec-Fetch-Site`, and
-  the session cookie is `HttpOnly`. `/uxapi` responses are `Cache-Control:
+  the session cookie is `HttpOnly`. `/vpi` responses are `Cache-Control:
   no-store`.
 - **A4** Limit: a non-browser client that copies a user's session cookie and
   fakes these headers can't be told apart from the browser. A1 is what keeps
-  the two APIs separate: credentials for `/api` never work on `/uxapi`, and
+  the two APIs separate: credentials for `/api` never work on `/vpi`, and
   the reverse.
 - **A5** Before the app has loaded, the browser ignores submissions of the
   JavaScript-handled forms, so their values never end up in a URL. Explicit
@@ -152,7 +170,7 @@ and the README in sync with the code.
   tokens can do.
 - **T5** People list and revoke only their own tokens (anyone else's gives
   404). Revoking is permanent; revoked tokens stay listed. Tokens are managed
-  only through `/uxapi`, so a token can't mint more tokens.
+  only through `/vpi`, so a token can't mint more tokens.
 - **T6** Role queries: `/api/check` and `/api/roles` answer with R1-R3. Anyone
   may ask about themselves. Roots may ask about anyone, global roles
   included. Admins may ask about anyone within the systems they administer,
@@ -172,7 +190,6 @@ ISO-8601 strings in UTC.
 
 | Method & path | Body | Response |
 |---------------|------|----------|
-| `GET /api/health` | — | `{ ok: true, version }`. No auth and no database access. |
 | `GET /api/me` | — | `{ email, root, adminOf: [systemId], globalRoles: ["root"] or [], roles: { systemId: [role] } }` |
 | `POST /api/vouchers/redeem` | `{ code }` | the resulting grant (`systemId: null` when global), or 402 (V4a) |
 | `GET /api/vouchers` | — | `{ vouchers: [...] }`, the global vouchers (roots) |
@@ -181,12 +198,13 @@ ISO-8601 strings in UTC.
 | `POST /api/global-grants` | `{ role, grantee }` | 201, the global grant (roots) |
 | `DELETE /api/global-grants` | `{ role, grantee }` | 204 (roots) |
 | `DELETE /api/vouchers/:code` | — | the disabled voucher |
-| `GET /api/systems` | — | `{ systems: [{ id, name, roles }] }` (only manageable systems) |
+| `GET /api/systems` | — | `{ systems: [{ id, name, roles, implies: { role: [role] } }] }` (only manageable systems; `implies` lists direct implications) |
 | `POST /api/systems` | `{ id, name?, roles?: [string] }` | 201, the system (`admin` is always added) |
 | `GET /api/systems/:id` | — | `{ id, name, roles }` |
 | `DELETE /api/systems/:id` | — | 204 |
 | `POST /api/systems/:id/roles` | `{ role }` | the system |
 | `DELETE /api/systems/:id/roles/:role` | — | 204 |
+| `PUT /api/systems/:id/roles/:role` | `{ implies: [role] }` | the system, with the role's implied roles replaced (roots, R7) |
 | `GET /api/systems/:id/grants` | — | `{ grants: [{ systemId, role, grantee, grantedBy, grantedAt, voucherCode }] }` |
 | `POST /api/systems/:id/grants` | `{ role, grantee }` | 201, the grant (re-granting is idempotent) |
 | `DELETE /api/systems/:id/grants` | `{ role, grantee }` | 204 |
@@ -198,18 +216,25 @@ ISO-8601 strings in UTC.
 `/api/check` and `/api/roles` are `POST` with a JSON body, so e-mail
 addresses stay out of URLs and access logs.
 
-### `/uxapi`: the frontend's API (session cookie, A2/A3)
+### Outside both APIs
+
+`GET /health` answers `{ ok: true, version }` with no authentication and no
+database access. It is the only JSON endpoint outside `/api` and `/vpi`,
+for liveness probes and deploy checks, and it reveals nothing but the
+version.
+
+### `/vpi`: the view programming interface (session cookie, A2/A3)
 
 Its endpoints are shaped for the pages and are not a public contract; the
-frontend (`src/lib/uxapi.ts`) is its only client. The routes are
-`GET /uxapi/session` (who is signed in; works anonymously), `GET /uxapi/me`,
-`POST /uxapi/me/redeem` (402 with `payment` per V4a), `GET|POST /uxapi/tokens`,
-`DELETE /uxapi/tokens/:id`, `GET|POST /uxapi/systems`,
-`GET|DELETE /uxapi/systems/:id`, `POST /uxapi/systems/:id/roles`,
-`DELETE /uxapi/systems/:id/roles/:role`, `POST|DELETE /uxapi/systems/:id/grants`,
-`POST /uxapi/systems/:id/vouchers`, `DELETE /uxapi/vouchers/:code`,
-`GET /uxapi/global`, `POST|DELETE /uxapi/global/grants` and
-`POST /uxapi/global/vouchers`. They return the same errors as `/api`; a
+frontend (`src/lib/vpi.ts`) is its only client. The routes are
+`GET /vpi/session` (who is signed in; works anonymously), `GET /vpi/me`,
+`POST /vpi/me/redeem` (402 with `payment` per V4a), `GET|POST /vpi/tokens`,
+`DELETE /vpi/tokens/:id`, `GET|POST /vpi/systems`,
+`GET|DELETE /vpi/systems/:id`, `POST /vpi/systems/:id/roles`,
+`PUT|DELETE /vpi/systems/:id/roles/:role`, `POST|DELETE /vpi/systems/:id/grants`,
+`POST /vpi/systems/:id/vouchers`, `DELETE /vpi/vouchers/:code`,
+`GET /vpi/global`, `POST|DELETE /vpi/global/grants` and
+`POST /vpi/global/vouchers`. They return the same errors as `/api`; a
 missing session gives 401.
 
 ### Pages
@@ -217,7 +242,7 @@ missing session gives 401.
 `/` (sign in), `/me` (own roles, redeem a voucher, API tokens), `/systems`
 (manageable systems, create a system), `/systems/:id` (catalog, grants,
 vouchers) and `/global` (roots: global grants and vouchers). Pages load
-through `/uxapi`; a page whose data needs a session sends anonymous visitors
+through `/vpi`; a page whose data needs a session sends anonymous visitors
 to `/`. The pages need JavaScript.
 
 ## Request hardening
@@ -241,7 +266,7 @@ All settings come from environment variables prefixed `RBACR_`:
 | `RBACR_GOOGLE_CLIENT_ID`, `RBACR_GOOGLE_CLIENT_SECRET` | for Google sign-in | OAuth web client. Without them `/login/google` returns 503. |
 | `RBACR_PUBLIC_ORIGIN` | no | Origin for the Google redirect URI (`<origin>/login/google/callback`); default: the request's origin |
 | `RBACR_ORIGIN_SECRET` | no | Required value of the `x-rbacr-origin-secret` header (H1) |
-| `RBACR_VERSION` | no | Version reported by `/api/health` (default `dev`) |
+| `RBACR_VERSION` | no | Version reported by `/health` (default `dev`) |
 | `RBACR_DEV_LOGIN` | no | `1` enables `/login/dev` under `vite dev` only (S4) |
 
 ## Runtime and storage
@@ -261,7 +286,7 @@ All settings come from environment variables prefixed `RBACR_`:
 |-------|---------|--------|
 | Unit and domain | `npx vitest --run` | Identity parsing, the R*, P*, V* and T* rules against in-process Postgres (PGlite), the A3 guard, sessions, Google OAuth exchange |
 | Lambda smoke | `npm run test:lambda` | The production build invoked through `lambda.js` with function URL (v2) events: H1, H2, A1 and A3, the version, redirects, 401s, static assets. `scripts/package-lambda.sh` reruns it against the deployable bundle. |
-| End-to-end | `npm run test:e2e` | `/api` with personal tokens, `/uxapi` as the frontend, the A1/A3 separation, and the pages, against a running dev server with real Postgres, directly or through Floci over HTTPS |
+| End-to-end | `npm run test:e2e` | `/api` with personal tokens, `/vpi` as the frontend, the A1/A3 separation, and the pages, against a running dev server with real Postgres, directly or through Floci over HTTPS |
 | Live | `scripts/deploy.sh` (last step) | The deployed site: version, sign-in page, 401, 404 for `/login/dev`, 403 for the bare function URL |
 
 `npm test` runs the first two.

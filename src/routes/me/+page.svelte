@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { invalidateAll } from '$app/navigation';
-	import { formatDate, formValues, uxFetch, UxError, type Payment } from '#lib/uxapi.js';
+	import { formatDate, formValues, vpiFetch, VpiError, type Payment } from '#lib/vpi.js';
 	import type { PageProps } from './$types';
 
 	let { data }: PageProps = $props();
@@ -12,12 +12,12 @@
 		const form = e.currentTarget as HTMLFormElement;
 		const { code } = formValues(e);
 		try {
-			const res = await uxFetch<{ redeemed: string }>(fetch, '/me/redeem', { method: 'POST', body: { code } });
+			const res = await vpiFetch<{ redeemed: string }>(fetch, '/me/redeem', { method: 'POST', body: { code } });
 			redeem = { ok: `Granted ${res.redeemed}.` };
 			form.reset();
 			await invalidateAll();
 		} catch (err) {
-			if (!(err instanceof UxError)) throw err;
+			if (!(err instanceof VpiError)) throw err;
 			redeem = { error: err.message, payment: err.payment };
 		}
 	}
@@ -26,7 +26,7 @@
 		const form = e.currentTarget as HTMLFormElement;
 		const { name, expiresInDays } = formValues(e);
 		try {
-			const res = await uxFetch<{ token: string }>(fetch, '/tokens', {
+			const res = await vpiFetch<{ token: string }>(fetch, '/tokens', {
 				method: 'POST',
 				body: { name, expiresInDays: expiresInDays || null }
 			});
@@ -34,13 +34,13 @@
 			form.reset();
 			await invalidateAll();
 		} catch (err) {
-			if (!(err instanceof UxError)) throw err;
+			if (!(err instanceof VpiError)) throw err;
 			tokenMsg = { error: err.message };
 		}
 	}
 
 	async function revoke(id: string) {
-		await uxFetch(fetch, `/tokens/${encodeURIComponent(id)}`, { method: 'DELETE' });
+		await vpiFetch(fetch, `/tokens/${encodeURIComponent(id)}`, { method: 'DELETE' });
 		await invalidateAll();
 	}
 

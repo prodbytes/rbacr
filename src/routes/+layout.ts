@@ -1,4 +1,4 @@
-import { uxFetch } from '#lib/uxapi.js';
+import { vpiFetch } from '#lib/vpi.js';
 import type { LayoutLoad } from './$types';
 
 export interface SessionUser {
@@ -8,4 +8,4 @@ export interface SessionUser {
 }
 
 export const load: LayoutLoad = ({ fetch }) =>
-	uxFetch<{ user: SessionUser | null; devLogin: boolean }>(fetch, '/session');
+	vpiFetch<{ user: SessionUser | null; devLogin: boolean }>(fetch, '/session');

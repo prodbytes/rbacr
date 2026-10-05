@@ -1,4 +1,4 @@
-import { uxLoad } from '#lib/uxapi.js';
+import { vpiLoad } from '#lib/vpi.js';
 import type { PageLoad } from './$types';
 
 export interface Grant {
@@ -26,8 +26,8 @@ export interface Voucher {
 }
 
 export const load: PageLoad = ({ fetch, params }) =>
-	uxLoad<{
-		system: { id: string; name: string; roles: string[] };
+	vpiLoad<{
+		system: { id: string; name: string; roles: string[]; implies: Record<string, string[]> };
 		grants: Grant[];
 		vouchers: Voucher[];
 		root: boolean;

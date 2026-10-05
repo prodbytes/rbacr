@@ -1,4 +1,4 @@
-import { uxLoad } from '#lib/uxapi.js';
+import { vpiLoad } from '#lib/vpi.js';
 import type { PageLoad } from './$types';
 
 export interface Token {
@@ -13,8 +13,8 @@ export interface Token {
 
 export const load: PageLoad = async ({ fetch }) => {
 	const [me, { tokens }] = await Promise.all([
-		uxLoad<{ email: string; root: boolean; globalRoles: string[]; roles: Record<string, string[]> }>(fetch, '/me'),
-		uxLoad<{ tokens: Token[] }>(fetch, '/tokens')
+		vpiLoad<{ email: string; root: boolean; globalRoles: string[]; roles: Record<string, string[]> }>(fetch, '/me'),
+		vpiLoad<{ tokens: Token[] }>(fetch, '/tokens')
 	]);
 	return { ...me, tokens };
 };

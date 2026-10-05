@@ -23,7 +23,7 @@ Parameters:
     Description: The Lambda zip's key in CodeBucket (scripts/package-lambda.sh)
   Version:
     Type: String
-    Description: The release version, reported by /api/health
+    Description: The release version, reported by /health
   RootList:
     Type: String
     Default: ''
