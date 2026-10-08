@@ -1,5 +1,5 @@
 import { json, type RequestEvent } from '@sveltejs/kit';
-import { RbacError, type Actor, type Grant, type Voucher } from './rbac';
+import { RbacError, type Actor, type GrantWithImplied, type Voucher } from './rbac';
 import { getServices, type Services } from './services';
 import type { ApiToken } from './tokens';
 
@@ -87,7 +87,7 @@ export function optInt(value: unknown, field: string): number | null {
 	return n;
 }
 
-export const grantJson = (g: Grant) => ({ ...g, grantedAt: g.grantedAt.toISOString() });
+export const grantJson = (g: GrantWithImplied) => ({ ...g, grantedAt: g.grantedAt.toISOString() });
 
 export const voucherJson = (v: Voucher, status: string) => ({
 	...v,

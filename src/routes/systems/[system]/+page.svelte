@@ -108,7 +108,8 @@
 			Role
 			<select bind:value={implRole} required>
 				<option value="" disabled>choose…</option>
-				{#each data.system.roles as role (role)}<option>{role}</option>{/each}
+				<!-- admin implies every role of the system on its own -->
+				{#each data.system.roles.filter((r) => r !== 'admin') as role (role)}<option>{role}</option>{/each}
 			</select>
 		</label>
 		{#if implRole}
@@ -138,12 +139,13 @@
 
 {#if data.grants.length}
 	<table class="spaced">
-		<thead><tr><th>Grantee</th><th>Role</th><th>By</th><th>When</th><th></th></tr></thead>
+		<thead><tr><th>Grantee</th><th>Role</th><th>Also gives</th><th>By</th><th>When</th><th></th></tr></thead>
 		<tbody>
 			{#each data.grants as g (g.role + g.grantee)}
 				<tr>
 					<td>{g.grantee}</td>
 					<td>{g.role}</td>
+					<td class="muted">{g.impliedRoles.join(', ') || '—'}</td>
 					<td class="muted">{g.grantedBy}{g.voucherCode ? ' (voucher)' : ''}</td>
 					<td class="muted">{formatDate(g.grantedAt)}</td>
 					<td>
