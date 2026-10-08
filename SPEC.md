@@ -13,7 +13,7 @@ and the README in sync with the code.
 | Domain | The part of an address after `@`. Matching is exact: `example.com` does not cover `sub.example.com`. |
 | Grantee | Who a grant applies to: one address (`ana@example.com`) or a whole domain (stored as `@example.com`; input `example.com` is accepted too). |
 | System | An application whose roles rbacr manages. Its id is a slug: 1-63 characters from `a-z 0-9 _ . : -`, starting with a letter or digit. |
-| Role | A name in a system's role catalog, with the same slug rules. Every system has the reserved `admin` role. A role may **imply** other roles of the same system (R6). |
+| Role | A name a root registers in a system's catalog, with the same slug rules (any name but `root`). A role may **imply** other roles of the same system (R6). Both are data; `root` is the only built-in role (R2). |
 | Grant | Gives (system, role) to a grantee. A **global grant** gives a role in every system whose catalog has a role of that name, now or later. |
 | Voucher | A code that grants a role to whoever redeems it: in one system, or globally (a global grant). |
 | API token | A person's secret token for the external API (`/api`). It acts as that person, with their current roles. |
@@ -43,38 +43,37 @@ and the README in sync with the code.
   Root status is never stored. `root` can't be granted, globally or in a
   system, nor be a voucher's role or a catalog role (400). A `root` grant
   found in storage anyway is ignored.
-- **R2** Roots hold every role of every system. Their effective roles are the
-  full catalog of every system. They also hold the single **global role**
-  `root`, which belongs to no system. It is reported apart from system roles
-  (`globalRoles`), and nobody else can hold it. `root` is therefore reserved
-  and can't be a role name in any system's catalog.
+- **R2** `root` is the **only built-in role**. Roots hold every role of every
+  system: their effective roles are the full catalog of every system. They
+  also hold the single **global role** `root`, which belongs to no system.
+  It is reported apart from system roles (`globalRoles`), and nobody else
+  can hold it. `root` is therefore reserved and can't be a role name in any
+  system's catalog. Roots alone manage rbacr (P1).
 - **R3** Everyone else's effective roles combine the grants to their own
   address and to their domain. A global grant of role R adds R in every system
   whose catalog has R, including systems created later. Their `globalRoles`
   are the roles of those global grants.
-- **R4 Admins.** An identity holding the `admin` role of a system is an
-  **admin** of that system. Admin is per system.
+- **R4 Roles are registered data.** A system has exactly the roles a root
+  registers for it, when creating it or later; none are built in. No role
+  name but `root` means anything to rbacr: a role called `admin` is an
+  ordinary role with no powers.
 - **R5** Roles are granted per system per grantee. Granting a role that is not
   in the system's catalog fails (404).
-- **R6 Implied roles.** A role may imply other roles of its system: whoever
-  holds it also holds them, with all they can do. Implication is transitive.
-  Built in: **`root` holds every role of every system** (R2), and **`admin`
-  implies every other role of its system**, including roles added later
-  (only in that system). Roots configure the rest: for example `premium →
-  free`, with `free` implying nothing, so holding `premium` gives `free`, and
-  holding `admin` gives both. Effective roles (R3, `/api/me`, `/api/check`,
-  `/api/roles`) include implied roles, also for roles that come from global
-  grants. Grants themselves stay as given (revoking an implied role that
-  wasn't granted gives 404), but every grant the API returns carries the
-  roles it implies (R8).
-- **R7** Only roots set implications, per role, replacing that role's previous
-  list. A role cannot imply itself, implications can't form a cycle,
-  `admin`'s implications are fixed (it already implies everything), and
-  **nothing can imply `admin`** (otherwise an admin could hand out admin by
-  granting a role that implies it, against P1); these give 400. Implied roles
-  must be in the catalog (404). Removing a role removes its implications in
-  both directions. A system's `implies` lists every role's direct
-  implications, `admin`'s included.
+- **R6 Implied roles are registered data.** A role may imply other roles of
+  its system: whoever holds it also holds them. Implication is transitive.
+  None are built in, and a new system or role implies nothing until a root
+  registers it. For example, a root registers `admin → premium, free` and
+  `premium → free`, and leaves `free` implying nothing: holding `premium`
+  gives `free`, and holding `admin` gives both. Effective roles (R3,
+  `/api/me`, `/api/check`, `/api/roles`) include implied roles, also for
+  roles that come from global grants. Grants themselves stay as given
+  (revoking an implied role that wasn't granted gives 404), but every grant
+  the API returns carries the roles it implies (R8).
+- **R7** Only roots register implications, per role, replacing that role's
+  previous list. A role cannot imply itself and implications can't form a
+  cycle (400). Implied roles must be in the catalog (404). Removing a role
+  removes its implications in both directions. A system's `implies` lists
+  each role's registered direct implications.
 - **R8** Every grant in an API response (granting, listing grants, redeeming
   a voucher, global grants) includes `impliedRoles`: the roles its role
   implies in its system, sorted, without the role itself. A global grant
@@ -83,27 +82,25 @@ and the README in sync with the code.
 
 ## Permissions
 
-| Action | Root | Admin of the system | Anyone signed in |
-|--------|:----:|:-------------------:|:----------------:|
-| See own roles, redeem a voucher | ✓ | ✓ | ✓ |
-| List or see a system, its grants and vouchers | all systems | own systems | — |
-| Create or delete systems; add or remove catalog roles; set implied roles | ✓ | — | — |
-| Grant or revoke non-admin roles to an **address** | ✓ | ✓ | — |
-| Grant or revoke non-admin roles to a **domain** | ✓ | — | — |
-| Grant or revoke the `admin` role (address or domain) | ✓ | — | — |
-| Create, list or disable non-admin vouchers | ✓ | ✓ | — |
-| Create, list or disable `admin` vouchers | ✓ | — | — |
-| Grant, list or revoke **global** roles; create, list or disable **global** vouchers | ✓ | — | — |
-| Create, list or revoke **own API tokens** | ✓ | ✓ | ✓ |
-| Ask about **another** identity's roles (`/api/check`, `/api/roles`) | anyone, incl. global roles | in own systems | — (only themselves) |
+| Action | Root | Anyone signed in |
+|--------|:----:|:----------------:|
+| See own roles, redeem a voucher | ✓ | ✓ |
+| Create, list or revoke **own API tokens** | ✓ | ✓ |
+| Ask about **own** roles (`/api/me`, `/api/check`, `/api/roles`) | ✓ | ✓ |
+| Ask about **another** identity's roles, global roles included | ✓ | — |
+| List or see systems, their grants and vouchers | ✓ | — |
+| Create or delete systems; add or remove roles; register implications | ✓ | — |
+| Grant or revoke roles, to addresses, domains or globally | ✓ | — |
+| Create, list or disable vouchers (per system or global) | ✓ | — |
+| See the root allow list (`/settings`) | ✓ | — |
 
-- **P1** Only roots propagate the admin role, directly or through vouchers.
-  Admins never see admin vouchers, and cannot disable them (they get 404).
-- **P2** The `admin` role cannot be removed from a catalog. Removing any other
-  role also removes its grants and vouchers. Deleting a system removes
-  everything in it.
-- **P3** Grants and vouchers created by an admin stay valid if that admin later
-  loses the role.
+- **P1** Only roots manage: everything but the first three rows is refused
+  to anyone else with 403. Holding a role (any name) never grants
+  management.
+- **P2** Removing a role also removes its grants, implications and vouchers.
+  Deleting a system removes everything in it.
+- **P3** Grants and vouchers stay valid if the root who created them later
+  leaves the root list.
 
 ## Vouchers
 
@@ -187,12 +184,11 @@ and the README in sync with the code.
 - **T5** People list and revoke only their own tokens (anyone else's gives
   404). Revoking is permanent; revoked tokens stay listed. Tokens are managed
   only through `/vpi`, so a token can't mint more tokens.
-- **T6** Role queries: `/api/check` and `/api/roles` answer with R1-R3. Anyone
-  may ask about themselves. Roots may ask about anyone, global roles
-  included. Admins may ask about anyone within the systems they administer,
-  but not about global roles. Anything else gives 403. An unknown system, or
-  a role missing from its catalog, gives 404. Without a `systemId`,
-  `/api/check` asks about a global role (such as `root`).
+- **T6** Role queries: `/api/check` and `/api/roles` answer with R1-R6.
+  Anyone may ask about themselves. Roots may ask about anyone, global roles
+  included. Anything else gives 403. An unknown system, or a role missing
+  from its catalog, gives 404. Without a `systemId`, `/api/check` asks about
+  a global role (such as `root`).
 
 ## Client integration
 
@@ -202,10 +198,10 @@ How applications use rbacr. The README has a walkthrough with examples.
   signs them in itself and asks rbacr about the verified e-mail address,
   server-side, with a personal API token (T1-T5). rbacr trusts the address
   it is given.
-- **C2** A token sees what its owner may see (T6): a system's admin, anyone
-  in that system; a root, anyone everywhere plus global roles; anyone else,
-  only themselves. Applications should use a token owned by an admin of
-  their own system.
+- **C2** A token sees what its owner may see (T6): a root's token, anyone's
+  roles everywhere plus global roles; anyone else's, only their own.
+  Applications that ask about their users need a root-owned token, so they
+  should keep it server-side, give it an expiry and revoke it when unused.
 - **C3** `POST /api/check` answers `allowed: true` exactly when the identity
   holds the role in the system as an effective role (R3, R6): through a
   grant to its address or domain, a global grant, an implication, or root
@@ -233,7 +229,7 @@ ISO-8601 strings in UTC.
 
 | Method & path | Body | Response |
 |---------------|------|----------|
-| `GET /api/me` | — | `{ email, root, adminOf: [systemId], globalRoles: ["root"] or [], roles: { systemId: [role] } }` |
+| `GET /api/me` | — | `{ email, root, globalRoles: ["root"] or [], roles: { systemId: [role] } }` |
 | `POST /api/vouchers/redeem` | `{ code }` | the resulting grant with `impliedRoles` (`systemId: null` and `impliedRolesBySystem` when global), or 402 (V4a) |
 | `GET /api/vouchers` | — | `{ vouchers: [...] }`, the global vouchers (roots) |
 | `POST /api/vouchers` | `{ role, discountPercent?, startsAt?, endsAt?, maxUses? }` | 201, a global voucher (roots) |
@@ -242,7 +238,7 @@ ISO-8601 strings in UTC.
 | `DELETE /api/global-grants` | `{ role, grantee }` | 204 (roots) |
 | `DELETE /api/vouchers/:code` | — | the disabled voucher |
 | `GET /api/systems` | — | `{ systems: [{ id, name, roles, implies: { role: [role] } }] }` (only manageable systems; `implies` lists direct implications) |
-| `POST /api/systems` | `{ id, name?, roles?: [string] }` | 201, the system (`admin` is always added) |
+| `POST /api/systems` | `{ id, name?, roles?: [string] }` | 201, the system with exactly the given roles (R4) |
 | `GET /api/systems/:id` | — | `{ id, name, roles }` |
 | `DELETE /api/systems/:id` | — | 204 |
 | `POST /api/systems/:id/roles` | `{ role }` | the system |
@@ -282,7 +278,7 @@ addresses stay out of URLs and access logs.
 Its endpoints are shaped for the pages and are not a public contract; the
 frontend (`src/lib/vpi.ts`) is its only client. The routes are
 `GET /vpi/session` (who is signed in; works anonymously), `GET /vpi/settings`
-(version, API address, account), `GET /vpi/me`,
+(version, API address, account, and the root allow list for roots), `GET /vpi/me`,
 `POST /vpi/me/redeem` (402 with `payment` per V4a), `GET|POST /vpi/tokens`,
 `DELETE /vpi/tokens/:id`, `GET|POST /vpi/systems`,
 `GET|DELETE /vpi/systems/:id`, `POST /vpi/systems/:id/roles`,
@@ -295,7 +291,8 @@ missing session gives 401.
 ### Pages
 
 `/` (sign in), `/me` (own roles, redeem a voucher, API tokens), `/settings`
-(the running version, the API's address, the signed-in account), `/systems`
+(the running version, the API's address, the signed-in account; roots also
+see the root allow list), `/systems`
 (manageable systems, create a system), `/systems/:id` (catalog, grants,
 vouchers) and `/global` (roots: global grants and vouchers). Pages load
 through `/vpi`; a page whose data needs a session sends anonymous visitors

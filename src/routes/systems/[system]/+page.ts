@@ -33,5 +33,4 @@ export const load: PageLoad = ({ fetch, params }) =>
 		grants: Grant[];
 		vouchers: Voucher[];
 		root: boolean;
-		assignable: string[];
 	}>(fetch, `/systems/${encodeURIComponent(params.system)}`);

@@ -20,7 +20,7 @@
 	{#if data.user}
 		<nav>
 			<a href="/me">My roles</a>
-			{#if data.user.manages}<a href="/systems">Systems</a>{/if}
+			{#if data.user.root}<a href="/systems">Systems</a>{/if}
 			{#if data.user.root}<a href="/global">Global</a>{/if}
 			<a href="/settings">Settings</a>
 		</nav>

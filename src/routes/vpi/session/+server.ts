@@ -10,7 +10,7 @@ export const GET: RequestHandler = async ({ locals }) => {
 	if (!locals.email) return json({ user: null, devLogin });
 	const actor = await (await getServices()).rbac.actor(locals.email);
 	return json({
-		user: { email: actor.email, root: actor.root, manages: actor.root || actor.adminOf.length > 0 },
+		user: { email: actor.email, root: actor.root },
 		devLogin
 	});
 };

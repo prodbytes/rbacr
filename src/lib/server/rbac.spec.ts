@@ -2,26 +2,18 @@ import { PutCommand } from '@aws-sdk/lib-dynamodb';
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { Table } from './dynamo';
 import { Allowlist } from './identity';
-import {
-	ADMIN_ROLE,
-	Rbac,
-	RbacError,
-	canAssign,
-	generateVoucherCode,
-	normalizeVoucherCode,
-	voucherStatus,
-	type Actor
-} from './rbac';
+import { Rbac, RbacError, generateVoucherCode, normalizeVoucherCode, voucherStatus, type Actor } from './rbac';
 import { createTestTable, scanAll } from './testing/dynamodb';
 
 const ROOT = 'root@corp.com';
-const ADMIN = 'admin@partner.com';
 const USER = 'user@partner.com';
+const OTHER = 'other@partner.com';
 
 let table: Table;
 let clock: Date;
 let rbac: Rbac;
 let root: Actor;
+let user: Actor;
 
 async function expectError(promise: Promise<unknown>, status: number, message?: RegExp) {
 	const err = await promise.then(
@@ -38,21 +30,20 @@ beforeEach(async () => {
 	clock = new Date('2026-01-10T12:00:00Z');
 	rbac = new Rbac(table, Allowlist.parse('corp.com'), () => clock);
 	root = await rbac.actor(ROOT);
+	user = await rbac.actor(USER);
 	await rbac.createSystem(root, { id: 'billing', name: 'Billing', roles: ['viewer', 'editor'] });
 	await rbac.createSystem(root, { id: 'crm' });
-	await rbac.grant(root, 'billing', ADMIN_ROLE, ADMIN);
 });
 
 describe('roots', () => {
 	it('are recognised from the allow list, by domain', async () => {
-		expect(root.root).toBe(true);
+		expect(root).toEqual({ email: ROOT, root: true });
 		expect((await rbac.actor('someone@corp.com')).root).toBe(true);
-		expect((await rbac.actor(USER)).root).toBe(false);
+		expect(user).toEqual({ email: USER, root: false });
 	});
 
 	it('hold the single global root role; nobody else does', async () => {
 		expect(await rbac.globalRolesOf(ROOT)).toEqual(['root']);
-		expect(await rbac.globalRolesOf(ADMIN)).toEqual([]);
 		expect(await rbac.globalRolesOf(USER)).toEqual([]);
 	});
 
@@ -65,6 +56,8 @@ describe('roots', () => {
 			expect((await list.actor(email)).root).toBe(false);
 			expect(await list.globalRolesOf(email)).toEqual([]);
 		}
+		expect(list.rootList(await list.actor('boss@partner.com'))).toEqual(['@nu01.com', 'boss@partner.com']);
+		expect(() => list.rootList(user)).toThrow(/Only roots/);
 	});
 
 	it('cannot be made any other way', async () => {
@@ -98,31 +91,49 @@ describe('roots', () => {
 	});
 
 	it('hold every role of every system', async () => {
-		expect(await rbac.rolesOf(ROOT)).toEqual({
-			billing: ['admin', 'editor', 'viewer'],
-			crm: ['admin']
-		});
+		expect(await rbac.rolesOf(ROOT)).toEqual({ billing: ['editor', 'viewer'], crm: [] });
+		expect(await rbac.hasRole(root, ROOT, 'billing', 'editor')).toBe(true);
 	});
 
 	it('can grant roles to individuals and domains', async () => {
 		await rbac.grant(root, 'billing', 'viewer', 'partner.com');
-		await rbac.grant(root, 'crm', ADMIN_ROLE, USER);
-		expect(await rbac.rolesOf(USER)).toEqual({ billing: ['viewer'], crm: ['admin'] });
-		expect(await rbac.rolesOf('other@partner.com')).toEqual({ billing: ['viewer'] });
+		await rbac.grant(root, 'billing', 'editor', USER);
+		expect(await rbac.rolesOf(USER)).toEqual({ billing: ['editor', 'viewer'] });
+		expect(await rbac.rolesOf(OTHER)).toEqual({ billing: ['viewer'] });
+	});
+});
+
+describe('roles are registered data', () => {
+	it('a system has only the roles registered for it', async () => {
+		expect((await rbac.getSystem(root, 'billing')).roles).toEqual(['editor', 'viewer']);
+		expect((await rbac.getSystem(root, 'crm')).roles).toEqual([]);
+		expect((await rbac.getSystem(root, 'crm')).implies).toEqual({});
 	});
 
-	it('manage the system and role catalog', async () => {
+	it('are added and removed by roots, any name but root', async () => {
 		await rbac.addRole(root, 'crm', 'Sales');
+		await rbac.addRole(root, 'crm', 'admin');
 		expect((await rbac.getSystem(root, 'crm')).roles).toEqual(['admin', 'sales']);
 		await expectError(rbac.addRole(root, 'crm', 'sales'), 409);
+		await rbac.removeRole(root, 'crm', 'admin');
+		expect((await rbac.getSystem(root, 'crm')).roles).toEqual(['sales']);
 		await expectError(rbac.createSystem(root, { id: 'crm' }), 409);
 		await expectError(rbac.createSystem(root, { id: 'Bad Id!' }), 400);
-		await expectError(rbac.removeRole(root, 'crm', ADMIN_ROLE), 400);
-	});
-
-	it('cannot define a system role named root', async () => {
 		await expectError(rbac.addRole(root, 'crm', 'Root'), 400, /reserved/);
 		await expectError(rbac.createSystem(root, { id: 'x', roles: ['root'] }), 400, /reserved/);
+	});
+
+	it('a role named admin is an ordinary role with no powers', async () => {
+		await rbac.addRole(root, 'crm', 'admin');
+		await rbac.grant(root, 'crm', 'admin', USER);
+		const admin = await rbac.actor(USER);
+		expect(admin).toEqual({ email: USER, root: false });
+		expect(await rbac.rolesOf(USER)).toEqual({ crm: ['admin'] });
+		expect(await rbac.listSystems(admin)).toEqual([]);
+		await expectError(rbac.getSystem(admin, 'crm'), 403);
+		await expectError(rbac.grant(admin, 'crm', 'admin', OTHER), 403);
+		await expectError(rbac.createVoucher(admin, { systemId: 'crm', role: 'admin' }), 403);
+		await expectError(rbac.hasRole(admin, OTHER, 'crm', 'admin'), 403);
 	});
 
 	it('removing a role removes its grants', async () => {
@@ -132,100 +143,66 @@ describe('roots', () => {
 	});
 });
 
-describe('admins', () => {
-	let admin: Actor;
-	beforeEach(async () => {
-		admin = await rbac.actor(ADMIN);
-	});
-
-	it('are admins of the systems where they hold the admin role', () => {
-		expect(admin).toEqual({ email: ADMIN, root: false, adminOf: ['billing'] });
-	});
-
-	it('see and manage only their systems', async () => {
-		expect((await rbac.listSystems(admin)).map((s) => s.id)).toEqual(['billing']);
-		await expectError(rbac.getSystem(admin, 'crm'), 403);
-		await expectError(rbac.grant(admin, 'crm', ADMIN_ROLE, USER), 403);
-	});
-
-	it('can grant and revoke non-admin roles to individuals', async () => {
-		await rbac.grant(admin, 'billing', 'editor', USER);
-		expect(await rbac.rolesOf(USER)).toEqual({ billing: ['editor'] });
-		await rbac.revoke(admin, 'billing', 'editor', USER);
-		expect(await rbac.rolesOf(USER)).toEqual({});
-	});
-
-	it('cannot propagate the admin role', async () => {
-		await expectError(rbac.grant(admin, 'billing', ADMIN_ROLE, USER), 403, /Only roots/);
-		await expectError(rbac.revoke(admin, 'billing', ADMIN_ROLE, ADMIN), 403);
-		await expectError(rbac.createVoucher(admin, { systemId: 'billing', role: ADMIN_ROLE }), 403);
-	});
-
-	it('cannot grant to whole domains', async () => {
-		await expectError(rbac.grant(admin, 'billing', 'viewer', 'gmail.com'), 403, /domains/);
-	});
-
-	it('cannot change the role catalog or create systems', async () => {
-		await expectError(rbac.addRole(admin, 'billing', 'x'), 403);
-		await expectError(rbac.createSystem(admin, { id: 'x' }), 403);
-	});
-
-	it('cannot grant roles missing from the catalog', async () => {
-		await expectError(rbac.grant(admin, 'billing', 'ghost', USER), 404);
-	});
-});
-
-describe('regular users', () => {
-	it('see only their own roles and manage nothing', async () => {
-		const user = await rbac.actor(USER);
-		expect(await rbac.rolesOf(USER)).toEqual({});
+describe('management is for roots only', () => {
+	it('everyone else sees only their own roles and manages nothing', async () => {
+		await rbac.grant(root, 'billing', 'editor', USER);
 		expect(await rbac.listSystems(user)).toEqual([]);
-		await expectError(rbac.grant(user, 'billing', 'viewer', 'x@y.com'), 403);
-		await expectError(rbac.createVoucher(user, { systemId: 'billing', role: 'viewer' }), 403);
+		await expectError(rbac.getSystem(user, 'billing'), 403);
+		await expectError(rbac.createSystem(user, { id: 'x' }), 403);
+		await expectError(rbac.deleteSystem(user, 'billing'), 403);
+		await expectError(rbac.addRole(user, 'billing', 'x'), 403);
+		await expectError(rbac.removeRole(user, 'billing', 'viewer'), 403);
+		await expectError(rbac.setImplications(user, 'billing', 'editor', ['viewer']), 403);
+		await expectError(rbac.grant(user, 'billing', 'viewer', OTHER), 403);
+		await expectError(rbac.revoke(user, 'billing', 'editor', USER), 403);
 		await expectError(rbac.listGrants(user, 'billing'), 403);
+		await expectError(rbac.createVoucher(user, { systemId: 'billing', role: 'viewer' }), 403);
+		await expectError(rbac.listVouchers(user, 'billing'), 403);
+		await expectError(rbac.grantGlobal(user, 'viewer', OTHER), 403);
+		await expectError(rbac.listGlobalGrants(user), 403);
+		await expectError(rbac.listGlobalVouchers(user), 403);
+	});
+
+	it('roots cannot grant roles missing from the catalog', async () => {
+		await expectError(rbac.grant(root, 'billing', 'ghost', USER), 404);
 	});
 });
 
-describe('role implications', () => {
+describe('role implications are registered data', () => {
 	beforeEach(async () => {
-		// The example: premium implies free, free implies nothing, admin implies everything.
-		await rbac.createSystem(root, { id: 'presence', roles: ['free', 'premium'] });
+		// The example: admin implies premium and free, premium implies free, free implies nothing.
+		await rbac.createSystem(root, { id: 'presence', roles: ['admin', 'free', 'premium'] });
 		await rbac.setImplications(root, 'presence', 'premium', ['free']);
+		await rbac.setImplications(root, 'presence', 'admin', ['free', 'premium']);
 	});
 
-	it('are listed with the system, admin implying every other role', async () => {
+	it('a new system or role implies nothing until a root registers it', async () => {
+		expect((await rbac.getSystem(root, 'billing')).implies).toEqual({});
+		await rbac.addRole(root, 'presence', 'gold');
 		expect((await rbac.getSystem(root, 'presence')).implies).toEqual({
 			admin: ['free', 'premium'],
 			premium: ['free']
 		});
-		expect((await rbac.getSystem(root, 'crm')).implies).toEqual({});
+		await rbac.grant(root, 'presence', 'admin', USER);
+		expect(await rbac.rolesIn(root, USER, 'presence')).toEqual(['admin', 'free', 'premium']);
 	});
 
 	it('give the implied roles, transitively; free implies nothing', async () => {
 		await rbac.grant(root, 'presence', 'premium', USER);
-		await rbac.grant(root, 'presence', 'free', 'other@partner.com');
+		await rbac.grant(root, 'presence', 'free', OTHER);
+		await rbac.grant(root, 'presence', 'admin', 'boss@partner.com');
 		expect(await rbac.rolesOf(USER)).toEqual({ presence: ['free', 'premium'] });
-		expect(await rbac.rolesOf('other@partner.com')).toEqual({ presence: ['free'] });
-		expect(await rbac.hasRole(root, USER, 'presence', 'free')).toBe(true);
-		expect(await rbac.hasRole(root, USER, 'presence', ADMIN_ROLE)).toBe(false);
-		expect(await rbac.hasRole(root, 'other@partner.com', 'presence', 'premium')).toBe(false);
-	});
-
-	it('make admin imply every role of its system, including roles added later', async () => {
-		await rbac.grant(root, 'presence', ADMIN_ROLE, 'boss@partner.com');
+		expect(await rbac.rolesOf(OTHER)).toEqual({ presence: ['free'] });
 		expect(await rbac.rolesOf('boss@partner.com')).toEqual({ presence: ['admin', 'free', 'premium'] });
-		await rbac.addRole(root, 'presence', 'gold');
-		expect(await rbac.rolesIn(root, 'boss@partner.com', 'presence')).toEqual(['admin', 'free', 'gold', 'premium']);
-		// ...but only in that system.
-		expect((await rbac.rolesOf('boss@partner.com')).billing).toBeUndefined();
-		await expectError(rbac.setImplications(root, 'presence', ADMIN_ROLE, ['free']), 400, /already implies/);
+		expect(await rbac.hasRole(root, USER, 'presence', 'free')).toBe(true);
+		expect(await rbac.hasRole(root, USER, 'presence', 'admin')).toBe(false);
+		expect(await rbac.hasRole(root, OTHER, 'presence', 'premium')).toBe(false);
 	});
 
 	it('come with grants returned by the API', async () => {
-		const premium = await rbac.grant(root, 'presence', 'premium', USER);
-		expect(premium.impliedRoles).toEqual(['free']);
+		expect((await rbac.grant(root, 'presence', 'premium', USER)).impliedRoles).toEqual(['free']);
 		expect((await rbac.grant(root, 'presence', 'free', USER)).impliedRoles).toEqual([]);
-		expect((await rbac.grant(root, 'presence', ADMIN_ROLE, ADMIN)).impliedRoles).toEqual(['free', 'premium']);
+		expect((await rbac.grant(root, 'presence', 'admin', OTHER)).impliedRoles).toEqual(['free', 'premium']);
 		const listed = await rbac.listGrants(root, 'presence');
 		expect(listed.find((g) => g.role === 'premium')?.impliedRoles).toEqual(['free']);
 		const v = await rbac.createVoucher(root, { systemId: 'presence', role: 'premium' });
@@ -252,37 +229,13 @@ describe('role implications', () => {
 		expect((await rbac.getSystem(root, 'presence')).implies).toEqual({ admin: ['premium'] });
 	});
 
-	it('refuse cycles, self-implication, implying admin and unknown roles', async () => {
+	it('refuse cycles, self-implication and unknown roles', async () => {
 		await expectError(rbac.setImplications(root, 'presence', 'free', ['premium']), 400, /itself/);
+		await expectError(rbac.setImplications(root, 'presence', 'free', ['admin']), 400, /itself/);
 		await expectError(rbac.setImplications(root, 'presence', 'free', ['free']), 400, /itself/);
-		await expectError(rbac.setImplications(root, 'presence', 'free', [ADMIN_ROLE]), 400, /admin/);
 		await expectError(rbac.setImplications(root, 'presence', 'free', ['ghost']), 404);
 		await expectError(rbac.setImplications(root, 'presence', 'ghost', ['free']), 404);
 		await expectError(rbac.setImplications(root, 'nope', 'free', []), 404);
-	});
-
-	it('are changed only by roots', async () => {
-		await expectError(rbac.setImplications(await rbac.actor(ADMIN), 'billing', 'editor', ['viewer']), 403);
-	});
-
-	it('let admins hand out implied roles only through grantable roles', async () => {
-		await rbac.grant(root, 'presence', ADMIN_ROLE, ADMIN);
-		const presenceAdmin = await rbac.actor(ADMIN);
-		await rbac.grant(presenceAdmin, 'presence', 'premium', USER);
-		expect(await rbac.rolesOf(USER)).toEqual({ presence: ['free', 'premium'] });
-		expect((await rbac.actor(USER)).adminOf).toEqual([]);
-	});
-});
-
-describe('canAssign', () => {
-	const admin: Actor = { email: ADMIN, root: false, adminOf: ['billing'] };
-	it('encodes the propagation rules', () => {
-		expect(canAssign({ email: ROOT, root: true, adminOf: [] }, 'any', ADMIN_ROLE, '@x.com')).toBe(true);
-		expect(canAssign(admin, 'billing', 'viewer', USER)).toBe(true);
-		expect(canAssign(admin, 'billing', 'viewer', null)).toBe(true);
-		expect(canAssign(admin, 'billing', ADMIN_ROLE, null)).toBe(false);
-		expect(canAssign(admin, 'billing', 'viewer', '@x.com')).toBe(false);
-		expect(canAssign(admin, 'crm', 'viewer', USER)).toBe(false);
 	});
 });
 
@@ -295,17 +248,10 @@ describe('vouchers', () => {
 	});
 
 	it('grant their role to whoever redeems them', async () => {
-		const admin = await rbac.actor(ADMIN);
-		const v = await rbac.createVoucher(admin, { systemId: 'billing', role: 'viewer' });
+		const v = await rbac.createVoucher(root, { systemId: 'billing', role: 'viewer' });
 		const grant = await rbac.redeemVoucher(USER, v.code.toLowerCase());
 		expect(grant).toMatchObject({ systemId: 'billing', role: 'viewer', grantee: USER, voucherCode: v.code });
 		expect(await rbac.rolesOf(USER)).toEqual({ billing: ['viewer'] });
-	});
-
-	it('root admin vouchers make the redeemer an admin', async () => {
-		const v = await rbac.createVoucher(root, { systemId: 'crm', role: ADMIN_ROLE });
-		await rbac.redeemVoucher(USER, v.code);
-		expect((await rbac.actor(USER)).adminOf).toEqual(['crm']);
 	});
 
 	it('can be redeemed once per identity', async () => {
@@ -347,22 +293,13 @@ describe('vouchers', () => {
 		await expectError(rbac.createVoucher(root, { ...base, startsAt: new Date('nope') }), 400);
 	});
 
-	it('can be disabled by their managers', async () => {
-		const admin = await rbac.actor(ADMIN);
-		const v = await rbac.createVoucher(admin, { systemId: 'billing', role: 'viewer' });
-		const disabled = await rbac.disableVoucher(admin, v.code);
+	it('can be disabled by roots only', async () => {
+		const v = await rbac.createVoucher(root, { systemId: 'billing', role: 'viewer' });
+		await expectError(rbac.disableVoucher(user, v.code), 403);
+		const disabled = await rbac.disableVoucher(root, v.code);
 		expect(voucherStatus(disabled, clock)).toBe('disabled');
 		await expectError(rbac.redeemVoucher(USER, v.code), 409, /disabled/);
-		await expectError(rbac.disableVoucher(await rbac.actor(USER), v.code), 404);
-	});
-
-	it('admin vouchers are hidden from and untouchable by admins', async () => {
-		const admin = await rbac.actor(ADMIN);
-		const adminVoucher = await rbac.createVoucher(root, { systemId: 'billing', role: ADMIN_ROLE });
-		await rbac.createVoucher(admin, { systemId: 'billing', role: 'viewer' });
-		expect((await rbac.listVouchers(admin, 'billing')).map((v) => v.role)).toEqual(['viewer']);
-		expect(await rbac.listVouchers(root, 'billing')).toHaveLength(2);
-		await expectError(rbac.disableVoucher(admin, adminVoucher.code), 404);
+		await expectError(rbac.disableVoucher(root, 'AAAA-BBBB-CCCC-DDDD'), 404);
 	});
 
 	it('unknown codes are not found', async () => {
@@ -371,14 +308,8 @@ describe('vouchers', () => {
 });
 
 describe('global vouchers and grants', () => {
-	it('only roots create them', async () => {
-		const admin = await rbac.actor(ADMIN);
-		const user = await rbac.actor(USER);
-		await expectError(rbac.createVoucher(admin, { systemId: null, role: 'viewer' }), 403, /global/);
+	it('only roots create them, never for root', async () => {
 		await expectError(rbac.createVoucher(user, { systemId: null, role: 'viewer' }), 403);
-		await expectError(rbac.grantGlobal(admin, 'viewer', USER), 403);
-		await expectError(rbac.listGlobalVouchers(admin), 403);
-		await expectError(rbac.listGlobalGrants(admin), 403);
 		await expectError(rbac.createVoucher(root, { systemId: null, role: 'root' }), 400, /reserved/);
 	});
 
@@ -395,17 +326,16 @@ describe('global vouchers and grants', () => {
 	});
 
 	it('can be granted and revoked directly by roots, also to domains', async () => {
-		await rbac.grantGlobal(root, 'admin', 'partner.com');
-		expect((await rbac.actor('anyone@partner.com')).adminOf).toEqual(['billing', 'crm']);
+		await rbac.grantGlobal(root, 'editor', 'partner.com');
+		expect(await rbac.rolesOf('anyone@partner.com')).toEqual({ billing: ['editor'] });
 		expect((await rbac.listGlobalGrants(root)).map((g) => g.grantee)).toEqual(['@partner.com']);
-		await rbac.revokeGlobal(root, 'admin', '@partner.com');
+		await rbac.revokeGlobal(root, 'editor', '@partner.com');
 		expect(await rbac.globalRolesOf('anyone@partner.com')).toEqual([]);
-		await expectError(rbac.revokeGlobal(root, 'admin', '@partner.com'), 404);
+		await expectError(rbac.revokeGlobal(root, 'editor', '@partner.com'), 404);
 	});
 
-	it('are hidden from and untouchable by admins', async () => {
-		const v = await rbac.createVoucher(root, { systemId: null, role: 'viewer' });
-		await expectError(rbac.disableVoucher(await rbac.actor(ADMIN), v.code), 404);
+	it('are not listed with a system', async () => {
+		await rbac.createVoucher(root, { systemId: null, role: 'viewer' });
 		expect(await rbac.listVouchers(root, 'billing')).toEqual([]);
 	});
 
@@ -426,8 +356,7 @@ describe('voucher discounts', () => {
 	});
 
 	it('below 100% require payment: 402 with the terms, nothing recorded', async () => {
-		const admin = await rbac.actor(ADMIN);
-		const v = await rbac.createVoucher(admin, { systemId: 'billing', role: 'viewer', discountPercent: 50, maxUses: 1 });
+		const v = await rbac.createVoucher(root, { systemId: 'billing', role: 'viewer', discountPercent: 50, maxUses: 1 });
 		const err = await rbac.redeemVoucher(USER, v.code).catch((e: unknown) => e);
 		expect(err).toBeInstanceOf(RbacError);
 		expect((err as RbacError).status).toBe(402);
@@ -454,28 +383,22 @@ describe('voucher discounts', () => {
 });
 
 describe('role queries (the external API)', () => {
-	let admin: Actor;
-	let user: Actor;
-
 	beforeEach(async () => {
 		await rbac.grant(root, 'billing', 'viewer', USER);
-		await rbac.grantGlobal(root, 'editor', 'other@partner.com');
-		admin = await rbac.actor(ADMIN);
-		user = await rbac.actor(USER);
+		await rbac.grantGlobal(root, 'editor', OTHER);
 	});
 
 	it('check roles with the same rules as rolesOf', async () => {
 		expect(await rbac.hasRole(root, USER, 'billing', 'viewer')).toBe(true);
 		expect(await rbac.hasRole(root, ' User@Partner.com ', 'billing', 'Viewer')).toBe(true);
 		expect(await rbac.hasRole(root, USER, 'billing', 'editor')).toBe(false);
-		expect(await rbac.hasRole(root, ADMIN, 'billing', ADMIN_ROLE)).toBe(true);
-		expect(await rbac.hasRole(root, 'other@partner.com', 'billing', 'editor')).toBe(true);
-		expect(await rbac.hasRole(root, ROOT, 'crm', ADMIN_ROLE)).toBe(true);
+		expect(await rbac.hasRole(root, OTHER, 'billing', 'editor')).toBe(true);
+		expect(await rbac.hasRole(root, ROOT, 'billing', 'viewer')).toBe(true);
 	});
 
 	it('check global roles when no system is given', async () => {
 		expect(await rbac.hasRole(root, ROOT, null, 'root')).toBe(true);
-		expect(await rbac.hasRole(root, 'other@partner.com', null, 'editor')).toBe(true);
+		expect(await rbac.hasRole(root, OTHER, null, 'editor')).toBe(true);
 		expect(await rbac.hasRole(root, USER, null, 'editor')).toBe(false);
 	});
 
@@ -488,10 +411,7 @@ describe('role queries (the external API)', () => {
 	it('list roles', async () => {
 		expect(await rbac.rolesIn(root, USER, 'billing')).toEqual(['viewer']);
 		expect(await rbac.rolesIn(root, USER, 'crm')).toEqual([]);
-		expect(await rbac.allRoles(root, 'other@partner.com')).toEqual({
-			globalRoles: ['editor'],
-			roles: { billing: ['editor'] }
-		});
+		expect(await rbac.allRoles(root, OTHER)).toEqual({ globalRoles: ['editor'], roles: { billing: ['editor'] } });
 	});
 
 	it('let anyone ask about themselves', async () => {
@@ -500,17 +420,9 @@ describe('role queries (the external API)', () => {
 		expect(await rbac.allRoles(user, USER)).toEqual({ globalRoles: [], roles: { billing: ['viewer'] } });
 	});
 
-	it('let admins ask about anyone, but only in their systems', async () => {
-		expect(await rbac.hasRole(admin, USER, 'billing', 'viewer')).toBe(true);
-		expect(await rbac.rolesIn(admin, USER, 'billing')).toEqual(['viewer']);
-		await expectError(rbac.hasRole(admin, USER, 'crm', 'admin'), 403, /administer/);
-		await expectError(rbac.hasRole(admin, USER, null, 'editor'), 403, /global/);
-		await expectError(rbac.allRoles(admin, USER), 403);
-	});
-
-	it("keep regular users out of other people's roles", async () => {
-		await expectError(rbac.hasRole(user, ADMIN, 'billing', 'admin'), 403);
-		await expectError(rbac.rolesIn(user, ADMIN, 'billing'), 403);
+	it("keep everyone but roots out of other people's roles", async () => {
+		await expectError(rbac.hasRole(user, OTHER, 'billing', 'editor'), 403, /Only roots/);
+		await expectError(rbac.rolesIn(user, OTHER, 'billing'), 403);
 		await expectError(rbac.allRoles(user, ROOT), 403);
 	});
 });

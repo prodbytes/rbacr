@@ -13,17 +13,15 @@ app on AWS Lambda.
 - **Roots** are listed in `RBACR_ROOT_LIST`, as addresses or domains
   (`@nu01.com` means everyone at nu01.com). They hold the single global
   `root` role and every role in every system. The list is the only way to
-  become a root: `root` can't be granted or redeemed. Roots create systems
-  and roles, and can grant any role to an address or a whole domain.
-- **Implied roles**: a role can imply other roles of its system. Built in,
-  `root` holds every role everywhere and `admin` implies every role of its
-  system. Roots set the rest, e.g. `premium` implies `free` (and `free`
-  implies nothing). Implication is transitive, and no role can imply
-  `admin`. Grants returned by the API list the roles they imply
-  (`impliedRoles`).
-- **Admins** hold a system's `admin` role. They can grant that system's other
-  roles to individual addresses, and create vouchers for them. Only roots can
-  hand out `admin`, whether directly or through an admin voucher.
+  become a root: `root` can't be granted or redeemed. `root` is the only
+  built-in role, and roots alone manage rbacr: they create systems and
+  roles, grant roles to addresses, domains or globally, and issue vouchers.
+- **Roles and implied roles are registered data.** A system has exactly the
+  roles a root registers (no role name but `root` means anything, so a role
+  called `admin` has no powers). A root also registers which roles imply
+  others, e.g. `admin` implies `premium` and `free`, `premium` implies
+  `free`, and `free` implies nothing. Implication is transitive. Grants
+  returned by the API list the roles they imply (`impliedRoles`).
 - **Vouchers** are codes like `7JH2-UQF5-XA7B-VMQT` that grant a role when
   redeemed, either in one system or **globally**. A global voucher gives the
   role in every system that defines it, and only roots can create global
@@ -32,7 +30,8 @@ app on AWS Lambda.
   answers 402 Payment Required). The start date, end date and usage count
   are all optional.
 - **Everyone** can sign in, see their own roles at `/me` and redeem vouchers.
-  `/settings` shows the running version and the API's address.
+  `/settings` shows the running version and the API's address; roots also
+  see the root allow list there.
 - **API tokens** let scripts and other applications call rbacr as a person.
   Anyone creates their own on `/me`. A token can do what its owner can do;
   for example, a root's token can ask whether anyone holds a role.
@@ -93,31 +92,29 @@ about the verified e-mail address, server-side, with an API token.
 ### 1. Set up your system (once, in the UI)
 
 1. A root creates the system on `/systems` (its id is what your code sends
-   as `systemId`, e.g. `presence`) and its roles (e.g. `free`, `premium`).
-   Every system also has `admin`.
-2. Optionally, a root sets **implied roles** (`premium` implies `free`), so
-   your code can ask for the role a feature needs and anyone with a
-   higher role passes too.
-3. Roots or the system's admins grant roles to addresses (roots also to
-   whole domains or globally), or hand out vouchers that people redeem on
-   `/me`.
+   as `systemId`, e.g. `presence`) and registers its roles (e.g. `admin`,
+   `premium`, `free`). A system has no roles until a root registers them.
+2. Optionally, a root registers **implied roles** (`admin` implies
+   `premium` and `free`, `premium` implies `free`), so your code can ask
+   for the role a feature needs and anyone with a higher role passes too.
+3. A root grants roles to addresses, whole domains or globally, or hands
+   out vouchers that people redeem on `/me`.
 
 ### 2. Create a token for your application
 
-Sign in as an account that may see the roles your application asks about,
-open `/me` → **API tokens**, create one with an expiry, and store it as a
-server-side secret (it's shown once). A token acts as the person who
-created it, with their roles at the time of each request:
+Sign in as a root, open `/me` → **API tokens**, create one with an expiry,
+and store it as a server-side secret (it's shown once). A token acts as the
+person who created it, with their status at the time of each request:
 
 | Token owner | Can ask about |
 |---|---|
-| An **admin of your system** (recommended) | anyone's roles in that system |
 | A **root** | anyone's roles in every system, and global roles |
-| Anyone | only themselves (`/api/me`, or their own address) |
+| Anyone else | only themselves (`/api/me`, or their own address) |
 
-Use an admin of your system unless you need more: if the token leaks, it
-reveals only that system's roles. Revoke tokens on `/me`; a revoked or
-expired token gets 401 at once.
+An application asking about its users therefore needs a root's token: keep
+it server-side only, give it an expiry, and revoke it on `/me` when it's no
+longer needed (a revoked or expired token gets 401 at once). A token from
+someone who leaves the root list stops being able to ask about others.
 
 ### 3. Ask about roles
 
@@ -169,15 +166,15 @@ export async function hasRole(email: string, systemId: string, role: string): Pr
 
 - **Roles are effective roles**: grants to the address, grants to its
   domain, global grants of a role your system defines, and everything those
-  imply (an `admin` holds every role of its system). Roots
-  (`RBACR_ROOT_LIST`) hold every role of every system. Grants returned by
+  roles imply, as registered. Roots (`RBACR_ROOT_LIST`) hold every role of
+  every system. Grants returned by
   the API carry `impliedRoles`, e.g. granting `premium` returns
   `"impliedRoles": ["free"]`.
 - **E-mail addresses** are matched case-insensitively. Send the address
   your sign-in verified; rbacr trusts what you send.
 - **`allowed: false`** means the person doesn't hold the role. A role or
   system that doesn't exist is a 404, not `false`, so typos surface (a
-  token that can't see the system gets 403 first).
+  non-root token asking about someone else gets 403 first).
 - **Fresh within about a second.** A grant or revocation can take up to a
   second to show (SPEC D3). If you cache answers, keep it short (a minute
   or less) and never cache errors.

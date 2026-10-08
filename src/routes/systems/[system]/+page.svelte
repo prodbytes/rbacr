@@ -98,7 +98,7 @@
 		</form>
 		<form class="row" onsubmit={removeRole}>
 			<select name="role">
-				{#each data.system.roles.filter((r) => r !== 'admin') as role (role)}<option>{role}</option>{/each}
+				{#each data.system.roles as role (role)}<option>{role}</option>{/each}
 			</select>
 			<button class="danger">Remove role</button>
 		</form>
@@ -108,13 +108,12 @@
 			Role
 			<select bind:value={implRole} required>
 				<option value="" disabled>choose…</option>
-				<!-- admin implies every role of the system on its own -->
-				{#each data.system.roles.filter((r) => r !== 'admin') as role (role)}<option>{role}</option>{/each}
+				{#each data.system.roles as role (role)}<option>{role}</option>{/each}
 			</select>
 		</label>
 		{#if implRole}
 			implies
-			{#each data.system.roles.filter((r) => r !== 'admin' && r !== implRole) as role (role)}
+			{#each data.system.roles.filter((r) => r !== implRole) as role (role)}
 				<label><input type="checkbox" value={role} bind:group={implied} /> {role}</label>
 			{/each}
 		{/if}
@@ -125,13 +124,13 @@
 <h2>Grants</h2>
 <form class="row" onsubmit={grant}>
 	<label>
-		{data.root ? 'E-mail or domain' : 'E-mail'}
-		<input name="grantee" placeholder={data.root ? 'ana@example.com or example.com' : 'ana@example.com'} required />
+		E-mail or domain
+		<input name="grantee" placeholder="ana@example.com or example.com" required />
 	</label>
 	<label>
 		Role
 		<select name="role">
-			{#each data.assignable as role (role)}<option>{role}</option>{/each}
+			{#each data.system.roles as role (role)}<option>{role}</option>{/each}
 		</select>
 	</label>
 	<button>Grant</button>
@@ -149,7 +148,7 @@
 					<td class="muted">{g.grantedBy}{g.voucherCode ? ' (voucher)' : ''}</td>
 					<td class="muted">{formatDate(g.grantedAt)}</td>
 					<td>
-						{#if data.assignable.includes(g.role) && (data.root || !g.grantee.startsWith('@'))}
+						{#if data.root}
 							<button class="danger" onclick={() => revoke(g.role, g.grantee)}>Revoke</button>
 						{/if}
 					</td>
@@ -166,7 +165,7 @@
 	<label>
 		Role
 		<select name="role">
-			{#each data.assignable as role (role)}<option>{role}</option>{/each}
+			{#each data.system.roles as role (role)}<option>{role}</option>{/each}
 		</select>
 	</label>
 	<label>Discount % <input type="number" name="discountPercent" min="0" max="100" step="1" value="100" class="narrow" /></label>
