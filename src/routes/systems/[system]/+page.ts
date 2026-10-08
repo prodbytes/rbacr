@@ -8,6 +8,8 @@ export interface Grant {
 	grantedBy: string;
 	grantedAt: string;
 	voucherCode: string | null;
+	/** Roles the granted role implies in this system. */
+	impliedRoles: string[];
 }
 
 export interface Voucher {

@@ -15,9 +15,12 @@ app on AWS Lambda.
   `root` role and every role in every system. The list is the only way to
   become a root: `root` can't be granted or redeemed. Roots create systems
   and roles, and can grant any role to an address or a whole domain.
-- **Implied roles**: a role can imply other roles of its system, so holding
-  `premium` can also give `free`, and `admin` can give both. Implication is
-  transitive; only roots set it, and no role can imply `admin`.
+- **Implied roles**: a role can imply other roles of its system. Built in,
+  `root` holds every role everywhere and `admin` implies every role of its
+  system. Roots set the rest, e.g. `premium` implies `free` (and `free`
+  implies nothing). Implication is transitive, and no role can imply
+  `admin`. Grants returned by the API list the roles they imply
+  (`impliedRoles`).
 - **Admins** hold a system's `admin` role. They can grant that system's other
   roles to individual addresses, and create vouchers for them. Only roots can
   hand out `admin`, whether directly or through an admin voucher.
@@ -29,6 +32,7 @@ app on AWS Lambda.
   answers 402 Payment Required). The start date, end date and usage count
   are all optional.
 - **Everyone** can sign in, see their own roles at `/me` and redeem vouchers.
+  `/settings` shows the running version and the API's address.
 - **API tokens** let scripts and other applications call rbacr as a person.
   Anyone creates their own on `/me`. A token can do what its owner can do;
   for example, a root's token can ask whether anyone holds a role.
@@ -165,7 +169,10 @@ export async function hasRole(email: string, systemId: string, role: string): Pr
 
 - **Roles are effective roles**: grants to the address, grants to its
   domain, global grants of a role your system defines, and everything those
-  imply. Roots (`RBACR_ROOT_LIST`) hold every role of every system.
+  imply (an `admin` holds every role of its system). Roots
+  (`RBACR_ROOT_LIST`) hold every role of every system. Grants returned by
+  the API carry `impliedRoles`, e.g. granting `premium` returns
+  `"impliedRoles": ["free"]`.
 - **E-mail addresses** are matched case-insensitively. Send the address
   your sign-in verified; rbacr trusts what you send.
 - **`allowed: false`** means the person doesn't hold the role. A role or

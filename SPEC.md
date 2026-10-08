@@ -58,18 +58,28 @@ and the README in sync with the code.
   in the system's catalog fails (404).
 - **R6 Implied roles.** A role may imply other roles of its system: whoever
   holds it also holds them, with all they can do. Implication is transitive.
-  For example, with `premium → free` and `admin → premium`, holding `premium`
-  gives `free`, and holding `admin` gives `premium` and `free`. Effective
-  roles (R3, `/api/me`, `/api/check`, `/api/roles`) include implied roles,
-  also for roles that come from global grants. Grants themselves stay as
-  given: listing grants shows only what was granted, and revoking an implied
-  role that wasn't granted gives 404. Roots already hold every role (R2).
+  Built in: **`root` holds every role of every system** (R2), and **`admin`
+  implies every other role of its system**, including roles added later
+  (only in that system). Roots configure the rest: for example `premium →
+  free`, with `free` implying nothing, so holding `premium` gives `free`, and
+  holding `admin` gives both. Effective roles (R3, `/api/me`, `/api/check`,
+  `/api/roles`) include implied roles, also for roles that come from global
+  grants. Grants themselves stay as given (revoking an implied role that
+  wasn't granted gives 404), but every grant the API returns carries the
+  roles it implies (R8).
 - **R7** Only roots set implications, per role, replacing that role's previous
-  list. A role cannot imply itself, implications can't form a cycle, and
+  list. A role cannot imply itself, implications can't form a cycle,
+  `admin`'s implications are fixed (it already implies everything), and
   **nothing can imply `admin`** (otherwise an admin could hand out admin by
   granting a role that implies it, against P1); these give 400. Implied roles
   must be in the catalog (404). Removing a role removes its implications in
-  both directions.
+  both directions. A system's `implies` lists every role's direct
+  implications, `admin`'s included.
+- **R8** Every grant in an API response (granting, listing grants, redeeming
+  a voucher, global grants) includes `impliedRoles`: the roles its role
+  implies in its system, sorted, without the role itself. A global grant
+  gives its role in every system that defines it, so it has
+  `impliedRoles: []` and `impliedRolesBySystem: { systemId: [role] }`.
 
 ## Permissions
 
@@ -224,11 +234,11 @@ ISO-8601 strings in UTC.
 | Method & path | Body | Response |
 |---------------|------|----------|
 | `GET /api/me` | — | `{ email, root, adminOf: [systemId], globalRoles: ["root"] or [], roles: { systemId: [role] } }` |
-| `POST /api/vouchers/redeem` | `{ code }` | the resulting grant (`systemId: null` when global), or 402 (V4a) |
+| `POST /api/vouchers/redeem` | `{ code }` | the resulting grant with `impliedRoles` (`systemId: null` and `impliedRolesBySystem` when global), or 402 (V4a) |
 | `GET /api/vouchers` | — | `{ vouchers: [...] }`, the global vouchers (roots) |
 | `POST /api/vouchers` | `{ role, discountPercent?, startsAt?, endsAt?, maxUses? }` | 201, a global voucher (roots) |
-| `GET /api/global-grants` | — | `{ grants: [{ systemId: null, role, grantee, grantedBy, grantedAt, voucherCode }] }` (roots) |
-| `POST /api/global-grants` | `{ role, grantee }` | 201, the global grant (roots) |
+| `GET /api/global-grants` | — | `{ grants: [{ systemId: null, role, grantee, grantedBy, grantedAt, voucherCode, impliedRoles: [], impliedRolesBySystem }] }` (roots, R8) |
+| `POST /api/global-grants` | `{ role, grantee }` | 201, the global grant, with `impliedRolesBySystem` (roots) |
 | `DELETE /api/global-grants` | `{ role, grantee }` | 204 (roots) |
 | `DELETE /api/vouchers/:code` | — | the disabled voucher |
 | `GET /api/systems` | — | `{ systems: [{ id, name, roles, implies: { role: [role] } }] }` (only manageable systems; `implies` lists direct implications) |
@@ -238,8 +248,8 @@ ISO-8601 strings in UTC.
 | `POST /api/systems/:id/roles` | `{ role }` | the system |
 | `DELETE /api/systems/:id/roles/:role` | — | 204 |
 | `PUT /api/systems/:id/roles/:role` | `{ implies: [role] }` | the system, with the role's implied roles replaced (roots, R7) |
-| `GET /api/systems/:id/grants` | — | `{ grants: [{ systemId, role, grantee, grantedBy, grantedAt, voucherCode }] }` |
-| `POST /api/systems/:id/grants` | `{ role, grantee }` | 201, the grant (re-granting is idempotent) |
+| `GET /api/systems/:id/grants` | — | `{ grants: [{ systemId, role, grantee, grantedBy, grantedAt, voucherCode, impliedRoles }] }` (R8) |
+| `POST /api/systems/:id/grants` | `{ role, grantee }` | 201, the grant with `impliedRoles` (re-granting is idempotent) |
 | `DELETE /api/systems/:id/grants` | `{ role, grantee }` | 204 |
 | `GET /api/systems/:id/vouchers` | — | `{ vouchers: [{ code, systemId, role, discountPercent, startsAt, endsAt, maxUses, uses, status, createdBy, createdAt, disabledAt }] }` |
 | `POST /api/systems/:id/vouchers` | `{ role, discountPercent?, startsAt?, endsAt?, maxUses? }` | 201, the voucher |
@@ -271,7 +281,8 @@ addresses stay out of URLs and access logs.
 
 Its endpoints are shaped for the pages and are not a public contract; the
 frontend (`src/lib/vpi.ts`) is its only client. The routes are
-`GET /vpi/session` (who is signed in; works anonymously), `GET /vpi/me`,
+`GET /vpi/session` (who is signed in; works anonymously), `GET /vpi/settings`
+(version, API address, account), `GET /vpi/me`,
 `POST /vpi/me/redeem` (402 with `payment` per V4a), `GET|POST /vpi/tokens`,
 `DELETE /vpi/tokens/:id`, `GET|POST /vpi/systems`,
 `GET|DELETE /vpi/systems/:id`, `POST /vpi/systems/:id/roles`,
@@ -283,7 +294,8 @@ missing session gives 401.
 
 ### Pages
 
-`/` (sign in), `/me` (own roles, redeem a voucher, API tokens), `/systems`
+`/` (sign in), `/me` (own roles, redeem a voucher, API tokens), `/settings`
+(the running version, the API's address, the signed-in account), `/systems`
 (manageable systems, create a system), `/systems/:id` (catalog, grants,
 vouchers) and `/global` (roots: global grants and vouchers). Pages load
 through `/vpi`; a page whose data needs a session sends anonymous visitors

@@ -47,7 +47,11 @@ export interface System {
 	id: string;
 	name: string;
 	roles: string[];
-	/** Direct implications: holding the key role also gives these roles (transitively). Roles implying nothing are left out. */
+	/**
+	 * Direct implications: holding the key role also gives these roles
+	 * (transitively). `admin` always implies every other role of the system
+	 * (R6); roles implying nothing are left out.
+	 */
 	implies: Record<string, string[]>;
 }
 
@@ -59,6 +63,18 @@ export interface Grant {
 	grantedBy: string;
 	grantedAt: Date;
 	voucherCode: string | null;
+}
+
+/**
+ * A grant as the API returns it: with the roles it implies (R6), so a client
+ * sees everything the grant gives. For a system grant, `impliedRoles` are the
+ * roles implied in its system. A global grant gives its role in every system
+ * that defines it, so it lists them per system in `impliedRolesBySystem`
+ * (and `impliedRoles` is empty).
+ */
+export interface GrantWithImplied extends Grant {
+	impliedRoles: string[];
+	impliedRolesBySystem?: Record<string, string[]>;
 }
 
 /** A voucher; systemId null is a global voucher (redeeming it makes a global grant). */
@@ -209,6 +225,16 @@ const toVoucher = (it: Item): Voucher => ({
 	disabledAt: date(it.disabledAt)
 });
 
+/**
+ * A system's implication graph: the stored implications, plus `admin`
+ * implying every other role of the catalog (R6), now and as roles are added.
+ */
+function implicationGraph(roles: string[], stored: Record<string, string[]>): Map<string, string[]> {
+	const edges = new Map(Object.entries(stored));
+	edges.set(ADMIN_ROLE, roles.filter((r) => r !== ADMIN_ROLE));
+	return edges;
+}
+
 /** Every role reachable from `held` through `edges` (role -> implied roles), `held` included. */
 function closure(held: Iterable<string>, edges: Map<string, string[]>): Set<string> {
 	const out = new Set<string>();
@@ -311,13 +337,37 @@ export class Rbac {
 		for (const roles of defining) for (const it of roles) add(it.systemId as string, it.name as string);
 		const map: RoleMap = {};
 		for (const systemId of [...held.keys()].sort()) {
-			const edges = new Map<string, string[]>();
-			for (const it of await queryPrefix(this.table, sysPK(systemId), 'IMPL#')) {
-				edges.set(it.role as string, [...(edges.get(it.role as string) ?? []), it.implies as string]);
-			}
-			map[systemId] = [...closure(held.get(systemId)!, edges)].sort();
+			const system = await this.loadSystem(systemId);
+			if (!system) continue;
+			map[systemId] = [...closure(held.get(systemId)!, implicationGraph(system.roles, system.stored))].sort();
 		}
 		return map;
+	}
+
+	/**
+	 * Adds to each grant the roles it implies (R6), for API responses. Grants
+	 * of systems or roles that no longer exist imply nothing.
+	 */
+	async withImpliedRoles(grants: Grant[]): Promise<GrantWithImplied[]> {
+		const systems = new Map<string, Promise<Awaited<ReturnType<Rbac['loadSystem']>>>>();
+		const system = (id: string) => {
+			if (!systems.has(id)) systems.set(id, this.loadSystem(id));
+			return systems.get(id)!;
+		};
+		const implied = async (systemId: string, role: string): Promise<string[]> => {
+			const s = await system(systemId);
+			if (!s || !s.roles.includes(role)) return [];
+			return [...closure([role], implicationGraph(s.roles, s.stored))].filter((r) => r !== role).sort();
+		};
+		return Promise.all(
+			grants.map(async (g): Promise<GrantWithImplied> => {
+				if (g.systemId !== null) return { ...g, impliedRoles: await implied(g.systemId, g.role) };
+				const defining = (await queryIndex(this.table, `ROLENAME#${g.role}`)).map((it) => it.systemId as string).sort();
+				const bySystem: Record<string, string[]> = {};
+				for (const id of defining) bySystem[id] = await implied(id, g.role);
+				return { ...g, impliedRoles: [], impliedRolesBySystem: bySystem };
+			})
+		);
 	}
 
 	// --- systems & role catalog -------------------------------------------
@@ -332,22 +382,32 @@ export class Rbac {
 		});
 	}
 
-	private async loadSystem(systemId: string): Promise<(System & { implVersion: number }) | null> {
+	/**
+	 * A system with its catalog. `stored` holds the implications roots set;
+	 * `implies` adds admin's built-in ones (R6) for display and the API.
+	 */
+	private async loadSystem(
+		systemId: string
+	): Promise<(System & { stored: Record<string, string[]>; implVersion: number }) | null> {
 		const items = await this.catalogItems(systemId);
 		const meta = items.find((it) => it.SK === 'META');
 		if (!meta) return null;
-		const implies: Record<string, string[]> = {};
+		const stored: Record<string, string[]> = {};
 		for (const it of items.filter((it) => (it.SK as string).startsWith('IMPL#'))) {
-			(implies[it.role as string] ??= []).push(it.implies as string);
+			(stored[it.role as string] ??= []).push(it.implies as string);
 		}
 		const roles = items.filter((it) => (it.SK as string).startsWith('ROLE#')).map((it) => it.name as string);
-		return { id: systemId, name: meta.name as string, roles, implies, implVersion: (meta.implVersion as number) ?? 0 };
+		const implies: Record<string, string[]> = {};
+		for (const [role, implied] of implicationGraph(roles, stored)) {
+			if (implied.length) implies[role] = [...implied].sort();
+		}
+		return { id: systemId, name: meta.name as string, roles, implies, stored, implVersion: (meta.implVersion as number) ?? 0 };
 	}
 
 	private async allSystems(ids?: string[]): Promise<System[]> {
 		const wanted = ids ?? (await queryIndex(this.table, 'SYSTEMS')).map((it) => it.id as string);
 		const systems = await Promise.all([...new Set(wanted)].sort().map((id) => this.loadSystem(id)));
-		return systems.filter((s) => s !== null).map(({ implVersion: _, ...s }) => s);
+		return systems.filter((s) => s !== null).map(({ implVersion: _v, stored: _s, ...s }) => s);
 	}
 
 	/** Systems the actor can manage: all for roots, administered ones for admins. */
@@ -387,7 +447,9 @@ export class Rbac {
 			}))
 		]);
 		if (reasons) throw new RbacError(409, `System "${id}" already exists`);
-		return { id, name, roles: [...roles].sort(), implies: {} };
+		const sorted = [...roles].sort();
+		const others = sorted.filter((r) => r !== ADMIN_ROLE);
+		return { id, name, roles: sorted, implies: others.length ? { [ADMIN_ROLE]: others } : {} };
 	}
 
 	async deleteSystem(actor: Actor, systemId: string): Promise<void> {
@@ -482,17 +544,20 @@ export class Rbac {
 			if (!system.roles.includes(r)) throw notFound(`Role "${r}" not found in "${systemId}"`);
 		};
 		requireRole(role);
+		if (role === ADMIN_ROLE) throw badRequest(`The ${ADMIN_ROLE} role already implies every role of its system`);
 		for (const r of implies) {
 			if (r === role) throw badRequest(`A role cannot imply itself`);
 			if (r === ADMIN_ROLE) throw badRequest(`No role can imply the ${ADMIN_ROLE} role`);
 			requireRole(r);
 		}
 		// A cycle through `role` exists if `role` is reachable from what it implies.
-		const edges = new Map(Object.entries(system.implies));
+		// Only stored implications matter here: admin's are built in, and
+		// nothing may imply admin, so it can't close a cycle.
+		const edges = new Map(Object.entries(system.stored));
 		edges.set(role, implies);
 		const reachable = closure(implies.flatMap((r) => edges.get(r) ?? []).concat(implies), edges);
 		if (reachable.has(role)) throw badRequest(`"${role}" would end up implying itself`);
-		const previous = system.implies[role] ?? [];
+		const previous = system.stored[role] ?? [];
 		// The META version guards against concurrent edits combining into a
 		// cycle; the role checks against concurrent removal.
 		const reasons = await this.transact([
@@ -531,9 +596,13 @@ export class Rbac {
 
 	// --- grants -------------------------------------------------------------
 
-	async listGrants(actor: Actor, systemId: string): Promise<Grant[]> {
+	async listGrants(actor: Actor, systemId: string): Promise<GrantWithImplied[]> {
 		await this.getSystem(actor, systemId);
-		return (await queryPrefix(this.table, sysPK(systemId), 'GRANT#')).map(toGrant);
+		return this.withImpliedRoles((await queryPrefix(this.table, sysPK(systemId), 'GRANT#')).map(toGrant));
+	}
+
+	private async withImplied(grant: Grant): Promise<GrantWithImplied> {
+		return (await this.withImpliedRoles([grant]))[0];
 	}
 
 	/**
@@ -565,7 +634,7 @@ export class Rbac {
 		return toGrant(existing);
 	}
 
-	async grant(actor: Actor, systemId: string, role: string, rawGrantee: string): Promise<Grant> {
+	async grant(actor: Actor, systemId: string, role: string, rawGrantee: string): Promise<GrantWithImplied> {
 		const grantee = parseGrantee(rawGrantee);
 		if (!grantee) throw badRequest(`Invalid grantee "${rawGrantee}": use an e-mail address or a domain`);
 		if (!canAssign(actor, systemId, role, grantee)) {
@@ -577,7 +646,7 @@ export class Rbac {
 						: 'Forbidden'
 			);
 		}
-		return this.putGrant(grantItem(systemId, role, grantee, actor.email, this.now()));
+		return this.withImplied(await this.putGrant(grantItem(systemId, role, grantee, actor.email, this.now())));
 	}
 
 	private async deleteGrant(systemId: string | null, role: string, grantee: string): Promise<void> {
@@ -598,18 +667,18 @@ export class Rbac {
 
 	// --- global grants (roots only) -----------------------------------------
 
-	async listGlobalGrants(actor: Actor): Promise<Grant[]> {
+	async listGlobalGrants(actor: Actor): Promise<GrantWithImplied[]> {
 		if (!actor.root) throw forbidden('Only roots can see global grants');
-		return (await queryPrefix(this.table, GLOBAL_PK, 'GRANT#')).map(toGrant);
+		return this.withImpliedRoles((await queryPrefix(this.table, GLOBAL_PK, 'GRANT#')).map(toGrant));
 	}
 
 	/** Grants `role` in every system that defines it, now or later. */
-	async grantGlobal(actor: Actor, rawRole: string, rawGrantee: string): Promise<Grant> {
+	async grantGlobal(actor: Actor, rawRole: string, rawGrantee: string): Promise<GrantWithImplied> {
 		if (!actor.root) throw forbidden('Only roots can grant global roles');
 		const role = validName('role', rawRole);
 		const grantee = parseGrantee(rawGrantee);
 		if (!grantee) throw badRequest(`Invalid grantee "${rawGrantee}": use an e-mail address or a domain`);
-		return this.putGrant(grantItem(null, role, grantee, actor.email, this.now()));
+		return this.withImplied(await this.putGrant(grantItem(null, role, grantee, actor.email, this.now())));
 	}
 
 	async revokeGlobal(actor: Actor, role: string, rawGrantee: string): Promise<void> {
@@ -725,7 +794,7 @@ export class Rbac {
 	 * discount needs payment, which isn't available yet: it fails with 402 and
 	 * the voucher's terms, recording nothing.
 	 */
-	async redeemVoucher(email: string, rawCode: string): Promise<Grant> {
+	async redeemVoucher(email: string, rawCode: string): Promise<GrantWithImplied> {
 		const code = normalizeVoucherCode(rawCode);
 		const now = this.now();
 		const reasonsByStatus: Record<Exclude<VoucherStatus, 'active'>, string> = {
@@ -773,7 +842,7 @@ export class Rbac {
 					? []
 					: [{ Put: { TableName: this.table.name, Item: grant, ConditionExpression: 'attribute_not_exists(PK)' } }])
 			]);
-			if (!reasons) return toGrant(existing ?? grant);
+			if (!reasons) return this.withImplied(toGrant(existing ?? grant));
 			if (reasons[0] === 'ConditionalCheckFailed') {
 				requireActive(await this.get(voucherKey(code)));
 				throw new RbacError(409, 'This voucher has no uses left');

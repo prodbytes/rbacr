@@ -187,27 +187,54 @@ describe('regular users', () => {
 });
 
 describe('role implications', () => {
-	let admin: Actor;
 	beforeEach(async () => {
+		// The example: premium implies free, free implies nothing, admin implies everything.
 		await rbac.createSystem(root, { id: 'presence', roles: ['free', 'premium'] });
 		await rbac.setImplications(root, 'presence', 'premium', ['free']);
-		await rbac.setImplications(root, 'presence', ADMIN_ROLE, ['premium']);
-		admin = await rbac.actor(ADMIN);
 	});
 
-	it('are listed with the system', async () => {
-		expect((await rbac.getSystem(root, 'presence')).implies).toEqual({ admin: ['premium'], premium: ['free'] });
+	it('are listed with the system, admin implying every other role', async () => {
+		expect((await rbac.getSystem(root, 'presence')).implies).toEqual({
+			admin: ['free', 'premium'],
+			premium: ['free']
+		});
 		expect((await rbac.getSystem(root, 'crm')).implies).toEqual({});
 	});
 
-	it('give the implied roles, transitively', async () => {
+	it('give the implied roles, transitively; free implies nothing', async () => {
 		await rbac.grant(root, 'presence', 'premium', USER);
-		await rbac.grant(root, 'presence', ADMIN_ROLE, 'boss@partner.com');
+		await rbac.grant(root, 'presence', 'free', 'other@partner.com');
 		expect(await rbac.rolesOf(USER)).toEqual({ presence: ['free', 'premium'] });
-		expect(await rbac.rolesOf('boss@partner.com')).toEqual({ presence: ['admin', 'free', 'premium'] });
+		expect(await rbac.rolesOf('other@partner.com')).toEqual({ presence: ['free'] });
 		expect(await rbac.hasRole(root, USER, 'presence', 'free')).toBe(true);
 		expect(await rbac.hasRole(root, USER, 'presence', ADMIN_ROLE)).toBe(false);
-		expect(await rbac.rolesIn(root, 'boss@partner.com', 'presence')).toEqual(['admin', 'free', 'premium']);
+		expect(await rbac.hasRole(root, 'other@partner.com', 'presence', 'premium')).toBe(false);
+	});
+
+	it('make admin imply every role of its system, including roles added later', async () => {
+		await rbac.grant(root, 'presence', ADMIN_ROLE, 'boss@partner.com');
+		expect(await rbac.rolesOf('boss@partner.com')).toEqual({ presence: ['admin', 'free', 'premium'] });
+		await rbac.addRole(root, 'presence', 'gold');
+		expect(await rbac.rolesIn(root, 'boss@partner.com', 'presence')).toEqual(['admin', 'free', 'gold', 'premium']);
+		// ...but only in that system.
+		expect((await rbac.rolesOf('boss@partner.com')).billing).toBeUndefined();
+		await expectError(rbac.setImplications(root, 'presence', ADMIN_ROLE, ['free']), 400, /already implies/);
+	});
+
+	it('come with grants returned by the API', async () => {
+		const premium = await rbac.grant(root, 'presence', 'premium', USER);
+		expect(premium.impliedRoles).toEqual(['free']);
+		expect((await rbac.grant(root, 'presence', 'free', USER)).impliedRoles).toEqual([]);
+		expect((await rbac.grant(root, 'presence', ADMIN_ROLE, ADMIN)).impliedRoles).toEqual(['free', 'premium']);
+		const listed = await rbac.listGrants(root, 'presence');
+		expect(listed.find((g) => g.role === 'premium')?.impliedRoles).toEqual(['free']);
+		const v = await rbac.createVoucher(root, { systemId: 'presence', role: 'premium' });
+		expect((await rbac.redeemVoucher('new@partner.com', v.code)).impliedRoles).toEqual(['free']);
+		await rbac.addRole(root, 'billing', 'premium');
+		const global = await rbac.grantGlobal(root, 'premium', 'g@partner.com');
+		expect(global.impliedRoles).toEqual([]);
+		expect(global.impliedRolesBySystem).toEqual({ billing: [], presence: ['free'] });
+		expect((await rbac.listGlobalGrants(root))[0].impliedRolesBySystem).toEqual({ billing: [], presence: ['free'] });
 	});
 
 	it('apply to global grants in each system that defines the role', async () => {
@@ -235,7 +262,7 @@ describe('role implications', () => {
 	});
 
 	it('are changed only by roots', async () => {
-		await expectError(rbac.setImplications(admin, 'billing', 'editor', ['viewer']), 403);
+		await expectError(rbac.setImplications(await rbac.actor(ADMIN), 'billing', 'editor', ['viewer']), 403);
 	});
 
 	it('let admins hand out implied roles only through grantable roles', async () => {
