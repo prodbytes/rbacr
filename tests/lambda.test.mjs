@@ -3,6 +3,7 @@
 // against the production build.
 // Run `npm run build` first. Only exercises routes that need no DynamoDB.
 import assert from 'node:assert/strict';
+import { createHmac } from 'node:crypto';
 import { readdirSync } from 'node:fs';
 import { before, describe, it } from 'node:test';
 
@@ -14,6 +15,8 @@ process.env.RBACR_DEV_LOGIN = '1'; // must be ignored by production builds
 process.env.RBACR_PUBLIC_ORIGIN = 'https://rbacr.example.com';
 process.env.RBACR_ORIGIN_SECRET = 'test-origin-secret';
 process.env.RBACR_VERSION = '1.2.3-RC';
+process.env.RBACR_STRIPE_WEBHOOK_SECRET = 'whsec_test';
+process.env.RBACR_STRIPE_API_KEY = 'rk_test_unused';
 // The Lambda sees the function URL's Host; CloudFront sends the site's host in
 // x-rbacr-host (an origin custom header), which adapter-node reads.
 process.env.HOST_HEADER = 'x-rbacr-host';
@@ -24,7 +27,7 @@ before(async () => {
 	({ handler } = await import('../lambda.js'));
 });
 
-async function invoke(target, { method = 'GET', headers = {}, viaCloudFront = true } = {}) {
+async function invoke(target, { method = 'GET', headers = {}, body: requestBody, viaCloudFront = true } = {}) {
 	const [path, query = ''] = target.split('?');
 	const event = {
 		version: '2.0',
@@ -42,6 +45,7 @@ async function invoke(target, { method = 'GET', headers = {}, viaCloudFront = tr
 			requestId: 'test',
 			stage: '$default'
 		},
+		...(requestBody !== undefined && { body: requestBody }),
 		isBase64Encoded: false
 	};
 	const res = await handler(event, {});
@@ -162,6 +166,23 @@ describe('lambda handler', () => {
 		});
 		assert.equal(res.statusCode, 403);
 		assert.match(res.body, /Cross-site POST form submissions are forbidden/);
+	});
+
+	it('takes Stripe webhooks outside both APIs, checking their signature', async () => {
+		const body = JSON.stringify({ id: 'evt_1', type: 'invoice.paid', data: { object: {} } });
+		const t = Math.floor(Date.now() / 1000);
+		const v1 = createHmac('sha256', 'whsec_test').update(`${t}.${body}`).digest('hex');
+		const post = (signature) =>
+			invoke('/webhooks/stripe', {
+				method: 'POST',
+				headers: { 'content-type': 'application/json', 'stripe-signature': signature },
+				body
+			});
+		const forged = await post(`t=${t},v1=${'0'.repeat(64)}`);
+		assert.equal(forged.statusCode, 400);
+		const signed = await post(`t=${t},v1=${v1}`);
+		assert.equal(signed.statusCode, 200);
+		assert.deepEqual(JSON.parse(signed.body), { received: true, ignored: 'invoice.paid' });
 	});
 
 	it('serves static client assets', async () => {

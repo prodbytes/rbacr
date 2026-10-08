@@ -345,6 +345,40 @@ describe('global vouchers and grants', () => {
 	});
 });
 
+describe('subscription sync', () => {
+	const tick = () => (clock = new Date(clock.getTime() + 1000));
+
+	it('grants the role globally to a subscriber and revokes it when they stop paying (Q2, Q3)', async () => {
+		expect(await rbac.syncSubscriber(null, 'viewer', 'Sub@Partner.com', true)).toBe('granted');
+		expect(await rbac.globalRolesOf('sub@partner.com')).toEqual(['viewer']);
+		expect((await rbac.listGlobalGrants(root))[0]).toMatchObject({ grantee: 'sub@partner.com', grantedBy: 'stripe' });
+		tick();
+		expect(await rbac.syncSubscriber(null, 'viewer', 'sub@partner.com', true)).toBe('unchanged');
+		expect(await rbac.syncSubscriber(null, 'viewer', 'sub@partner.com', false)).toBe('revoked');
+		expect(await rbac.globalRolesOf('sub@partner.com')).toEqual([]);
+		expect(await rbac.syncSubscriber(null, 'viewer', 'sub@partner.com', false)).toBe('unchanged');
+	});
+
+	it('can grant in one system, whose catalog must have the role', async () => {
+		await rbac.syncSubscriber('billing', 'editor', USER, true);
+		expect(await rbac.rolesOf(USER)).toEqual({ billing: ['editor'] });
+		await expectError(rbac.syncSubscriber('crm', 'editor', USER, true), 404);
+	});
+
+	it("never revokes a grant it didn't make (Q3)", async () => {
+		await rbac.grantGlobal(root, 'viewer', USER);
+		tick();
+		expect(await rbac.syncSubscriber(null, 'viewer', USER, true)).toBe('unchanged');
+		expect(await rbac.syncSubscriber(null, 'viewer', USER, false)).toBe('unchanged');
+		expect(await rbac.globalRolesOf(USER)).toEqual(['viewer']);
+	});
+
+	it('refuses root and invalid addresses', async () => {
+		await expectError(rbac.syncSubscriber(null, 'root', USER, true), 400, /reserved/);
+		await expectError(rbac.syncSubscriber(null, 'viewer', 'not-an-address', true), 400);
+	});
+});
+
 describe('voucher discounts', () => {
 	it('default to 100% and must be a whole percentage', async () => {
 		const base = { systemId: 'billing', role: 'viewer' };

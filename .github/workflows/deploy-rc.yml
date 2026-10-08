@@ -89,7 +89,11 @@ jobs:
           # This tenant's settings: RBACR_RC_<NAME> becomes RBACR_<NAME>.
           RBACR_ROOT_LIST: ${{ vars.RBACR_RC_ROOT_LIST }}
           RBACR_GOOGLE_CLIENT_ID: ${{ vars.RBACR_RC_GOOGLE_CLIENT_ID }}
+          RBACR_STRIPE_ROLE: ${{ vars.RBACR_RC_STRIPE_ROLE }}
+          RBACR_STRIPE_SYSTEM: ${{ vars.RBACR_RC_STRIPE_SYSTEM }}
           HEALTH_EMAILS: ${{ vars.RBACR_RC_HEALTH_EMAILS }}
           # Secrets; when unset, the stack keeps its deployed values.
           RBACR_GOOGLE_CLIENT_SECRET: ${{ secrets.RBACR_RC_GOOGLE_CLIENT_SECRET }}
+          RBACR_STRIPE_WEBHOOK_SECRET: ${{ secrets.RBACR_RC_STRIPE_WEBHOOK_SECRET }}
+          RBACR_STRIPE_API_KEY: ${{ secrets.RBACR_RC_STRIPE_API_KEY }}
         run: bash scripts/deploy.sh

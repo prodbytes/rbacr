@@ -81,6 +81,9 @@ Devbox scripts: `devbox run dev | test | check | build | certs | release-rc | re
 | `RBACR_ORIGIN_SECRET` | no | When set, every request must carry it in `x-rbacr-origin-secret`. In AWS, CloudFront adds it, so the Lambda URL can't be called directly. |
 | `RBACR_VERSION` | no | The release version, reported by `/health` (default `dev`) |
 | `RBACR_DEV_LOGIN` | no | `1` enables `/login/dev` under `vite dev` |
+| `RBACR_STRIPE_WEBHOOK_SECRET` / `RBACR_STRIPE_API_KEY` | for the Substack sync | Stripe webhook signing secret (`whsec_…`) and restricted key (`rk_…`), see [Substack integration](#substack-integration) |
+| `RBACR_STRIPE_ROLE` | no | The role paying subscribers hold (default `premium`) |
+| `RBACR_STRIPE_SYSTEM` | no | The system of that role; unset means a global grant |
 
 ## Using rbacr from your application
 
@@ -199,6 +202,62 @@ anything that isn't a same-origin request from rbacr's pages (403). The only
 unauthenticated JSON endpoint is `GET /health` (SPEC HC1-HC3), which a
 Route 53 health check polls in AWS.
 
+## Substack integration
+
+Paying subscribers of the Substack newsletter (prodbytes.substack.com)
+automatically hold `premium` while they pay. Substack has no subscriber
+API or webhooks, but paid subscriptions are billed through your own Stripe
+account, so rbacr listens to Stripe instead (SPEC "Substack integration",
+Q1-Q5):
+
+1. Someone subscribes, renews, cancels or stops paying on Substack.
+2. Stripe sends a `customer.subscription.*` webhook to
+   `https://rbacr.nu01.com/webhooks/stripe`, signed with the endpoint's
+   secret.
+3. rbacr reads that customer from the Stripe API. While they have an
+   `active`, `trialing` or `past_due` subscription, their e-mail address
+   holds `premium` (a global grant, or in `RBACR_STRIPE_SYSTEM`);
+   otherwise rbacr removes the grant. The grant shows `grantedBy: stripe`,
+   and grants you made by hand or through a voucher are never removed.
+
+### Setting it up
+
+1. In the Stripe account connected to Substack (Substack → Settings →
+   Payments shows which), create a **restricted key** (Developers → API
+   keys) with *Read* on Customers and Subscriptions and nothing else.
+2. Add a **webhook endpoint** (Developers → Webhooks):
+   `https://rbacr.nu01.com/webhooks/stripe` (RC:
+   `https://rc.rbacr.nu01.com/webhooks/stripe`), with the events
+   `customer.subscription.created`, `.updated`, `.deleted`, `.paused` and
+   `.resumed`. Copy its signing secret.
+3. Store both as GitHub secrets, then deploy:
+
+   ```sh
+   gh secret set RBACR_GA_STRIPE_API_KEY          # rk_…
+   gh secret set RBACR_GA_STRIPE_WEBHOOK_SECRET   # whsec_…
+   ```
+
+   (`RBACR_RC_STRIPE_*` for RC; for manual deploys, the `RBACR_STRIPE_*`
+   lines in `.env.prod`.) The GitHub variables `RBACR_GA_STRIPE_ROLE` and
+   `RBACR_GA_STRIPE_SYSTEM` change the role (default `premium`) and limit
+   it to one system (default: every system that defines it).
+4. Make sure a system's catalog has the `premium` role, or the grant gives
+   nothing.
+5. Check it: in Stripe, send a test `customer.subscription.updated` event to
+   the endpoint. The response is `{ received, outcome }`, with `granted`,
+   `revoked` or `unchanged`. Without the secrets the endpoint answers 503;
+   with a wrong signing secret, 400.
+
+### Limitations
+
+- Subscribers must sign in to rbacr with the address they use on Substack.
+- Existing subscribers are picked up at their next subscription change
+  (each renewal counts), so annual subscribers can take up to a year.
+- Complimentary and gift subscriptions bypass Stripe: grant those by hand
+  or with a voucher.
+- Every subscription in the Stripe account counts, so anything else sold
+  through it also earns the role.
+
 ## Tests
 
 ```bash
@@ -245,6 +304,7 @@ src/env.ts                      RBACR_* variable definitions
 src/hooks.server.ts             /api token or session cookie -> locals.email, security headers
 src/lib/server/rbac.ts          all role and voucher rules (the domain model)
 src/lib/server/tokens.ts        personal API tokens (/api auth)
+src/lib/server/stripe.ts        Stripe webhook signature and subscriber lookup (Substack sync)
 src/lib/server/vpiguard.ts      the "frontend only" check for /vpi
 src/lib/vpi.ts                  the pages' /vpi client
 src/lib/server/identity.ts      e-mail/domain parsing, root allow list
@@ -252,6 +312,7 @@ src/lib/server/dynamo.ts        the DynamoDB table: definition, client, query he
 src/lib/server/{session,google,auth}.ts  sign-in and sessions
 src/routes/api/**               external API (tokens)
 src/routes/vpi/**               VPI (session, frontend only)
+src/routes/webhooks/stripe/     Stripe webhook (signature, not token or session)
 src/routes/{me,systems,global}/**  UI pages (load and change data through /vpi)
 lambda.js                       Lambda entrypoint (serverless-http + adapter-node)
 infra/                          CloudFormation: zone, deploy roles, artifacts, app

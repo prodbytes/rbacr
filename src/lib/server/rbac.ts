@@ -9,6 +9,9 @@ import { Allowlist, granteesFor, normalizeEmail, parseGrantee } from './identity
  */
 export const ROOT_ROLE = 'root';
 
+/** The `grantedBy` of grants made by the paid-subscription sync (Q2). */
+export const SUBSCRIPTION_GRANTOR = 'stripe';
+
 const NAME_RE = /^[a-z0-9][a-z0-9_.:-]{0,62}$/;
 
 /** Terms of a voucher that needs payment (a discount under 100%). */
@@ -647,6 +650,46 @@ export class Rbac {
 		const grantee = parseGrantee(rawGrantee);
 		if (!grantee) throw badRequest(`Invalid grantee "${rawGrantee}"`);
 		await this.deleteGrant(null, role, grantee);
+	}
+
+	// --- subscription sync (Q1-Q4) -------------------------------------------
+
+	/**
+	 * Makes a paying subscriber hold `role` (globally when systemId is null),
+	 * and takes it away when they stop paying. Called by the Stripe webhook,
+	 * not by a person, so it takes no actor. Only grants this sync made
+	 * (grantedBy SUBSCRIPTION_GRANTOR) are revoked; a grant a root made by
+	 * hand, or through a voucher, stays.
+	 */
+	async syncSubscriber(
+		systemId: string | null,
+		rawRole: string,
+		rawEmail: string,
+		subscribed: boolean
+	): Promise<'granted' | 'revoked' | 'unchanged'> {
+		const role = validName('role', rawRole);
+		const email = normalizeEmail(rawEmail);
+		if (!email) throw badRequest(`Invalid subscriber address "${rawEmail}"`);
+		if (subscribed) {
+			const item = grantItem(systemId, role, email, SUBSCRIPTION_GRANTOR, this.now());
+			const grant = await this.putGrant(item);
+			// putGrant keeps an existing grant, which then has its own grantedAt
+			return grant.grantedAt.toISOString() === item.grantedAt ? 'granted' : 'unchanged';
+		}
+		try {
+			await this.table.doc.send(
+				new DeleteCommand({
+					TableName: this.table.name,
+					Key: grantKey(systemId, role, email),
+					ConditionExpression: 'grantedBy = :by',
+					ExpressionAttributeValues: { ':by': SUBSCRIPTION_GRANTOR }
+				})
+			);
+			return 'revoked';
+		} catch (err) {
+			if ((err as Error).name === 'ConditionalCheckFailedException') return 'unchanged';
+			throw err;
+		}
 	}
 
 	// --- vouchers -------------------------------------------------------------
