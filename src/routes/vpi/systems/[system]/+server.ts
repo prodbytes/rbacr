@@ -1,5 +1,5 @@
 import { grantJson, vpi, voucherJson } from '#lib/server/http.js';
-import { ADMIN_ROLE, voucherStatus } from '#lib/server/rbac.js';
+import { voucherStatus } from '#lib/server/rbac.js';
 import type { RequestHandler } from './$types';
 
 /** Everything the system page shows. */
@@ -12,9 +12,7 @@ export const GET: RequestHandler = (event) =>
 			system,
 			grants: (await rbac.listGrants(actor, id)).map(grantJson),
 			vouchers: (await rbac.listVouchers(actor, id)).map((v) => voucherJson(v, voucherStatus(v, now))),
-			root: actor.root,
-			// roles this actor may hand out (admins never see "admin")
-			assignable: system.roles.filter((r) => actor.root || r !== ADMIN_ROLE)
+			root: actor.root
 		};
 	});
 

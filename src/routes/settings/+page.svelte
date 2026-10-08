@@ -24,3 +24,21 @@
 		<tr><th>API tokens</th><td><a href="/me#tokens">Manage on My roles</a></td></tr>
 	</tbody>
 </table>
+
+<h2>Roots</h2>
+<p class="muted">
+	<code>root</code> is the only built-in role: it implies every role of every system. It comes only from the
+	<code>RBACR_ROOT_LIST</code> setting, never from grants.
+</p>
+{#if data.rootList}
+	<table>
+		<thead><tr><th>Root allow list</th></tr></thead>
+		<tbody>
+			{#each data.rootList as entry (entry)}
+				<tr><td><code>{entry}</code>{entry.startsWith('@') ? ' (everyone at this domain)' : ''}</td></tr>
+			{:else}
+				<tr><td class="muted">Empty: nobody is a root.</td></tr>
+			{/each}
+		</tbody>
+	</table>
+{/if}

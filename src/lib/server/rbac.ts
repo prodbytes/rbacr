@@ -1,11 +1,12 @@
 import { DeleteCommand, GetCommand, PutCommand, TransactWriteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { cancellationReasons, deleteAll, queryAll, queryIndex, queryPrefix, type Item, type Table } from './dynamo';
-import { Allowlist, granteesFor, isDomainGrantee, normalizeEmail, parseGrantee } from './identity';
+import { Allowlist, granteesFor, normalizeEmail, parseGrantee } from './identity';
 
-/** The per-system role that lets an identity manage that system's grants and vouchers. */
-export const ADMIN_ROLE = 'admin';
-
-/** The single global (system-independent) role held by every identity on RBACR_ROOT_LIST. */
+/**
+ * The only built-in role (R1, R2): held by every identity on RBACR_ROOT_LIST,
+ * it implies every role of every system and is what lets an identity manage
+ * rbacr. Every other role, and every implication, is registered data.
+ */
 export const ROOT_ROLE = 'root';
 
 const NAME_RE = /^[a-z0-9][a-z0-9_.:-]{0,62}$/;
@@ -35,9 +36,8 @@ const notFound = (message: string) => new RbacError(404, message);
 
 export interface Actor {
 	email: string;
+	/** On the root allow list: holds `root`, so every role, and manages everything. */
 	root: boolean;
-	/** System ids where the actor holds the admin role (empty for roots, who manage everything). */
-	adminOf: string[];
 }
 
 /** Effective roles keyed by system id, each list sorted. */
@@ -48,9 +48,8 @@ export interface System {
 	name: string;
 	roles: string[];
 	/**
-	 * Direct implications: holding the key role also gives these roles
-	 * (transitively). `admin` always implies every other role of the system
-	 * (R6); roles implying nothing are left out.
+	 * Direct implications, as registered: holding the key role also gives
+	 * these roles (transitively). Roles implying nothing are left out.
 	 */
 	implies: Record<string, string[]>;
 }
@@ -126,23 +125,9 @@ export function validName(kind: string, raw: string): string {
 	return name;
 }
 
-/** Whether the actor may manage (view grants, create vouchers for) a system. */
-export function canManageSystem(actor: Actor, systemId: string): boolean {
-	return actor.root || actor.adminOf.includes(systemId);
-}
-
-/**
- * Whether the actor may hand out `role` on `systemId` (null: globally) to
- * `grantee`, directly or through a voucher (pass grantee = null for
- * vouchers). Only roots may assign globally, assign the admin role or grant
- * to whole domains.
- */
-export function canAssign(actor: Actor, systemId: string | null, role: string, grantee: string | null): boolean {
-	if (actor.root) return true;
-	if (systemId === null || !actor.adminOf.includes(systemId)) return false;
-	if (role === ADMIN_ROLE) return false;
-	if (grantee !== null && isDomainGrantee(grantee)) return false;
-	return true;
+/** Management (systems, catalogs, grants, vouchers) is for roots only (P1). */
+function requireRoot(actor: Actor, message = 'Only roots can do this'): void {
+	if (!actor.root) throw forbidden(message);
 }
 
 const VOUCHER_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // 32 symbols, no 0/O/1/I
@@ -185,10 +170,19 @@ const voucherKey = (code: string) => ({ PK: `VOUCHER#${code}`, SK: 'META' });
 const iso = (d: Date | null | undefined) => (d ? d.toISOString() : undefined);
 const date = (v: unknown) => (v ? new Date(v as string) : null);
 
-/** Most implied roles one role may list (a transaction holds at most 100 items). */
-const MAX_IMPLIES = 30;
-/** Most roles a new system may define at once (same limit). */
-const MAX_INITIAL_ROLES = 90;
+/** A DynamoDB transaction holds at most 100 items. */
+const MAX_TRANSACTION_ITEMS = 100;
+/** Most roles a new system may define at once (the system and its roles are one transaction). */
+const MAX_INITIAL_ROLES = MAX_TRANSACTION_ITEMS - 1;
+
+/** The registered implication item for `role` implying `implied`. */
+const implicationItem = (systemId: string, role: string, implied: string): Item => ({
+	PK: sysPK(systemId),
+	SK: `IMPL#${role}#${implied}`,
+	systemId,
+	role,
+	implies: implied
+});
 
 const grantItem = (systemId: string | null, role: string, grantee: string, grantedBy: string, now: Date, voucherCode?: string): Item => ({
 	...grantKey(systemId, role, grantee),
@@ -224,16 +218,6 @@ const toVoucher = (it: Item): Voucher => ({
 	createdAt: new Date(it.createdAt as string),
 	disabledAt: date(it.disabledAt)
 });
-
-/**
- * A system's implication graph: the stored implications, plus `admin`
- * implying every other role of the catalog (R6), now and as roles are added.
- */
-function implicationGraph(roles: string[], stored: Record<string, string[]>): Map<string, string[]> {
-	const edges = new Map(Object.entries(stored));
-	edges.set(ADMIN_ROLE, roles.filter((r) => r !== ADMIN_ROLE));
-	return edges;
-}
 
 /** Every role reachable from `held` through `edges` (role -> implied roles), `held` included. */
 function closure(held: Iterable<string>, edges: Map<string, string[]>): Set<string> {
@@ -281,12 +265,15 @@ export class Rbac {
 		return this.roots.includes(email);
 	}
 
+	/** The configured root allow list (RBACR_ROOT_LIST), sorted; roots only. */
+	rootList(actor: Actor): string[] {
+		requireRoot(actor, 'Only roots can see the root allow list');
+		return [...this.roots.entries].sort();
+	}
+
 	async actor(email: string): Promise<Actor> {
 		const root = this.isRoot(email);
-		if (root) return { email, root, adminOf: [] };
-		const roles = await this.grantedRoles(email);
-		const adminOf = Object.keys(roles).filter((s) => roles[s].includes(ADMIN_ROLE));
-		return { email, root, adminOf };
+		return { email, root };
 	}
 
 	/**
@@ -339,7 +326,7 @@ export class Rbac {
 		for (const systemId of [...held.keys()].sort()) {
 			const system = await this.loadSystem(systemId);
 			if (!system) continue;
-			map[systemId] = [...closure(held.get(systemId)!, implicationGraph(system.roles, system.stored))].sort();
+			map[systemId] = [...closure(held.get(systemId)!, new Map(Object.entries(system.implies)))].sort();
 		}
 		return map;
 	}
@@ -357,7 +344,7 @@ export class Rbac {
 		const implied = async (systemId: string, role: string): Promise<string[]> => {
 			const s = await system(systemId);
 			if (!s || !s.roles.includes(role)) return [];
-			return [...closure([role], implicationGraph(s.roles, s.stored))].filter((r) => r !== role).sort();
+			return [...closure([role], new Map(Object.entries(s.implies)))].filter((r) => r !== role).sort();
 		};
 		return Promise.all(
 			grants.map(async (g): Promise<GrantWithImplied> => {
@@ -382,43 +369,32 @@ export class Rbac {
 		});
 	}
 
-	/**
-	 * A system with its catalog. `stored` holds the implications roots set;
-	 * `implies` adds admin's built-in ones (R6) for display and the API.
-	 */
-	private async loadSystem(
-		systemId: string
-	): Promise<(System & { stored: Record<string, string[]>; implVersion: number }) | null> {
+	/** A system with its catalog: its registered roles and implications. */
+	private async loadSystem(systemId: string): Promise<(System & { implVersion: number }) | null> {
 		const items = await this.catalogItems(systemId);
 		const meta = items.find((it) => it.SK === 'META');
 		if (!meta) return null;
-		const stored: Record<string, string[]> = {};
+		const implies: Record<string, string[]> = {};
 		for (const it of items.filter((it) => (it.SK as string).startsWith('IMPL#'))) {
-			(stored[it.role as string] ??= []).push(it.implies as string);
+			(implies[it.role as string] ??= []).push(it.implies as string);
 		}
 		const roles = items.filter((it) => (it.SK as string).startsWith('ROLE#')).map((it) => it.name as string);
-		const implies: Record<string, string[]> = {};
-		for (const [role, implied] of implicationGraph(roles, stored)) {
-			if (implied.length) implies[role] = [...implied].sort();
-		}
-		return { id: systemId, name: meta.name as string, roles, implies, stored, implVersion: (meta.implVersion as number) ?? 0 };
+		return { id: systemId, name: meta.name as string, roles, implies, implVersion: (meta.implVersion as number) ?? 0 };
 	}
 
 	private async allSystems(ids?: string[]): Promise<System[]> {
 		const wanted = ids ?? (await queryIndex(this.table, 'SYSTEMS')).map((it) => it.id as string);
 		const systems = await Promise.all([...new Set(wanted)].sort().map((id) => this.loadSystem(id)));
-		return systems.filter((s) => s !== null).map(({ implVersion: _v, stored: _s, ...s }) => s);
+		return systems.filter((s) => s !== null).map(({ implVersion: _, ...s }) => s);
 	}
 
-	/** Systems the actor can manage: all for roots, administered ones for admins. */
+	/** Systems the actor can manage: all for roots, none for anyone else. */
 	async listSystems(actor: Actor): Promise<System[]> {
-		if (actor.root) return this.allSystems();
-		if (!actor.adminOf.length) return [];
-		return this.allSystems(actor.adminOf);
+		return actor.root ? this.allSystems() : [];
 	}
 
 	async getSystem(actor: Actor, systemId: string): Promise<System> {
-		if (!canManageSystem(actor, systemId)) throw forbidden();
+		requireRoot(actor, 'Only roots can see systems');
 		const [system] = await this.allSystems([systemId]);
 		if (!system) throw notFound(`System "${systemId}" not found`);
 		return system;
@@ -428,7 +404,8 @@ export class Rbac {
 		if (!actor.root) throw forbidden('Only roots can create systems');
 		const id = validName('system id', input.id);
 		const name = input.name?.trim() || id;
-		const roles = new Set([ADMIN_ROLE, ...(input.roles ?? []).map((r) => validName('role', r))]);
+		// Only the registered roles: a system has no built-in ones.
+		const roles = new Set((input.roles ?? []).map((r) => validName('role', r)));
 		if (roles.size > MAX_INITIAL_ROLES) throw badRequest(`Create at most ${MAX_INITIAL_ROLES} roles at once`);
 		const now = this.now().toISOString();
 		const reasons = await this.transact([
@@ -447,9 +424,7 @@ export class Rbac {
 			}))
 		]);
 		if (reasons) throw new RbacError(409, `System "${id}" already exists`);
-		const sorted = [...roles].sort();
-		const others = sorted.filter((r) => r !== ADMIN_ROLE);
-		return { id, name, roles: sorted, implies: others.length ? { [ADMIN_ROLE]: others } : {} };
+		return { id, name, roles: [...roles].sort(), implies: {} };
 	}
 
 	async deleteSystem(actor: Actor, systemId: string): Promise<void> {
@@ -512,7 +487,6 @@ export class Rbac {
 	/** Removes a role from the catalog, along with its grants, implications and vouchers. */
 	async removeRole(actor: Actor, systemId: string, role: string): Promise<void> {
 		if (!actor.root) throw forbidden('Only roots can remove roles');
-		if (role === ADMIN_ROLE) throw badRequest('The admin role cannot be removed');
 		const { Attributes } = await this.table.doc.send(
 			new DeleteCommand({ TableName: this.table.name, Key: roleKey(systemId, role), ReturnValues: 'ALL_OLD' })
 		);
@@ -537,27 +511,29 @@ export class Rbac {
 		if (!actor.root) throw forbidden('Only roots can change role implications');
 		const role = rawRole.trim().toLowerCase();
 		const implies = [...new Set(rawImplies.map((r) => r.trim().toLowerCase()))].sort();
-		if (implies.length > MAX_IMPLIES) throw badRequest(`A role can imply at most ${MAX_IMPLIES} roles directly`);
 		const system = await this.loadSystem(systemId);
 		if (!system) throw notFound(`System "${systemId}" not found`);
 		const requireRole = (r: string) => {
 			if (!system.roles.includes(r)) throw notFound(`Role "${r}" not found in "${systemId}"`);
 		};
 		requireRole(role);
-		if (role === ADMIN_ROLE) throw badRequest(`The ${ADMIN_ROLE} role already implies every role of its system`);
 		for (const r of implies) {
 			if (r === role) throw badRequest(`A role cannot imply itself`);
-			if (r === ADMIN_ROLE) throw badRequest(`No role can imply the ${ADMIN_ROLE} role`);
 			requireRole(r);
 		}
 		// A cycle through `role` exists if `role` is reachable from what it implies.
-		// Only stored implications matter here: admin's are built in, and
-		// nothing may imply admin, so it can't close a cycle.
-		const edges = new Map(Object.entries(system.stored));
+		const edges = new Map(Object.entries(system.implies));
 		edges.set(role, implies);
 		const reachable = closure(implies.flatMap((r) => edges.get(r) ?? []).concat(implies), edges);
 		if (reachable.has(role)) throw badRequest(`"${role}" would end up implying itself`);
-		const previous = system.stored[role] ?? [];
+		const previous = system.implies[role] ?? [];
+		// One transaction: the version, a check per role involved, and the changes.
+		const size =
+			1 +
+			new Set([role, ...implies]).size +
+			previous.filter((r) => !implies.includes(r)).length +
+			implies.filter((r) => !previous.includes(r)).length;
+		if (size > MAX_TRANSACTION_ITEMS) throw badRequest('Too many changes at once; change fewer implications per request');
 		// The META version guards against concurrent edits combining into a
 		// cycle; the role checks against concurrent removal.
 		const reasons = await this.transact([
@@ -583,12 +559,7 @@ export class Rbac {
 				.map((r) => ({ Delete: { TableName: this.table.name, Key: { PK: sysPK(systemId), SK: `IMPL#${role}#${r}` } } })),
 			...implies
 				.filter((r) => !previous.includes(r))
-				.map((r) => ({
-					Put: {
-						TableName: this.table.name,
-						Item: { PK: sysPK(systemId), SK: `IMPL#${role}#${r}`, systemId, role, implies: r }
-					}
-				}))
+				.map((r) => ({ Put: { TableName: this.table.name, Item: implicationItem(systemId, role, r) } }))
 		]);
 		if (reasons) throw new RbacError(409, 'The role catalog changed meanwhile; try again');
 		return this.getSystem(actor, systemId);
@@ -637,15 +608,7 @@ export class Rbac {
 	async grant(actor: Actor, systemId: string, role: string, rawGrantee: string): Promise<GrantWithImplied> {
 		const grantee = parseGrantee(rawGrantee);
 		if (!grantee) throw badRequest(`Invalid grantee "${rawGrantee}": use an e-mail address or a domain`);
-		if (!canAssign(actor, systemId, role, grantee)) {
-			throw forbidden(
-				role === ADMIN_ROLE
-					? 'Only roots can grant the admin role'
-					: isDomainGrantee(grantee)
-						? 'Only roots can grant roles to whole domains'
-						: 'Forbidden'
-			);
-		}
+		requireRoot(actor, 'Only roots can grant roles');
 		return this.withImplied(await this.putGrant(grantItem(systemId, role, grantee, actor.email, this.now())));
 	}
 
@@ -659,9 +622,7 @@ export class Rbac {
 	async revoke(actor: Actor, systemId: string, role: string, rawGrantee: string): Promise<void> {
 		const grantee = parseGrantee(rawGrantee);
 		if (!grantee) throw badRequest(`Invalid grantee "${rawGrantee}"`);
-		if (!canAssign(actor, systemId, role, grantee)) {
-			throw forbidden(role === ADMIN_ROLE ? 'Only roots can revoke the admin role' : 'Forbidden');
-		}
+		requireRoot(actor, 'Only roots can revoke roles');
 		await this.deleteGrant(systemId, role, grantee);
 	}
 
@@ -693,15 +654,7 @@ export class Rbac {
 	async createVoucher(actor: Actor, input: VoucherInput): Promise<Voucher> {
 		const { systemId } = input;
 		const role = systemId === null ? validName('role', input.role) : input.role;
-		if (!canAssign(actor, systemId, role, null)) {
-			throw forbidden(
-				systemId === null
-					? 'Only roots can create global vouchers'
-					: role === ADMIN_ROLE
-						? 'Only roots can create admin vouchers'
-						: 'Forbidden'
-			);
-		}
+		requireRoot(actor, 'Only roots can create vouchers');
 		const startsAt = input.startsAt ?? null;
 		const endsAt = input.endsAt ?? null;
 		const maxUses = input.maxUses ?? null;
@@ -760,17 +713,17 @@ export class Rbac {
 		return (await queryIndex(this.table, `VOUCHERS#${GLOBAL_VOUCHERS}`, { newestFirst: true })).map(toVoucher);
 	}
 
-	/** Vouchers of a system, newest first; admins only see the ones they may hand out (non-admin). */
+	/** Vouchers of a system, newest first (roots only). */
 	async listVouchers(actor: Actor, systemId: string): Promise<Voucher[]> {
 		await this.getSystem(actor, systemId);
-		const items = await queryIndex(this.table, `VOUCHERS#${systemId}`, { newestFirst: true });
-		return items.filter((it) => actor.root || it.role !== ADMIN_ROLE).map(toVoucher);
+		return (await queryIndex(this.table, `VOUCHERS#${systemId}`, { newestFirst: true })).map(toVoucher);
 	}
 
 	async disableVoucher(actor: Actor, rawCode: string): Promise<Voucher> {
+		requireRoot(actor, 'Only roots can disable vouchers');
 		const code = normalizeVoucherCode(rawCode);
 		const existing = code ? await this.get(voucherKey(code)) : undefined;
-		if (!existing || !canAssign(actor, (existing.systemId as string | undefined) ?? null, existing.role as string, null)) {
+		if (!existing) {
 			throw notFound('Voucher not found');
 		}
 		const { Attributes } = await this.table.doc.send(
@@ -861,19 +814,10 @@ export class Rbac {
 		return email;
 	}
 
-	/**
-	 * Who may ask about whose roles: anyone about themselves, roots about
-	 * anyone, admins about anyone within the systems they administer (never
-	 * about global roles, which span every system).
-	 */
-	private requireCanQuery(actor: Actor, email: string, systemId: string | null): void {
+	/** Who may ask about whose roles (T6): anyone about themselves, roots about anyone. */
+	private requireCanQuery(actor: Actor, email: string): void {
 		if (actor.root || actor.email === email) return;
-		if (systemId !== null && actor.adminOf.includes(systemId)) return;
-		throw forbidden(
-			systemId === null
-				? "Only roots can ask about other people's global roles"
-				: `You can only ask about other people's roles in systems you administer`
-		);
+		throw forbidden("Only roots can ask about other people's roles");
 	}
 
 	/**
@@ -883,7 +827,7 @@ export class Rbac {
 	 */
 	async hasRole(actor: Actor, rawEmail: string, systemId: string | null, rawRole: string): Promise<boolean> {
 		const email = this.queriedEmail(rawEmail);
-		this.requireCanQuery(actor, email, systemId);
+		this.requireCanQuery(actor, email);
 		const role = rawRole.trim().toLowerCase();
 		if (systemId === null) return (await this.globalRolesOf(email)).includes(role);
 		await this.requireSystem(systemId);
@@ -895,7 +839,7 @@ export class Rbac {
 	/** An identity's roles in one system (sorted). */
 	async rolesIn(actor: Actor, rawEmail: string, systemId: string): Promise<string[]> {
 		const email = this.queriedEmail(rawEmail);
-		this.requireCanQuery(actor, email, systemId);
+		this.requireCanQuery(actor, email);
 		await this.requireSystem(systemId);
 		return (await this.rolesOf(email))[systemId] ?? [];
 	}
@@ -903,7 +847,7 @@ export class Rbac {
 	/** An identity's roles in every system and its global roles. */
 	async allRoles(actor: Actor, rawEmail: string): Promise<{ globalRoles: string[]; roles: RoleMap }> {
 		const email = this.queriedEmail(rawEmail);
-		this.requireCanQuery(actor, email, null);
+		this.requireCanQuery(actor, email);
 		return { globalRoles: await this.globalRolesOf(email), roles: await this.rolesOf(email) };
 	}
 
