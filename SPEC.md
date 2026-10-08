@@ -16,6 +16,7 @@ and the README in sync with the code.
 | Role | A name a root registers in a system's catalog, with the same slug rules (any name but `root`). A role may **imply** other roles of the same system (R6). Both are data; `root` is the only built-in role (R2). |
 | Grant | Gives (system, role) to a grantee. A **global grant** gives a role in every system whose catalog has a role of that name, now or later. |
 | Voucher | A code that grants a role to whoever redeems it: in one system, or globally (a global grant). |
+| Subscriber | A paying subscriber of the newsletter (Substack) whose payments run on the publisher's Stripe account. |
 | API token | A person's secret token for the external API (`/api`). It acts as that person, with their current roles. |
 
 ## Identity and sign-in
@@ -132,6 +133,46 @@ and the README in sync with the code.
 - **V5** Each identity can redeem a given voucher only once (409). Redeeming
   an inactive voucher fails with 409 and the reason. An unknown code gives 404.
 - **V6** Disabling is permanent. Disabled vouchers stay listed for auditing.
+
+## Substack integration
+
+Paying subscribers of the publisher's Substack newsletter
+(prodbytes.substack.com) hold a role in rbacr while they pay: `premium` by
+default. Substack has no API or webhooks for subscribers (its developer API
+only looks up public profiles), but its paid subscriptions are billed
+through the publisher's own Stripe account, connected to Substack with
+Stripe Connect. That account sends webhooks, so rbacr syncs from Stripe:
+
+    Substack checkout -> publisher's Stripe account -> customer.subscription.* webhook
+      -> POST /webhooks/stripe -> Stripe API (customer + subscriptions) -> grant or revoke
+
+- **Q1** `POST /webhooks/stripe` receives that Stripe account's webhook
+  events. It is outside both APIs and authenticated only by the
+  `Stripe-Signature` header: an HMAC-SHA256 with the endpoint's signing
+  secret (`RBACR_STRIPE_WEBHOOK_SECRET`), at most 300 seconds old. A bad or
+  missing signature gives 400; without `RBACR_STRIPE_WEBHOOK_SECRET` and
+  `RBACR_STRIPE_API_KEY` the sync is off and the endpoint answers 503.
+- **Q2** On every `customer.subscription.*` event, rbacr reads the customer
+  and their current subscriptions from the Stripe API, so the result never
+  depends on the order or repetition of events. A customer is **subscribed**
+  while one of their subscriptions is `active`, `trialing` or `past_due`
+  (Stripe's retry window). A subscribed customer's e-mail address gets the
+  role `RBACR_STRIPE_ROLE` (default `premium`): a global grant, or a grant
+  in `RBACR_STRIPE_SYSTEM` when set (whose catalog must have the role).
+  The grant's `grantedBy` is `stripe`. An existing grant of that role to
+  that address is kept as it is, whoever made it.
+- **Q3** When the customer is no longer subscribed (canceled, unpaid,
+  incomplete, paused, or deleted), rbacr removes that grant, but only if
+  its `grantedBy` is `stripe`: grants a root made, or that came from a
+  voucher, stay.
+- **Q4** Other events, and customers without an e-mail address, are
+  acknowledged (200) and change nothing. If Stripe or the database fails,
+  the endpoint answers 500 and Stripe retries the event. Only the Stripe
+  customer id is logged, never the address.
+- **Q5** The subscriber must sign in with the same address they use on
+  Substack: rbacr matches identities by e-mail only. Complimentary and gift
+  subscriptions that Substack grants without a Stripe subscription are not
+  seen; grant those by hand or with a voucher.
 
 ## Two APIs
 
@@ -258,7 +299,8 @@ addresses stay out of URLs and access logs.
 ### Outside both APIs
 
 - **HC1** `GET /health` reports whether rbacr can serve, with no
-  authentication. It is the only JSON endpoint outside `/api` and `/vpi`. It
+  authentication. It and the Stripe webhook of the Substack integration (Q1) are the only JSON
+  endpoints outside `/api` and `/vpi`. It
   answers `{ ok, version, checks: { google } }`, with
   `Cache-Control: no-store`. `google` is `ok` when the Google OAuth client is
   configured, else `missing`.
@@ -322,6 +364,9 @@ All settings come from environment variables prefixed `RBACR_`:
 | `RBACR_ORIGIN_SECRET` | no | Required value of the `x-rbacr-origin-secret` header (H1) |
 | `RBACR_VERSION` | no | Version reported by `/health` (default `dev`) |
 | `RBACR_DEV_LOGIN` | no | `1` enables `/login/dev` under `vite dev` only (S4) |
+| `RBACR_STRIPE_WEBHOOK_SECRET`, `RBACR_STRIPE_API_KEY` | for the subscription sync | The webhook endpoint's signing secret and a restricted key that reads Customers and Subscriptions (Q1, Q2) |
+| `RBACR_STRIPE_ROLE` | no | The role subscribers hold (default `premium`) |
+| `RBACR_STRIPE_SYSTEM` | no | The system of that role; unset means a global grant |
 
 ## Runtime and storage
 
@@ -351,8 +396,8 @@ All settings come from environment variables prefixed `RBACR_`:
 
 | Suite | Command | Covers |
 |-------|---------|--------|
-| Unit and domain | `npx vitest --run` | Identity parsing, the R*, P*, V*, T* and D* rules against DynamoDB Local (a Docker container started by the test setup, or `RBACR_TEST_DYNAMODB_ENDPOINT`), the A3 guard, sessions, Google OAuth exchange |
-| Lambda smoke | `npm run test:lambda` | The production build invoked through `lambda.js` with function URL (v2) events: H1, H2, A1 and A3, the version, redirects, 401s, static assets. `scripts/package-lambda.sh` reruns it against the deployable bundle. |
+| Unit and domain | `npx vitest --run` | Identity parsing, the R*, P*, V*, Q*, T* and D* rules against DynamoDB Local (a Docker container started by the test setup, or `RBACR_TEST_DYNAMODB_ENDPOINT`), the A3 guard, sessions, Google OAuth exchange |
+| Lambda smoke | `npm run test:lambda` | The production build invoked through `lambda.js` with function URL (v2) events: H1, H2, A1, A3 and the Stripe webhook's signature check (Q1), the version, redirects, 401s, static assets. `scripts/package-lambda.sh` reruns it against the deployable bundle. |
 | End-to-end | `npm run test:e2e` | `/api` with personal tokens, `/vpi` as the frontend, the A1/A3 separation, and the pages, against a running dev server with DynamoDB Local, directly or through Floci over HTTPS |
 | Live | `scripts/deploy.sh` (last step) | The deployed site: version, sign-in page, 401 (also for an unknown token, which reads DynamoDB), 404 for `/login/dev`, 403 for the bare function URL |
 

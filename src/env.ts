@@ -41,6 +41,23 @@ export const variables = defineEnvVars({
 			'When set, every request must carry it in the x-rbacr-origin-secret header (added by CloudFront), so the Lambda URL cannot be called directly.',
 		schema: optional
 	},
+	RBACR_STRIPE_WEBHOOK_SECRET: {
+		description:
+			"Signing secret (whsec_…) of the Stripe webhook endpoint <origin>/webhooks/stripe. With RBACR_STRIPE_API_KEY, turns on the paid-subscription sync.",
+		schema: optional
+	},
+	RBACR_STRIPE_API_KEY: {
+		description: 'Restricted Stripe key (rk_…) with read access to Customers and Subscriptions, for the subscription sync',
+		schema: optional
+	},
+	RBACR_STRIPE_ROLE: {
+		description: 'The role paying subscribers hold (default premium)',
+		schema: (value) => value || 'premium'
+	},
+	RBACR_STRIPE_SYSTEM: {
+		description: 'The system whose role paying subscribers hold; unset means a global grant (every system that defines the role)',
+		schema: optional
+	},
 	RBACR_VERSION: { description: 'The deployed version, reported by /health', schema: (value) => value || 'dev' },
 	RBACR_DEV_LOGIN: {
 		description: 'Set to 1 to enable password-less /login/dev. Only honoured by `vite dev`.',
