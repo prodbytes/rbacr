@@ -19,7 +19,8 @@ export interface Grant {
 export interface Voucher {
 	code: string;
 	systemId: string | null;
-	role: string;
+	/** The roles redeeming it grants (SPEC V1). */
+	roles: string[];
 	discountPercent: number;
 	startsAt: string | null;
 	endsAt: string | null;
@@ -35,7 +36,17 @@ export interface Voucher {
 
 export const load: PageLoad = ({ fetch, params }) =>
 	vpiLoad<{
-		system: { id: string; name: string; roles: string[]; implies: Record<string, string[]>; subscriberRole: string | null };
+		system: {
+			id: string;
+			name: string;
+			roles: string[];
+			implies: Record<string, string[]>;
+			subscriberRole: string | null;
+			/** Roles every identity holds (SPEC R9). */
+			everyone: string[];
+			/** Where role names link to (SPEC R10). */
+			url: string | null;
+		};
 		grants: Grant[];
 		vouchers: Voucher[];
 		root: boolean;

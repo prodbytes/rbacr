@@ -170,6 +170,24 @@ void main() {
     }
   });
 
+  test('vouchers grant several roles under a code of their own', () async {
+    final code = 'dart e2e ${DateTime.now().millisecondsSinceEpoch}';
+    final voucher = await root.createVoucher(systemId: system, roles: ['premium', 'free'], code: code, maxUses: 1);
+    expect(
+      [voucher.code, voucher.roles],
+      [
+        code.toUpperCase().replaceAll(' ', '-'),
+        ['free', 'premium'],
+      ],
+    );
+    try {
+      final grants = await me.redeemVoucherGrants(code.replaceAll(' ', ''));
+      expect(grants.map((g) => g.role), ['free', 'premium']);
+    } finally {
+      await root.disableVoucher(voucher.code);
+    }
+  });
+
   test('reports vouchers that need payment', () async {
     final paid = await root.createVoucher(systemId: system, role: 'premium', discountPercent: 25);
     await expectLater(

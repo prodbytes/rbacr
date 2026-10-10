@@ -1,11 +1,11 @@
-import { api, readJson, strList } from '#lib/server/http.js';
+import { api, readJson, roleSettings } from '#lib/server/http.js';
 import type { RequestHandler } from './$types';
 
-/** Sets the roles this role implies, replacing the previous ones. */
+/** Role settings (roots): `implies` replaces the roles it implies (R7); `everyone` makes every identity hold it (R9). */
 export const PUT: RequestHandler = (event) =>
 	api(event, async ({ rbac, actor }) => {
 		const body = await readJson(event.request);
-		return rbac.setImplications(actor, event.params.system, event.params.role, strList(body.implies, 'implies'));
+		return rbac.configureRole(actor, event.params.system, event.params.role, roleSettings(body));
 	});
 
 export const DELETE: RequestHandler = (event) =>

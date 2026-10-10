@@ -13,7 +13,14 @@ export interface Token {
 
 export const load: PageLoad = async ({ fetch }) => {
 	const [me, { tokens }] = await Promise.all([
-		vpiLoad<{ email: string; root: boolean; globalRoles: string[]; roles: Record<string, string[]> }>(fetch, '/me'),
+		vpiLoad<{
+			email: string;
+			root: boolean;
+			globalRoles: string[];
+			roles: Record<string, string[]>;
+			/** Each system's URL, for those that have one (SPEC R10). */
+			urls: Record<string, string>;
+		}>(fetch, '/me'),
 		vpiLoad<{ tokens: Token[] }>(fetch, '/tokens')
 	]);
 	return { ...me, tokens };

@@ -1,6 +1,9 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
 	import { goto, invalidateAll } from '$app/navigation';
-	import { formatDate, formValues, utcIso, vpiFetch, VpiError } from '#lib/vpi.js';
+	import { formatDate, formValues, utcInputValue, utcIso, vpiFetch, VpiError } from '#lib/vpi.js';
+	import { quarterOf, suggestVoucherCode } from '#lib/vouchers.js';
+	import RoleName from '#lib/RoleName.svelte';
 	import type { PageProps } from './$types';
 
 	let { data }: PageProps = $props();
@@ -28,21 +31,24 @@
 		await call(`${base}/roles`, 'POST', { role });
 		if (!error) form.reset();
 	}
-	async function removeRole(e: SubmitEvent) {
-		const { role } = formValues(e);
+	async function removeRole(role: string) {
 		if (confirm(`Remove ${role} and all its grants and vouchers?`)) {
 			await call(`${base}/roles/${encodeURIComponent(role)}`, 'DELETE');
 		}
 	}
-	let implRole = $state('');
-	let implied = $state<string[]>([]);
-	// Start from the selected role's current implications.
-	$effect(() => {
-		implied = [...(data.system.implies[implRole] ?? [])];
-	});
-	async function setImplications(e: SubmitEvent) {
-		e.preventDefault();
-		await call(`${base}/roles/${encodeURIComponent(implRole)}`, 'PUT', { implies: implied });
+	/** Replaces the roles `role` implies (R7). */
+	const setImplied = (role: string, implies: string[]) =>
+		call(`${base}/roles/${encodeURIComponent(role)}`, 'PUT', { implies });
+	async function addImplied(e: SubmitEvent, role: string, implies: string[]) {
+		const { implied } = formValues(e);
+		await setImplied(role, [...implies, implied]);
+	}
+	/** Every identity holds `role` here, or stops holding it through this (R9). */
+	const setEveryone = (role: string, everyone: boolean) =>
+		call(`${base}/roles/${encodeURIComponent(role)}`, 'PUT', { everyone });
+	async function setUrl(e: SubmitEvent) {
+		const { url } = formValues(e);
+		await call(base, 'PATCH', { url: url.trim() || null });
 	}
 	async function setSubscriberRole(e: SubmitEvent) {
 		const { subscriberRole } = formValues(e);
@@ -55,16 +61,26 @@
 		if (!error) form.reset();
 	}
 	const revoke = (role: string, grantee: string) => call(`${base}/grants`, 'DELETE', { role, grantee });
+	// A new voucher defaults to this quarter: its code and its validity (V2).
+	const quarter = quarterOf(new Date());
+	let voucherRoles = $state<string[]>([]);
+	let voucherCode = $state('');
+	// Made up in the browser, so server rendering doesn't pick a different one.
+	onMount(() => (voucherCode = suggestVoucherCode()));
 	async function createVoucher(e: SubmitEvent) {
 		const v = formValues(e);
 		const res = (await call(`${base}/vouchers`, 'POST', {
-			role: v.role,
+			roles: voucherRoles,
+			code: voucherCode,
 			discountPercent: v.discountPercent,
 			startsAt: utcIso(v.startsAt),
 			endsAt: utcIso(v.endsAt),
 			maxUses: v.maxUses || null
 		})) as { code: string } | undefined;
-		if (res) created = res.code;
+		if (res) {
+			created = res.code;
+			voucherCode = suggestVoucherCode();
+		}
 	}
 	const disable = (code: string) => call(`/vouchers/${encodeURIComponent(code)}`, 'DELETE');
 	async function deleteSystem() {
@@ -82,53 +98,92 @@
 
 <p><a href="/systems">← Systems</a></p>
 <h1>{data.system.name} <code class="muted">{data.system.id}</code></h1>
+<p class="muted">
+	{#if data.system.url}
+		Role names link to <a href={data.system.url} target="_blank" rel="noopener noreferrer">{data.system.url}</a>.
+	{:else}
+		No URL: role names aren't linked to the system.
+	{/if}
+</p>
+{#if data.root}
+	<form class="row" onsubmit={setUrl}>
+		<label>
+			System URL (opens in a new tab)
+			<input type="url" name="url" value={data.system.url ?? ''} placeholder="https://presence.example.com" />
+		</label>
+		<button>Save URL</button>
+	</form>
+{/if}
 
 {#if error}<p class="error">{error}</p>{/if}
 
 <h2>Roles</h2>
-<p>
-	{#each data.system.roles as role (role)}
-		<span class="badge">{role}</span>{' '}
-	{/each}
-</p>
-{#each Object.entries(data.system.implies) as [role, implies] (role)}
-	<p class="muted"><span class="badge">{role}</span> implies {implies.join(', ')}</p>
-{/each}
-{#if data.root}
-	<div class="row">
-		<form class="row" onsubmit={addRole}>
-			<input name="role" placeholder="new role" required />
-			<button>Add role</button>
-		</form>
-		<form class="row" onsubmit={removeRole}>
-			<select name="role">
-				{#each data.system.roles as role (role)}<option>{role}</option>{/each}
-			</select>
-			<button class="danger">Remove role</button>
-		</form>
-	</div>
-	<form class="row" onsubmit={setImplications}>
-		<label>
-			Role
-			<select bind:value={implRole} required>
-				<option value="" disabled>choose…</option>
-				{#each data.system.roles as role (role)}<option>{role}</option>{/each}
-			</select>
-		</label>
-		{#if implRole}
-			implies
-			{#each data.system.roles.filter((r) => r !== implRole) as role (role)}
-				<label><input type="checkbox" value={role} bind:group={implied} /> {role}</label>
+{#if data.system.roles.length}
+	<table class="spaced">
+		<thead><tr><th>Role</th><th>Everyone</th><th>Implies</th>{#if data.root}<th></th>{/if}</tr></thead>
+		<tbody>
+			{#each data.system.roles as role (role)}
+				{@const implies = data.system.implies[role] ?? []}
+				{@const addable = data.system.roles.filter((r) => r !== role && !implies.includes(r))}
+				<tr>
+					<td><span class="badge"><RoleName {role} url={data.system.url} /></span></td>
+					<td>
+						<label title="Every signed-in identity holds this role">
+							<input
+								type="checkbox"
+								checked={data.system.everyone.includes(role)}
+								disabled={!data.root}
+								onchange={(e) => setEveryone(role, e.currentTarget.checked)}
+							/>
+							all users
+						</label>
+					</td>
+					<td>
+						<div class="row">
+							{#each implies as implied (implied)}
+								<span class="badge"
+									><RoleName role={implied} url={data.system.url} />{#if data.root}
+										<button
+											class="link"
+											title="Stop {role} implying {implied}"
+											onclick={() => setImplied(role, implies.filter((r) => r !== implied))}>×</button
+										>{/if}</span
+								>
+							{:else}
+								<span class="muted">—</span>
+							{/each}
+							{#if data.root && addable.length}
+								<form class="row" onsubmit={(e) => addImplied(e, role, implies)}>
+									<select name="implied" aria-label="Role {role} also gives">
+										{#each addable as r (r)}<option>{r}</option>{/each}
+									</select>
+									<button>Add implied role</button>
+								</form>
+							{/if}
+						</div>
+					</td>
+					{#if data.root}
+						<td><button class="danger" onclick={() => removeRole(role)}>Remove</button></td>
+					{/if}
+				</tr>
 			{/each}
-		{/if}
-		<button disabled={!implRole}>Set implied roles</button>
+		</tbody>
+	</table>
+{:else}
+	<p class="muted">No roles yet.</p>
+{/if}
+{#if data.root}
+	<form class="row" onsubmit={addRole}>
+		<input name="role" placeholder="role name" aria-label="New role name" required />
+		<button>Add role</button>
 	</form>
 {/if}
 
 <h2>Substack subscribers</h2>
 <p class="muted">
 	Paying subscribers of the newsletter hold this role here for their current billing period.
-	{#if data.system.subscriberRole}Now: <span class="badge">{data.system.subscriberRole}</span>{:else}Now: none.{/if}
+	{#if data.system.subscriberRole}Now: <span class="badge"><RoleName role={data.system.subscriberRole} url={data.system.url} /></span
+		>{:else}Now: none.{/if}
 </p>
 {#if data.root}
 	<form class="row" onsubmit={setSubscriberRole}>
@@ -167,8 +222,10 @@
 			{#each data.grants as g (g.role + g.grantee)}
 				<tr>
 					<td>{g.grantee}</td>
-					<td>{g.role}</td>
-					<td class="muted">{g.impliedRoles.join(', ') || '—'}</td>
+					<td><RoleName role={g.role} url={data.system.url} /></td>
+					<td class="muted">
+						{#each g.impliedRoles as role, i (role)}{i ? ', ' : ''}<RoleName {role} url={data.system.url} />{:else}—{/each}
+					</td>
 					<td><span class="badge">{g.status}</span></td>
 					<td class="muted">{formatDate(g.startsAt)}</td>
 					<td class="muted">{formatDate(g.endsAt)}</td>
@@ -189,28 +246,37 @@
 
 <h2>Vouchers</h2>
 <form class="row" onsubmit={createVoucher}>
+	<fieldset class="row">
+		<legend>Roles it grants</legend>
+		{#each data.system.roles as role (role)}
+			<label><input type="checkbox" value={role} bind:group={voucherRoles} /> {role}</label>
+		{/each}
+	</fieldset>
 	<label>
-		Role
-		<select name="role">
-			{#each data.system.roles as role (role)}<option>{role}</option>{/each}
-		</select>
+		Code
+		<span class="row">
+			<input name="code" bind:value={voucherCode} required />
+			<button type="button" class="link" onclick={() => (voucherCode = suggestVoucherCode())}>new code</button>
+		</span>
 	</label>
 	<label>Discount % <input type="number" name="discountPercent" min="0" max="100" step="1" value="100" class="narrow" /></label>
-	<label>Valid from (UTC, optional) <input type="datetime-local" name="startsAt" /></label>
-	<label>Valid until (UTC, optional) <input type="datetime-local" name="endsAt" /></label>
+	<label>Valid from (UTC) <input type="datetime-local" name="startsAt" value={utcInputValue(quarter.start)} /></label>
+	<label>Valid until (UTC) <input type="datetime-local" name="endsAt" value={utcInputValue(quarter.end)} /></label>
 	<label>Max uses (optional) <input type="number" name="maxUses" min="1" step="1" class="narrow" /></label>
-	<button>Create voucher</button>
+	<button disabled={!voucherRoles.length}>Create voucher</button>
 </form>
 {#if created}<p class="ok">Voucher created: <code>{created}</code></p>{/if}
 
 {#if data.vouchers.length}
 	<table class="spaced">
-		<thead><tr><th>Code</th><th>Role</th><th>Discount</th><th>Status</th><th>Uses</th><th>From</th><th>Until</th><th>By</th><th></th></tr></thead>
+		<thead><tr><th>Code</th><th>Roles</th><th>Discount</th><th>Status</th><th>Uses</th><th>From</th><th>Until</th><th>By</th><th></th></tr></thead>
 		<tbody>
 			{#each data.vouchers as v (v.code)}
 				<tr>
 					<td><code>{v.code}</code></td>
-					<td>{v.role}</td>
+					<td>
+						{#each v.roles as role, i (role)}{i ? ', ' : ''}<RoleName {role} url={data.system.url} />{/each}
+					</td>
 					<td>{v.discountPercent}%</td>
 					<td><span class="badge">{v.status}</span></td>
 					<td>{v.uses}{v.maxUses !== null ? ` / ${v.maxUses}` : ''}</td>

@@ -3,6 +3,7 @@ import type { RequestHandler } from './$types';
 
 export const POST: RequestHandler = (event) =>
 	vpi(event, async ({ rbac, actor }) => {
-		const grant = await rbac.redeemVoucher(actor.email, str((await readJson(event.request)).code, 'code'));
-		return { redeemed: grant.systemId ? `${grant.systemId} / ${grant.role}` : `${grant.role} in all systems` };
+		const grants = await rbac.redeemVoucher(actor.email, str((await readJson(event.request)).code, 'code'));
+		const roles = grants.map((g) => g.role).join(', ');
+		return { redeemed: grants[0].systemId ? `${grants[0].systemId} / ${roles}` : `${roles} in all systems` };
 	});

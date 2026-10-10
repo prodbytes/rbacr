@@ -37,28 +37,20 @@
 </main>
 
 <style>
+	/* Gruvbox soft dark. */
 	:global(:root) {
-		--bg: #fafafa;
-		--fg: #1d1d1f;
-		--muted: #6b6b70;
-		--line: #dedee3;
-		--card: #ffffff;
-		--accent: #2557d6;
-		--danger: #c62828;
-		--ok: #2e7d32;
-		color-scheme: light dark;
-	}
-	@media (prefers-color-scheme: dark) {
-		:global(:root) {
-			--bg: #141416;
-			--fg: #ececf0;
-			--muted: #9a9aa2;
-			--line: #2e2e33;
-			--card: #1c1c20;
-			--accent: #7aa2ff;
-			--danger: #ff6b6b;
-			--ok: #6fcf74;
-		}
+		--bg: #32302f; /* bg0_s */
+		--fg: #ebdbb2; /* fg */
+		--muted: #a89984; /* fg4 */
+		--line: #504945; /* bg2 */
+		--card: #3c3836; /* bg1 */
+		--accent: #83a598; /* blue */
+		--accent-fg: #32302f; /* bg0_s */
+		--brand: #fe8019; /* orange */
+		--warn: #fabd2f; /* yellow */
+		--danger: #fb4934; /* red */
+		--ok: #b8bb26; /* green */
+		color-scheme: dark;
 	}
 	:global(body) {
 		margin: 0;
@@ -110,9 +102,21 @@
 		cursor: pointer;
 		background: var(--accent);
 		border-color: var(--accent);
-		color: #fff;
+		color: var(--accent-fg);
+		font-weight: 600;
+	}
+	:global(button:hover) {
+		filter: brightness(1.1);
+	}
+	:global(:focus-visible) {
+		outline: 2px solid var(--warn);
+		outline-offset: 1px;
+	}
+	:global(::selection) {
+		background: var(--line);
 	}
 	:global(button.link) {
+		font-weight: normal;
 		background: none;
 		border: none;
 		color: var(--accent);
@@ -164,6 +168,10 @@
 		border: 1px solid var(--line);
 		color: var(--muted);
 	}
+	:global(.who .badge) {
+		border-color: var(--warn);
+		color: var(--warn);
+	}
 	header {
 		display: flex;
 		align-items: center;
@@ -175,8 +183,9 @@
 	}
 	.brand {
 		font-weight: 700;
+		font-family: ui-monospace, 'SF Mono', Menlo, monospace;
 		text-decoration: none;
-		color: var(--fg);
+		color: var(--brand);
 	}
 	nav {
 		display: flex;

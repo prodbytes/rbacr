@@ -1,6 +1,8 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
 	import { invalidateAll } from '$app/navigation';
-	import { formatDate, formValues, utcIso, vpiFetch, VpiError } from '#lib/vpi.js';
+	import { formatDate, formValues, utcInputValue, utcIso, vpiFetch, VpiError } from '#lib/vpi.js';
+	import { quarterOf, suggestVoucherCode } from '#lib/vouchers.js';
 	import type { PageProps } from './$types';
 
 	let { data }: PageProps = $props();
@@ -27,16 +29,26 @@
 		if (!error) form.reset();
 	}
 	const revoke = (role: string, grantee: string) => call('/global/grants', 'DELETE', { role, grantee });
+	// A new voucher defaults to this quarter: its code and its validity (V2).
+	const quarter = quarterOf(new Date());
+	let voucherRoles = $state<string[]>([]);
+	let voucherCode = $state('');
+	// Made up in the browser, so server rendering doesn't pick a different one.
+	onMount(() => (voucherCode = suggestVoucherCode()));
 	async function createVoucher(e: SubmitEvent) {
 		const v = formValues(e);
 		const res = (await call('/global/vouchers', 'POST', {
-			role: v.role,
+			roles: voucherRoles,
+			code: voucherCode,
 			discountPercent: v.discountPercent,
 			startsAt: utcIso(v.startsAt),
 			endsAt: utcIso(v.endsAt),
 			maxUses: v.maxUses || null
 		})) as { code: string } | undefined;
-		if (res) created = res.code;
+		if (res) {
+			created = res.code;
+			voucherCode = suggestVoucherCode();
+		}
 	}
 	const disable = (code: string) => call(`/vouchers/${encodeURIComponent(code)}`, 'DELETE');
 </script>
@@ -52,10 +64,15 @@
 <h2>Global grants</h2>
 <form class="row" onsubmit={grant}>
 	<label>E-mail or domain <input name="grantee" placeholder="ana@example.com or example.com" required /></label>
-	<label>Role <input name="role" placeholder="pro" required /></label>
+	<label>
+		Role
+		<select name="role" required>
+			{#each data.roleNames as role (role)}<option>{role}</option>{/each}
+		</select>
+	</label>
 	<label>Valid from (UTC, optional) <input type="datetime-local" name="startsAt" /></label>
 	<label>Valid until (UTC, optional) <input type="datetime-local" name="endsAt" /></label>
-	<button>Grant</button>
+	<button disabled={!data.roleNames.length}>Grant</button>
 </form>
 
 {#if data.grants.length}
@@ -82,24 +99,38 @@
 
 <h2>Global vouchers</h2>
 <form class="row" onsubmit={createVoucher}>
-	<label>Role <input name="role" placeholder="pro" required /></label>
+	<fieldset class="row">
+		<legend>Roles it grants (in every system that has them)</legend>
+		{#each data.roleNames as role (role)}
+			<label><input type="checkbox" value={role} bind:group={voucherRoles} /> {role}</label>
+		{:else}
+			<span class="muted">No system has roles yet.</span>
+		{/each}
+	</fieldset>
+	<label>
+		Code
+		<span class="row">
+			<input name="code" bind:value={voucherCode} required />
+			<button type="button" class="link" onclick={() => (voucherCode = suggestVoucherCode())}>new code</button>
+		</span>
+	</label>
 	<label>Discount % <input type="number" name="discountPercent" min="0" max="100" step="1" value="100" class="narrow" /></label>
-	<label>Valid from (UTC, optional) <input type="datetime-local" name="startsAt" /></label>
-	<label>Valid until (UTC, optional) <input type="datetime-local" name="endsAt" /></label>
+	<label>Valid from (UTC) <input type="datetime-local" name="startsAt" value={utcInputValue(quarter.start)} /></label>
+	<label>Valid until (UTC) <input type="datetime-local" name="endsAt" value={utcInputValue(quarter.end)} /></label>
 	<label>Max uses (optional) <input type="number" name="maxUses" min="1" step="1" class="narrow" /></label>
-	<button>Create voucher</button>
+	<button disabled={!voucherRoles.length}>Create voucher</button>
 </form>
-<p class="muted">100% vouchers grant the role on redemption. Lower discounts will require payment (not available yet).</p>
+<p class="muted">100% vouchers grant their roles on redemption. Lower discounts will require payment (not available yet).</p>
 {#if created}<p class="ok">Voucher created: <code>{created}</code></p>{/if}
 
 {#if data.vouchers.length}
 	<table class="spaced">
-		<thead><tr><th>Code</th><th>Role</th><th>Discount</th><th>Status</th><th>Uses</th><th>From</th><th>Until</th><th>By</th><th></th></tr></thead>
+		<thead><tr><th>Code</th><th>Roles</th><th>Discount</th><th>Status</th><th>Uses</th><th>From</th><th>Until</th><th>By</th><th></th></tr></thead>
 		<tbody>
 			{#each data.vouchers as v (v.code)}
 				<tr>
 					<td><code>{v.code}</code></td>
-					<td>{v.role}</td>
+					<td>{v.roles.join(', ')}</td>
 					<td>{v.discountPercent}%</td>
 					<td><span class="badge">{v.status}</span></td>
 					<td>{v.uses}{v.maxUses !== null ? ` / ${v.maxUses}` : ''}</td>

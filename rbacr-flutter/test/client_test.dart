@@ -235,6 +235,56 @@ void main() {
       expect(created.isGlobal, isFalse);
     });
 
+    test('create with several roles and a code of its own; old servers send one role', () async {
+      final seen = <http.Request>[];
+      final created = await fake(
+        (_) => reply({
+          ...voucher(),
+          'code': 'SPRING-SALE',
+          'roles': ['free', 'premium'],
+          'role': 'free',
+        }, 201),
+        seen: seen,
+      ).createVoucher(systemId: 'presence', roles: ['premium', 'free'], code: 'spring sale');
+      expect(jsonDecode(seen.single.body), {
+        'roles': ['premium', 'free'],
+        'code': 'spring sale',
+      });
+      expect(
+        [created.code, created.roles, created.role],
+        [
+          'SPRING-SALE',
+          ['free', 'premium'],
+          'free',
+        ],
+      );
+      expect(Voucher.fromJson(voucher()).roles, ['premium']);
+      expect(() => fake((_) => reply(voucher())).createVoucher(roles: ['a'], role: 'b'), throwsArgumentError);
+    });
+
+    test('redeeming returns the first grant, or all of them', () async {
+      Map<String, Object?> grant(String role) => {
+        'systemId': 'presence',
+        'role': role,
+        'grantee': 'ana@x.com',
+        'grantedBy': 'r@x.com',
+        'grantedAt': '2026-10-10T08:00:00.000Z',
+        'startsAt': null,
+        'endsAt': null,
+        'status': 'active',
+        'voucherCode': 'SPRING-SALE',
+        'impliedRoles': <String>[],
+      };
+      final client = fake(
+        (_) => reply({
+          ...grant('free'),
+          'grants': [grant('free'), grant('premium')],
+        }),
+      );
+      expect((await client.redeemVoucher('spring sale')).role, 'free');
+      expect((await client.redeemVoucherGrants('spring sale')).map((g) => g.role), ['free', 'premium']);
+    });
+
     test('create and list global vouchers without a system', () async {
       final seen = <http.Request>[];
       final client = fake(
@@ -289,7 +339,13 @@ void main() {
       final error = await fake(
         (_) => reply({
           'error': 'This voucher requires payment',
-          'payment': {'code': 'AAAA-BBBB-CCCC-DDDD', 'systemId': null, 'role': 'pro', 'discountPercent': 25},
+          'payment': {
+            'code': 'AAAA-BBBB-CCCC-DDDD',
+            'systemId': null,
+            'roles': ['pro'],
+            'role': 'pro',
+            'discountPercent': 25,
+          },
         }, 402),
       ).redeemVoucher('AAAA-BBBB-CCCC-DDDD').then<Object?>((_) => null, onError: (Object e) => e);
       expect(error, isA<RbacrPaymentRequired>());
