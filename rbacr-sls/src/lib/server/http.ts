@@ -88,11 +88,19 @@ export function optInt(value: unknown, field: string): number | null {
 }
 
 /** The `subscriberRole` of a system configuration body: a role, or null (or blank) for none. */
-/** A system's settings from a PATCH body: the fields present, null clearing one (Q2, R10). */
-export function systemSettings(body: Record<string, unknown>): { subscriberRole?: string | null; url?: string | null } {
+/** A system's settings from a PATCH body: the fields present, null clearing a role or URL (Q2, R10, R11). */
+export function systemSettings(body: Record<string, unknown>): {
+	subscriberRole?: string | null;
+	url?: string | null;
+	maintenance?: boolean;
+} {
+	if ('maintenance' in body && typeof body.maintenance !== 'boolean') {
+		throw new RbacError(400, '"maintenance" must be true or false');
+	}
 	return {
 		...('subscriberRole' in body && { subscriberRole: optStr(body.subscriberRole, 'subscriberRole') }),
-		...('url' in body && { url: optStr(body.url, 'url') })
+		...('url' in body && { url: optStr(body.url, 'url') }),
+		...('maintenance' in body && { maintenance: body.maintenance as boolean })
 	};
 }
 

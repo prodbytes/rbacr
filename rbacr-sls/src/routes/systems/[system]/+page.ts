@@ -46,6 +46,8 @@ export const load: PageLoad = ({ fetch, params }) =>
 			everyone: string[];
 			/** Where role names link to (SPEC R10). */
 			url: string | null;
+			/** No roles are given while on (SPEC R11). */
+			maintenance: boolean;
 		};
 		grants: Grant[];
 		vouchers: Voucher[];

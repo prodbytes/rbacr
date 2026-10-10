@@ -4,7 +4,7 @@ import type { RequestHandler } from './$types';
 export const GET: RequestHandler = (event) =>
 	api(event, ({ rbac, actor }) => rbac.getSystem(actor, event.params.system));
 
-/** System settings (roots): `subscriberRole` (a catalog role, Q2) and/or `url` (R10); null clears either. */
+/** System settings (roots): `subscriberRole` (a catalog role, Q2), `url` (R10), `maintenance` (R11); null clears a role or URL. */
 export const PATCH: RequestHandler = (event) =>
 	api(event, async ({ rbac, actor }) =>
 		rbac.configureSystem(actor, event.params.system, systemSettings(await readJson(event.request)))

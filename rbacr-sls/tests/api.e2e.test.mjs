@@ -237,6 +237,22 @@ describe('rbacr API', { skip: !(await fetch(`${BASE}/health`).then((r) => r.ok, 
 		assert.equal((await root('PATCH', `/api/systems/${SYSTEM}`, { url: null })).body.url, null);
 	});
 
+	it('gives no roles while a system is in maintenance (R11)', async () => {
+		const path = `/api/systems/${SYSTEM}`;
+		const check = async () => (await root('POST', '/api/check', { email: USER, systemId: SYSTEM, role: 'viewer' })).body.allowed;
+		assert.equal(await check(), true);
+		assert.equal((await admin('PATCH', path, { maintenance: true })).status, 403);
+		assert.equal((await root('PATCH', path, { maintenance: 'on' })).status, 400);
+		const on = await root('PATCH', path, { maintenance: true });
+		assert.equal(on.status, 200, JSON.stringify(on.body));
+		assert.equal(on.body.maintenance, true);
+		assert.equal(await check(), false);
+		assert.deepEqual((await user('POST', '/api/roles', { email: USER, systemId: SYSTEM })).body.roles, []);
+		assert.deepEqual((await root('GET', '/api/me')).body.roles[SYSTEM], []);
+		assert.equal((await root('PATCH', path, { maintenance: false })).body.maintenance, false);
+		assert.equal(await check(), true);
+	});
+
 	it('lets roots issue global vouchers; paid ones answer 402', async () => {
 		const role = `e2e${Date.now()}`;
 		assert.equal((await root('POST', `/api/systems/${SYSTEM}/roles`, { role })).status, 200);
