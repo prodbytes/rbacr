@@ -6,8 +6,6 @@ import {
 	RBACR_PUBLIC_ORIGIN,
 	RBACR_ROOT_LIST,
 	RBACR_STRIPE_API_KEY,
-	RBACR_STRIPE_ROLE,
-	RBACR_STRIPE_SYSTEM,
 	RBACR_STRIPE_WEBHOOK_SECRET
 } from '$app/env/private';
 import { createTable, ensureTable, type Table } from './dynamo';
@@ -58,9 +56,6 @@ export function googleRedirectUri(url: URL): string {
 export interface StripeSync {
 	webhookSecret: string;
 	apiKey: string;
-	role: string;
-	/** null: a global grant. */
-	systemId: string | null;
 }
 
 /** The paid-subscription sync's settings, or null when it is off. */
@@ -68,8 +63,6 @@ export function stripeSync(): StripeSync | null {
 	if (!RBACR_STRIPE_WEBHOOK_SECRET || !RBACR_STRIPE_API_KEY) return null;
 	return {
 		webhookSecret: RBACR_STRIPE_WEBHOOK_SECRET,
-		apiKey: RBACR_STRIPE_API_KEY,
-		role: RBACR_STRIPE_ROLE,
-		systemId: RBACR_STRIPE_SYSTEM ?? null
+		apiKey: RBACR_STRIPE_API_KEY
 	};
 }

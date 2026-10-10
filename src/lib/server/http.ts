@@ -87,6 +87,12 @@ export function optInt(value: unknown, field: string): number | null {
 	return n;
 }
 
+/** The `subscriberRole` of a system configuration body: a role, or null (or blank) for none. */
+export function subscriberRole(body: Record<string, unknown>): string | null {
+	if (!('subscriberRole' in body)) throw new RbacError(400, '"subscriberRole" is required (a role, or null for none)');
+	return optStr(body.subscriberRole, 'subscriberRole');
+}
+
 /** A grant's optional `startsAt` and `endsAt` (G1); blank or missing means immediately and forever. */
 export function validity(body: Record<string, unknown>): Validity {
 	return { startsAt: optDate(body.startsAt, 'startsAt'), endsAt: optDate(body.endsAt, 'endsAt') };

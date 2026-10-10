@@ -350,49 +350,81 @@ describe('subscription sync', () => {
 	// The billing period around the test clock (2026-01-10).
 	const period = { startsAt: new Date('2026-01-01T00:00:00Z'), endsAt: new Date('2026-02-01T00:00:00Z') };
 	const renewed = { startsAt: period.endsAt, endsAt: new Date('2026-03-01T00:00:00Z') };
+	const outcomes = (r: { systemId: string | null; role: string; outcome: string }[]) =>
+		r.map((o) => `${o.systemId}/${o.role}=${o.outcome}`).sort();
 
-	it('grants the role globally to a subscriber and revokes it when they stop paying (Q2, Q3)', async () => {
-		expect(await rbac.syncSubscriber(null, 'viewer', 'Sub@Partner.com', period)).toBe('granted');
-		expect(await rbac.globalRolesOf('sub@partner.com')).toEqual(['viewer']);
-		expect((await rbac.listGlobalGrants(root))[0]).toMatchObject({ grantee: 'sub@partner.com', grantedBy: 'stripe' });
+	beforeEach(async () => {
+		await rbac.setSubscriberRole(root, 'billing', 'viewer');
+	});
+
+	it("is configured per system by roots, with a role from the system's catalog (Q2)", async () => {
+		expect((await rbac.getSystem(root, 'billing')).subscriberRole).toBe('viewer');
+		expect((await rbac.getSystem(root, 'crm')).subscriberRole).toBeNull();
+		await expectError(rbac.setSubscriberRole(user, 'billing', 'editor'), 403);
+		await expectError(rbac.setSubscriberRole(root, 'billing', 'ghost'), 404, /Role/);
+		await expectError(rbac.setSubscriberRole(root, 'nope', 'viewer'), 404, /System/);
+		await expectError(rbac.setSubscriberRole(root, 'nope', null), 404, /System/);
+		expect((await rbac.setSubscriberRole(root, 'billing', 'Editor')).subscriberRole).toBe('editor');
+		expect((await rbac.setSubscriberRole(root, 'billing', null)).subscriberRole).toBeNull();
+	});
+
+	it('is cleared when its role is removed (P2)', async () => {
+		await rbac.removeRole(root, 'billing', 'viewer');
+		expect((await rbac.getSystem(root, 'billing')).subscriberRole).toBeNull();
+	});
+
+	it("grants each system's subscriber role, and revokes it when they stop paying (Q2, Q3)", async () => {
+		await rbac.addRole(root, 'crm', 'member');
+		await rbac.setSubscriberRole(root, 'crm', 'member');
+		expect(outcomes(await rbac.syncSubscriber('Sub@Partner.com', period))).toEqual([
+			'billing/viewer=granted',
+			'crm/member=granted'
+		]);
+		expect(await rbac.rolesOf('sub@partner.com')).toEqual({ billing: ['viewer'], crm: ['member'] });
+		expect((await rbac.listGrants(root, 'billing'))[0]).toMatchObject({ grantee: 'sub@partner.com', grantedBy: 'stripe' });
 		tick();
-		expect(await rbac.syncSubscriber(null, 'viewer', 'sub@partner.com', period)).toBe('unchanged');
-		expect(await rbac.syncSubscriber(null, 'viewer', 'sub@partner.com', null)).toBe('revoked');
-		expect(await rbac.globalRolesOf('sub@partner.com')).toEqual([]);
-		expect(await rbac.syncSubscriber(null, 'viewer', 'sub@partner.com', null)).toBe('unchanged');
+		expect(outcomes(await rbac.syncSubscriber('sub@partner.com', period))).toEqual([
+			'billing/viewer=unchanged',
+			'crm/member=unchanged'
+		]);
+		expect(outcomes(await rbac.syncSubscriber('sub@partner.com', null))).toEqual(['billing/viewer=revoked', 'crm/member=revoked']);
+		expect(await rbac.rolesOf('sub@partner.com')).toEqual({});
+		expect(await rbac.syncSubscriber('sub@partner.com', null)).toEqual([]);
 	});
 
 	it('makes the grant match the billing period, following renewals (Q2a)', async () => {
-		await rbac.syncSubscriber(null, 'viewer', USER, period);
-		expect((await rbac.listGlobalGrants(root))[0]).toMatchObject({ ...period, status: 'active' });
+		await rbac.syncSubscriber(USER, period);
+		expect((await rbac.listGrants(root, 'billing'))[0]).toMatchObject({ ...period, status: 'active' });
 		// Without a renewal the role ends with the period, even if no event arrives.
 		clock = period.endsAt;
-		expect(await rbac.globalRolesOf(USER)).toEqual([]);
-		expect(await rbac.syncSubscriber(null, 'viewer', USER, renewed)).toBe('updated');
-		expect((await rbac.listGlobalGrants(root))[0]).toMatchObject({ ...renewed, grantedBy: 'stripe', status: 'active' });
-		expect(await rbac.globalRolesOf(USER)).toEqual(['viewer']);
+		expect(await rbac.rolesOf(USER)).toEqual({});
+		expect(outcomes(await rbac.syncSubscriber(USER, renewed))).toEqual(['billing/viewer=updated']);
+		expect((await rbac.listGrants(root, 'billing'))[0]).toMatchObject({ ...renewed, grantedBy: 'stripe', status: 'active' });
+		expect(await rbac.rolesOf(USER)).toEqual({ billing: ['viewer'] });
 	});
 
-	it('can grant in one system, whose catalog must have the role', async () => {
-		await rbac.syncSubscriber('billing', 'editor', USER, period);
+	it('follows configuration changes, revoking grants of roles no longer configured', async () => {
+		await rbac.syncSubscriber(USER, period);
+		await rbac.setSubscriberRole(root, 'billing', 'editor');
+		expect(outcomes(await rbac.syncSubscriber(USER, period))).toEqual(['billing/editor=granted', 'billing/viewer=revoked']);
 		expect(await rbac.rolesOf(USER)).toEqual({ billing: ['editor'] });
-		await expectError(rbac.syncSubscriber('crm', 'editor', USER, period), 404);
+		await rbac.setSubscriberRole(root, 'billing', null);
+		expect(outcomes(await rbac.syncSubscriber(USER, period))).toEqual(['billing/editor=revoked']);
 	});
 
 	it("never changes or revokes a grant it didn't make, until that one expires (Q3)", async () => {
-		await rbac.grantGlobal(root, 'viewer', USER, { endsAt: new Date('2026-01-20T00:00:00Z') });
+		await rbac.grant(root, 'billing', 'viewer', USER, { endsAt: new Date('2026-01-20T00:00:00Z') });
 		tick();
-		expect(await rbac.syncSubscriber(null, 'viewer', USER, period)).toBe('unchanged');
-		expect(await rbac.syncSubscriber(null, 'viewer', USER, null)).toBe('unchanged');
-		expect((await rbac.listGlobalGrants(root))[0].grantedBy).toBe(ROOT);
+		expect(outcomes(await rbac.syncSubscriber(USER, period))).toEqual(['billing/viewer=unchanged']);
+		expect(await rbac.syncSubscriber(USER, null)).toEqual([]);
+		expect((await rbac.listGrants(root, 'billing'))[0].grantedBy).toBe(ROOT);
 		clock = new Date('2026-01-25T00:00:00Z');
-		expect(await rbac.syncSubscriber(null, 'viewer', USER, period)).toBe('granted');
-		expect((await rbac.listGlobalGrants(root))[0]).toMatchObject({ ...period, grantedBy: 'stripe' });
+		expect(outcomes(await rbac.syncSubscriber(USER, period))).toEqual(['billing/viewer=granted']);
+		expect((await rbac.listGrants(root, 'billing'))[0]).toMatchObject({ ...period, grantedBy: 'stripe' });
 	});
 
-	it('refuses root and invalid addresses', async () => {
-		await expectError(rbac.syncSubscriber(null, 'root', USER, period), 400, /reserved/);
-		await expectError(rbac.syncSubscriber(null, 'viewer', 'not-an-address', period), 400);
+	it('refuses invalid addresses', async () => {
+		await expectError(rbac.syncSubscriber('not-an-address', period), 400);
 	});
 });
 

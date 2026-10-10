@@ -50,14 +50,6 @@ export const variables = defineEnvVars({
 		description: 'Restricted Stripe key (rk_…) with read access to Customers and Subscriptions, for the subscription sync',
 		schema: optional
 	},
-	RBACR_STRIPE_ROLE: {
-		description: 'The role paying subscribers hold (default premium)',
-		schema: (value) => value || 'premium'
-	},
-	RBACR_STRIPE_SYSTEM: {
-		description: 'The system whose role paying subscribers hold; unset means a global grant (every system that defines the role)',
-		schema: optional
-	},
 	RBACR_VERSION: { description: 'The deployed version, reported by /health', schema: (value) => value || 'dev' },
 	RBACR_DEV_LOGIN: {
 		description: 'Set to 1 to enable password-less /login/dev. Only honoured by `vite dev`.',

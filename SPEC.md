@@ -12,7 +12,7 @@ and the README in sync with the code.
 | Identity | A Google account's verified e-mail address, lower-cased. |
 | Domain | The part of an address after `@`. Matching is exact: `example.com` does not cover `sub.example.com`. |
 | Grantee | Who a grant applies to: one address (`ana@example.com`) or a whole domain (stored as `@example.com`; input `example.com` is accepted too). |
-| System | An application whose roles rbacr manages. Its id is a slug: 1-63 characters from `a-z 0-9 _ . : -`, starting with a letter or digit. |
+| System | An application whose roles rbacr manages. Its id is a slug: 1-63 characters from `a-z 0-9 _ . : -`, starting with a letter or digit. Its configuration names the role paying subscribers hold there (`subscriberRole`, Q2). |
 | Role | A name a root registers in a system's catalog, with the same slug rules (any name but `root`). A role may **imply** other roles of the same system (R6). Both are data; `root` is the only built-in role (R2). |
 | Grant | Gives (system, role) to a grantee, during its validity (G1). A **global grant** gives a role in every system whose catalog has a role of that name, now or later. |
 | Voucher | A code that grants a role to whoever redeems it: in one system, or globally (a global grant). |
@@ -107,7 +107,7 @@ and the README in sync with the code.
 | Ask about **own** roles (`/api/me`, `/api/check`, `/api/roles`) | ✓ | ✓ |
 | Ask about **another** identity's roles, global roles included | ✓ | — |
 | List or see systems, their grants and vouchers | ✓ | — |
-| Create or delete systems; add or remove roles; register implications | ✓ | — |
+| Create, configure or delete systems; add or remove roles; register implications | ✓ | — |
 | Grant or revoke roles, to addresses, domains or globally | ✓ | — |
 | Create, list or disable vouchers (per system or global) | ✓ | — |
 | See the root allow list (`/settings`) | ✓ | — |
@@ -115,7 +115,8 @@ and the README in sync with the code.
 - **P1** Only roots manage: everything but the first three rows is refused
   to anyone else with 403. Holding a role (any name) never grants
   management.
-- **P2** Removing a role also removes its grants, implications and vouchers.
+- **P2** Removing a role also removes its grants, implications and vouchers,
+  and clears it as its system's subscriber role.
   Deleting a system removes everything in it.
 - **P3** Grants and vouchers stay valid if the root who created them later
   leaves the root list.
@@ -154,8 +155,8 @@ and the README in sync with the code.
 ## Substack integration
 
 Paying subscribers of the publisher's Substack newsletter
-(prodbytes.substack.com) hold a role in rbacr while they pay: `premium` by
-default. Substack has no API or webhooks for subscribers (its developer API
+(prodbytes.substack.com) hold a role in rbacr while they pay: in each
+system, the role its configuration names. Substack has no API or webhooks for subscribers (its developer API
 only looks up public profiles), but its paid subscriptions are billed
 through the publisher's own Stripe account, connected to Substack with
 Stripe Connect. That account sends webhooks, so rbacr syncs from Stripe:
@@ -169,14 +170,16 @@ Stripe Connect. That account sends webhooks, so rbacr syncs from Stripe:
   secret (`RBACR_STRIPE_WEBHOOK_SECRET`), at most 300 seconds old. A bad or
   missing signature gives 400; without `RBACR_STRIPE_WEBHOOK_SECRET` and
   `RBACR_STRIPE_API_KEY` the sync is off and the endpoint answers 503.
-- **Q2** On every `customer.subscription.*` event, rbacr reads the customer
-  and their current subscriptions from the Stripe API, so the result never
-  depends on the order or repetition of events. A customer is **subscribed**
-  while one of their subscriptions is `active`, `trialing` or `past_due`
-  (Stripe's retry window). A subscribed customer's e-mail address gets the
-  role `RBACR_STRIPE_ROLE` (default `premium`): a global grant, or a grant
-  in `RBACR_STRIPE_SYSTEM` when set (whose catalog must have the role).
-  The grant's `grantedBy` is `stripe`. An existing grant of that role to
+- **Q2** Roots choose, per system, the role paying subscribers hold there:
+  the system's `subscriberRole`, a role of its catalog (404 otherwise), or
+  `null` for none, the default (`PATCH /api/systems/:id`). On every
+  `customer.subscription.*` event, rbacr reads the customer and their
+  current subscriptions from the Stripe API, so the result never depends
+  on the order or repetition of events. A customer is **subscribed** while
+  one of their subscriptions is `active`, `trialing` or `past_due` (Stripe's
+  retry window). A subscribed customer's e-mail address gets, in every
+  system with a subscriber role, a grant of that role. Its `grantedBy` is
+  `stripe`. An existing grant of that role to
   that address that someone else made (a root or a voucher) is kept as it
   is, unless it has expired (G1), when the sync's grant replaces it.
 - **Q2a** The sync's grant is valid for the subscription's current billing
@@ -188,9 +191,12 @@ Stripe Connect. That account sends webhooks, so rbacr syncs from Stripe:
   period, so if no renewal comes, the role ends with the period that was
   paid for, even if the cancellation event is missed.
 - **Q3** When the customer is no longer subscribed (canceled, unpaid,
-  incomplete, paused, or deleted), rbacr removes that grant, but only if
-  its `grantedBy` is `stripe`: grants a root made, or that came from a
-  voucher, stay. The webhook answers `{ received, outcome }`, with
+  incomplete, paused, or deleted), rbacr removes those grants, but only if
+  their `grantedBy` is `stripe`: grants a root made, or that came from a
+  voucher, stay. The same happens to the customer's `stripe` grants that
+  no system's configuration asks for any more (the role changed, or was
+  set to none), at their next event. The webhook answers
+  `{ received, outcomes: [{ systemId, role, outcome }] }`, each outcome
   `granted`, `updated` (a new period), `revoked` or `unchanged`.
 - **Q4** Other events, and customers without an e-mail address, are
   acknowledged (200) and change nothing. If Stripe or the database fails,
@@ -305,9 +311,10 @@ ISO-8601 strings in UTC.
 | `POST /api/global-grants` | `{ role, grantee, startsAt?, endsAt? }` | 201, the global grant, with `impliedRolesBySystem` (roots, G1, G2) |
 | `DELETE /api/global-grants` | `{ role, grantee }` | 204 (roots) |
 | `DELETE /api/vouchers/:code` | — | the disabled voucher |
-| `GET /api/systems` | — | `{ systems: [{ id, name, roles, implies: { role: [role] } }] }` (only manageable systems; `implies` lists direct implications) |
+| `GET /api/systems` | — | `{ systems: [{ id, name, roles, implies: { role: [role] }, subscriberRole }] }` (only manageable systems; `implies` lists direct implications) |
 | `POST /api/systems` | `{ id, name?, roles?: [string] }` | 201, the system with exactly the given roles (R4) |
-| `GET /api/systems/:id` | — | `{ id, name, roles }` |
+| `GET /api/systems/:id` | — | `{ id, name, roles, implies, subscriberRole }` |
+| `PATCH /api/systems/:id` | `{ subscriberRole: role or null }` | the system (roots, Q2) |
 | `DELETE /api/systems/:id` | — | 204 |
 | `POST /api/systems/:id/roles` | `{ role }` | the system |
 | `DELETE /api/systems/:id/roles/:role` | — | 204 |
@@ -350,7 +357,7 @@ frontend (`src/lib/vpi.ts`) is its only client. The routes are
 (version, API address, account, and the root allow list for roots), `GET /vpi/me`,
 `POST /vpi/me/redeem` (402 with `payment` per V4a), `GET|POST /vpi/tokens`,
 `DELETE /vpi/tokens/:id`, `GET|POST /vpi/systems`,
-`GET|DELETE /vpi/systems/:id`, `POST /vpi/systems/:id/roles`,
+`GET|PATCH|DELETE /vpi/systems/:id`, `POST /vpi/systems/:id/roles`,
 `PUT|DELETE /vpi/systems/:id/roles/:role`, `POST|DELETE /vpi/systems/:id/grants`,
 `POST /vpi/systems/:id/vouchers`, `DELETE /vpi/vouchers/:code`,
 `GET /vpi/global`, `POST|DELETE /vpi/global/grants` and
@@ -392,8 +399,6 @@ All settings come from environment variables prefixed `RBACR_`:
 | `RBACR_VERSION` | no | Version reported by `/health` (default `dev`) |
 | `RBACR_DEV_LOGIN` | no | `1` enables `/login/dev` under `vite dev` only (S4) |
 | `RBACR_STRIPE_WEBHOOK_SECRET`, `RBACR_STRIPE_API_KEY` | for the subscription sync | The webhook endpoint's signing secret and a restricted key that reads Customers and Subscriptions (Q1, Q2) |
-| `RBACR_STRIPE_ROLE` | no | The role subscribers hold (default `premium`) |
-| `RBACR_STRIPE_SYSTEM` | no | The system of that role; unset means a global grant |
 
 ## Runtime and storage
 

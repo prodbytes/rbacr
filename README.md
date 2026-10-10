@@ -85,8 +85,6 @@ Devbox scripts: `devbox run dev | test | check | build | certs | release-rc | re
 | `RBACR_VERSION` | no | The release version, reported by `/health` (default `dev`) |
 | `RBACR_DEV_LOGIN` | no | `1` enables `/login/dev` under `vite dev` |
 | `RBACR_STRIPE_WEBHOOK_SECRET` / `RBACR_STRIPE_API_KEY` | for the Substack sync | Stripe webhook signing secret (`whsec_…`) and restricted key (`rk_…`), see [Substack integration](#substack-integration) |
-| `RBACR_STRIPE_ROLE` | no | The role paying subscribers hold (default `premium`) |
-| `RBACR_STRIPE_SYSTEM` | no | The system of that role; unset means a global grant |
 
 ## Using rbacr from your application
 
@@ -208,7 +206,8 @@ Route 53 health check polls in AWS.
 ## Substack integration
 
 Paying subscribers of the Substack newsletter (prodbytes.substack.com)
-automatically hold `premium` while they pay. Substack has no subscriber
+automatically hold a role while they pay: in each system, the one you
+choose on its page ("Substack subscribers"). Substack has no subscriber
 API or webhooks, but paid subscriptions are billed through your own Stripe
 account, so rbacr listens to Stripe instead (SPEC "Substack integration",
 Q1-Q5):
@@ -219,12 +218,13 @@ Q1-Q5):
    secret.
 3. rbacr reads that customer from the Stripe API. While they have an
    `active`, `trialing` or `past_due` subscription, their e-mail address
-   holds `premium` (a global grant, or in `RBACR_STRIPE_SYSTEM`) for the
-   subscription's current billing period: the grant starts and ends with
+   holds each system's subscriber role for the subscription's current
+   billing period: the grant starts and ends with
    it, and each renewal moves it to the next period. Otherwise rbacr
-   removes the grant. The grant shows `grantedBy: stripe`, and grants you
+   removes the grants. They show `grantedBy: stripe`, and grants you
    made by hand or through a voucher are never changed or removed (unless
-   they have expired).
+   they have expired). Changing a system's subscriber role moves each
+   subscriber over at their next subscription event.
 
 ### Setting it up
 
@@ -244,14 +244,13 @@ Q1-Q5):
    ```
 
    (`RBACR_RC_STRIPE_*` for RC; for manual deploys, the `RBACR_STRIPE_*`
-   lines in `.env.prod`.) The GitHub variables `RBACR_GA_STRIPE_ROLE` and
-   `RBACR_GA_STRIPE_SYSTEM` change the role (default `premium`) and limit
-   it to one system (default: every system that defines it).
-4. Make sure a system's catalog has the `premium` role, or the grant gives
-   nothing.
+   lines in `.env.prod`.)
+4. On each system's page, choose the role subscribers hold under
+   **Substack subscribers** (or `PATCH /api/systems/:id` with
+   `{ "subscriberRole": "premium" }`). Systems set to none grant nothing.
 5. Check it: in Stripe, send a test `customer.subscription.updated` event to
-   the endpoint. The response is `{ received, outcome }`, with `granted`,
-   `updated`, `revoked` or `unchanged`. Without the secrets the endpoint answers 503;
+   the endpoint. The response is `{ received, outcomes }`, one per system
+   role, each `granted`, `updated`, `revoked` or `unchanged`. Without the secrets the endpoint answers 503;
    with a wrong signing secret, 400.
 
 ### Limitations

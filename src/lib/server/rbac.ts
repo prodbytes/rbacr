@@ -55,6 +55,16 @@ export interface System {
 	 * these roles (transitively). Roles implying nothing are left out.
 	 */
 	implies: Record<string, string[]>;
+	/** The catalog role paying Substack subscribers hold in this system (Q2), or null for none. */
+	subscriberRole: string | null;
+}
+
+/** What the subscription sync did to one grant (Q2, Q3). */
+export interface SubscriberSync {
+	/** null for a global grant (left over from an earlier configuration). */
+	systemId: string | null;
+	role: string;
+	outcome: 'granted' | 'updated' | 'revoked' | 'unchanged';
 }
 
 /** When a grant gives its role (G1): from startsAt (null: immediately) until endsAt (exclusive; null: forever). */
@@ -180,7 +190,7 @@ export function normalizeVoucherCode(raw: string): string {
  * Item layout in the table (src/lib/server/dynamo.ts). Dates are ISO strings;
  * an absent attribute means null.
  *
- *   system      PK SYS#<id>       SK META                      GSI1 SYSTEMS / <id>
+ *   system      PK SYS#<id>       SK META                      GSI1 SYSTEMS / <id>    (optional subscriberRole)
  *   role        PK SYS#<id>       SK ROLE#<name>               GSI1 ROLENAME#<name> / <id>
  *   implication PK SYS#<id>       SK IMPL#<role>#<implied>
  *   grant       PK SYS#<id>       SK GRANT#<role>#<grantee>    GSI1 GRANTEE#<grantee> / SYS#<id>#<role>
@@ -435,7 +445,14 @@ export class Rbac {
 			(implies[it.role as string] ??= []).push(it.implies as string);
 		}
 		const roles = items.filter((it) => (it.SK as string).startsWith('ROLE#')).map((it) => it.name as string);
-		return { id: systemId, name: meta.name as string, roles, implies, implVersion: (meta.implVersion as number) ?? 0 };
+		return {
+			id: systemId,
+			name: meta.name as string,
+			roles,
+			implies,
+			subscriberRole: (meta.subscriberRole as string | undefined) ?? null,
+			implVersion: (meta.implVersion as number) ?? 0
+		};
 	}
 
 	private async allSystems(ids?: string[]): Promise<System[]> {
@@ -480,7 +497,7 @@ export class Rbac {
 			}))
 		]);
 		if (reasons) throw new RbacError(409, `System "${id}" already exists`);
-		return { id, name, roles: [...roles].sort(), implies: {} };
+		return { id, name, roles: [...roles].sort(), implies: {}, subscriberRole: null };
 	}
 
 	async deleteSystem(actor: Actor, systemId: string): Promise<void> {
@@ -554,8 +571,68 @@ export class Rbac {
 			(it) => it.role === role || it.implies === role
 		);
 		await deleteAll(this.table, [...grants, ...implications]);
+		await this.clearSubscriberRole(systemId, role);
 		const vouchers = (await queryIndex(this.table, `VOUCHERS#${systemId}`)).filter((it) => it.role === role);
 		await this.deleteVouchers(vouchers);
+	}
+
+	/**
+	 * Sets the role paying Substack subscribers hold in a system (Q2), or none
+	 * (null). The role must be in the catalog; removing it clears the setting.
+	 */
+	async setSubscriberRole(actor: Actor, systemId: string, rawRole: string | null): Promise<System> {
+		requireRoot(actor, 'Only roots can configure systems');
+		const meta = { PK: sysPK(systemId), SK: 'META' };
+		if (rawRole === null) {
+			try {
+				await this.table.doc.send(
+					new UpdateCommand({
+						TableName: this.table.name,
+						Key: meta,
+						UpdateExpression: 'REMOVE subscriberRole',
+						ConditionExpression: 'attribute_exists(PK)'
+					})
+				);
+			} catch (err) {
+				if ((err as Error).name === 'ConditionalCheckFailedException') throw notFound(`System "${systemId}" not found`);
+				throw err;
+			}
+			return this.getSystem(actor, systemId);
+		}
+		const role = rawRole.trim().toLowerCase();
+		// One transaction, so a concurrent removal of the role can't leave it configured.
+		const reasons = await this.transact([
+			{
+				Update: {
+					TableName: this.table.name,
+					Key: meta,
+					UpdateExpression: 'SET subscriberRole = :role',
+					ConditionExpression: 'attribute_exists(PK)',
+					ExpressionAttributeValues: { ':role': role }
+				}
+			},
+			{ ConditionCheck: { TableName: this.table.name, Key: roleKey(systemId, role), ConditionExpression: 'attribute_exists(PK)' } }
+		]);
+		if (reasons?.[0] === 'ConditionalCheckFailed') throw notFound(`System "${systemId}" not found`);
+		if (reasons) throw notFound(`Role "${role}" not found in "${systemId}"`);
+		return this.getSystem(actor, systemId);
+	}
+
+	/** Clears a system's subscriber role if it is `role` (P2). */
+	private async clearSubscriberRole(systemId: string, role: string): Promise<void> {
+		try {
+			await this.table.doc.send(
+				new UpdateCommand({
+					TableName: this.table.name,
+					Key: { PK: sysPK(systemId), SK: 'META' },
+					UpdateExpression: 'REMOVE subscriberRole',
+					ConditionExpression: 'subscriberRole = :role',
+					ExpressionAttributeValues: { ':role': role }
+				})
+			);
+		} catch (err) {
+			if ((err as Error).name !== 'ConditionalCheckFailedException') throw err;
+		}
 	}
 
 	/**
@@ -738,49 +815,57 @@ export class Rbac {
 	// --- subscription sync (Q1-Q4) -------------------------------------------
 
 	/**
-	 * Makes a paying subscriber hold `role` (globally when systemId is null)
-	 * for their subscription's current period, and takes it away when they
-	 * stop paying (`period` null). Called by the Stripe webhook, not by a
-	 * person, so it takes no actor. Only grants this sync made (grantedBy
-	 * SUBSCRIPTION_GRANTOR) follow the period or are revoked; a grant a root
+	 * Makes a paying subscriber hold, in every system that has one, that
+	 * system's subscriber role for their subscription's current period, and
+	 * takes it away when they stop paying (`period` null). Called by the
+	 * Stripe webhook, not by a person, so it takes no actor. Only grants this
+	 * sync made (grantedBy SUBSCRIPTION_GRANTOR) follow the period or are
+	 * revoked, including those of roles no longer configured; a grant a root
 	 * made by hand, or through a voucher, stays unless it has expired.
 	 */
-	async syncSubscriber(
-		systemId: string | null,
-		rawRole: string,
-		rawEmail: string,
-		period: Validity | null
-	): Promise<'granted' | 'updated' | 'revoked' | 'unchanged'> {
-		const role = validName('role', rawRole);
+	async syncSubscriber(rawEmail: string, period: Validity | null): Promise<SubscriberSync[]> {
 		const email = normalizeEmail(rawEmail);
 		if (!email) throw badRequest(`Invalid subscriber address "${rawEmail}"`);
-		if (period) {
-			const validity = validValidity(period);
-			const now = this.now();
-			const { previous, written } = await this.putGrant(
-				grantItem(systemId, role, email, SUBSCRIPTION_GRANTOR, now, validity),
-				(existing) =>
-					existing.grantedBy === SUBSCRIPTION_GRANTOR
-						? sameValidity(existing, validity)
-						: grantStatus(existing, now) !== 'expired'
+		const validity = period && validValidity(period);
+		const now = this.now();
+		const configured = validity
+			? (await queryIndex(this.table, 'SYSTEMS')).filter((it) => it.subscriberRole).map((it) => ({
+					systemId: it.id as string,
+					role: it.subscriberRole as string
+				}))
+			: [];
+		const out: SubscriberSync[] = [];
+		const wanted = new Set<string>();
+		for (const { systemId, role } of configured) {
+			const item = grantItem(systemId, role, email, SUBSCRIPTION_GRANTOR, now, validity!);
+			wanted.add(`${item.PK}|${item.SK}`);
+			const { previous, written } = await this.putGrant(item, (existing) =>
+				existing.grantedBy === SUBSCRIPTION_GRANTOR
+					? sameValidity(existing, validity!)
+					: grantStatus(existing, now) !== 'expired'
 			);
-			if (!written) return 'unchanged';
-			return previous?.grantedBy === SUBSCRIPTION_GRANTOR ? 'updated' : 'granted';
+			const outcome = !written ? 'unchanged' : previous?.grantedBy === SUBSCRIPTION_GRANTOR ? 'updated' : 'granted';
+			out.push({ systemId, role, outcome });
 		}
-		try {
-			await this.table.doc.send(
-				new DeleteCommand({
-					TableName: this.table.name,
-					Key: grantKey(systemId, role, email),
-					ConditionExpression: 'grantedBy = :by',
-					ExpressionAttributeValues: { ':by': SUBSCRIPTION_GRANTOR }
-				})
-			);
-			return 'revoked';
-		} catch (err) {
-			if ((err as Error).name === 'ConditionalCheckFailedException') return 'unchanged';
-			throw err;
+		const stale = (await queryIndex(this.table, `GRANTEE#${email}`)).filter(
+			(it) => it.grantedBy === SUBSCRIPTION_GRANTOR && !wanted.has(`${it.PK}|${it.SK}`)
+		);
+		for (const it of stale) {
+			try {
+				await this.table.doc.send(
+					new DeleteCommand({
+						TableName: this.table.name,
+						Key: { PK: it.PK, SK: it.SK },
+						ConditionExpression: 'grantedBy = :by',
+						ExpressionAttributeValues: { ':by': SUBSCRIPTION_GRANTOR }
+					})
+				);
+				out.push({ systemId: (it.systemId as string | undefined) ?? null, role: it.role as string, outcome: 'revoked' });
+			} catch (err) {
+				if ((err as Error).name !== 'ConditionalCheckFailedException') throw err;
+			}
 		}
+		return out;
 	}
 
 	// --- vouchers -------------------------------------------------------------

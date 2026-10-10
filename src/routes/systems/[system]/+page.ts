@@ -33,7 +33,7 @@ export interface Voucher {
 
 export const load: PageLoad = ({ fetch, params }) =>
 	vpiLoad<{
-		system: { id: string; name: string; roles: string[]; implies: Record<string, string[]> };
+		system: { id: string; name: string; roles: string[]; implies: Record<string, string[]>; subscriberRole: string | null };
 		grants: Grant[];
 		vouchers: Voucher[];
 		root: boolean;
