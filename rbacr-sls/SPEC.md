@@ -139,7 +139,13 @@ and the README in sync with the code.
   description, the roles the person holds there and a link to its URL,
   on `/me` (each system the person holds roles in, so `/vpi/me` gives
   their cards) and after redeeming a voucher (V8). The system page edits
-  the card with a live preview. Description and screenshot are only
+  the card with a live preview. A system without a screenshot gets a
+  **generated cover**, drawn in the browser as SVG (nothing is fetched or
+  stored): an icon for what the system is for, picked from words in its
+  id and name, then its description (payments, conversations, analytics,
+  calendar, documents, learning, shop, people, security, media, games, or
+  a generic app), on colours derived from its id, so it never changes.
+  Description and screenshot are only
   shown, never interpreted: the description is text, not HTML. R12's
   status leaves them out.
 

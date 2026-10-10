@@ -15,9 +15,13 @@
 
 <script lang="ts">
 	import RoleName from '#lib/RoleName.svelte';
+	import { coverFor } from '#lib/cover.js';
 
 	let { card, roles = [] }: { card: Card; roles?: string[] } = $props();
 	let broken = $state(false);
+	// Without a screenshot, a cover drawn for what the system is for (R13).
+	let cover = $derived(coverFor(card));
+	let gradient = $derived(`cover-${card.id.replace(/[^a-z0-9_-]/g, '-')}`);
 </script>
 
 <article class="card">
@@ -30,7 +34,20 @@
 			onerror={() => (broken = true)}
 		/>
 	{:else}
-		<div class="placeholder" aria-hidden="true">{card.name.slice(0, 1).toUpperCase()}</div>
+		<svg class="cover" viewBox="0 0 320 180" role="img" aria-label="{card.name}: {cover.theme.label}">
+			<defs>
+				<linearGradient id={gradient} x1="0" y1="0" x2="1" y2="1">
+					<stop offset="0" stop-color="hsl({cover.hues[0]} 45% 38%)" />
+					<stop offset="1" stop-color="hsl({cover.hues[1]} 50% 20%)" />
+				</linearGradient>
+			</defs>
+			<rect width="320" height="180" fill="url(#{gradient})" />
+			<circle cx="270" cy="30" r="70" fill="#fff" opacity="0.06" />
+			<circle cx="40" cy="170" r="55" fill="#000" opacity="0.12" />
+			<g transform="translate(112 42) scale(4)" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.9">
+				{#each cover.theme.icon as d (d)}<path {d} />{/each}
+			</g>
+		</svg>
 	{/if}
 	<div class="body">
 		<h3>
@@ -60,7 +77,7 @@
 		min-width: 0;
 	}
 	img,
-	.placeholder {
+	.cover {
 		display: block;
 		width: 100%;
 		aspect-ratio: 16 / 9;
@@ -68,12 +85,6 @@
 		object-position: top;
 		border-bottom: 1px solid var(--line);
 		background: var(--bg);
-	}
-	.placeholder {
-		display: grid;
-		place-items: center;
-		font: 700 2.5rem ui-monospace, 'SF Mono', Menlo, monospace;
-		color: var(--line);
 	}
 	.body {
 		display: flex;

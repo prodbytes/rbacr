@@ -26,7 +26,9 @@ app on AWS Lambda. Run every command below from this folder
 - **System URLs.** A system can have a URL; role names on the pages link to
   it in a new tab, so you can follow a role into its system.
 - **System cards.** A system can have a description and a screenshot (an
-  image URL), set on its page. People see each system they hold roles in
+  image URL), set on its page; until it has a screenshot, the card shows
+  a cover generated from what the system is for (its name and
+  description). People see each system they hold roles in
   as a card, with a link into it, on `/me` and after redeeming a voucher.
 - **Maintenance mode.** Switched on from a system's page, the API gives
   nobody any role in that system (empty lists, every check denied, roots
