@@ -12,6 +12,8 @@ export const POST: RequestHandler = (event) =>
 		const email = str(body.email, 'email');
 		const systemId = optStr(body.systemId, 'systemId');
 		const role = str(body.role, 'role');
-		const allowed = await rbac.hasRole(actor, email, systemId, role);
-		return { email: email.toLowerCase(), systemId, role: role.toLowerCase(), allowed };
+		const { allowed, expiresAt } = await rbac.checkRole(actor, email, systemId, role);
+		// How long a "yes" may be cached (C3a): until the grants giving it end.
+		const ttl = expiresAt ? Math.max(0, Math.floor((expiresAt.getTime() - Date.now()) / 1000)) : null;
+		return { email: email.toLowerCase(), systemId, role: role.toLowerCase(), allowed, expiresAt: expiresAt?.toISOString() ?? null, ttl };
 	});

@@ -131,7 +131,7 @@ and access logs.
 curl -H "Authorization: Bearer $RBACR_TOKEN" -H "content-type: application/json" \
   -d '{"email":"ana@example.com","systemId":"presence","role":"premium"}' \
   https://rbacr.nu01.com/api/check
-# {"email":"ana@example.com","systemId":"presence","role":"premium","allowed":true}
+# {"email":"ana@example.com","systemId":"presence","role":"premium","allowed":true,"expiresAt":"2026-11-10T08:00:00.000Z","ttl":2592000}
 ```
 
 **Fetch all of a person's roles** in your system, for example at sign-in,
@@ -177,9 +177,13 @@ export async function hasRole(email: string, systemId: string, role: string): Pr
 - **`allowed: false`** means the person doesn't hold the role. A role or
   system that doesn't exist is a 404, not `false`, so typos surface (a
   non-root token asking about someone else gets 403 first).
+- **`allowed: true` says how long it holds**: `expiresAt` and `ttl`
+  (seconds) mark when the grants giving the role end, e.g. a subscriber's
+  billing period. Both are `null` when the role has no end date. Never
+  cache a "yes" beyond its `ttl`; revoking a grant can end it sooner.
 - **Fresh within about a second.** A grant or revocation can take up to a
   second to show (SPEC D3). If you cache answers, keep it short (a minute
-  or less) and never cache errors.
+  or less, and within the `ttl`) and never cache errors.
 - **Errors** are JSON `{ "error": "…" }`: 400 bad input, 401 missing,
   revoked or expired token (with `WWW-Authenticate: Bearer`), 403 asking
   beyond the token owner's reach, 404 unknown system or role. Fail closed:
