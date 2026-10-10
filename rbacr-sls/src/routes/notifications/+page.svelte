@@ -77,6 +77,29 @@
 	</table>
 {/if}
 
+<h2>Failed redeem attempts</h2>
+<p class="muted">The latest attempts to redeem a voucher that failed, unknown codes included.</p>
+{#if data.failures.length}
+	<table>
+		<thead><tr><th>Code</th><th>Who</th><th>When</th><th>Why</th></tr></thead>
+		<tbody>
+			{#each data.failures as f (f.id)}
+				<tr>
+					<td>
+						<code>{f.code || '—'}</code>
+						{#if f.known}<span class="muted">{f.systemId ?? 'global'}</span>{:else}<span class="badge">unknown</span>{/if}
+					</td>
+					<td>{f.email}</td>
+					<td>{formatDate(f.attemptedAt)}, {f.via === 'page' ? 'page' : 'API'}</td>
+					<td class="error">{f.status}: {f.reason}</td>
+				</tr>
+			{/each}
+		</tbody>
+	</table>
+{:else}
+	<p class="muted">None.</p>
+{/if}
+
 <style>
 	.badge.warning {
 		border-color: var(--warn);

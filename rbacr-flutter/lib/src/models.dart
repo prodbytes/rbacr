@@ -369,3 +369,55 @@ RoleMap _roleMap(Object? value) =>
     Map.unmodifiable((value as Map<String, Object?>).map((k, v) => MapEntry(k, _strings(v))));
 
 DateTime? _date(Object? value) => value == null ? null : DateTime.parse(value as String);
+
+/// A redeem attempt that failed (SPEC V9): who tried which code, when, how,
+/// and the answer they got.
+class RedeemFailure {
+  const RedeemFailure({
+    required this.id,
+    required this.code,
+    required this.known,
+    required this.systemId,
+    required this.email,
+    required this.attemptedAt,
+    required this.via,
+    required this.status,
+    required this.reason,
+  });
+
+  factory RedeemFailure.fromJson(Map<String, Object?> json) => RedeemFailure(
+    id: json['id'] as String,
+    code: json['code'] as String,
+    known: json['known'] as bool,
+    systemId: json['systemId'] as String?,
+    email: json['email'] as String,
+    attemptedAt: DateTime.parse(json['attemptedAt'] as String),
+    via: json['via'] as String,
+    status: (json['status'] as num).toInt(),
+    reason: json['reason'] as String,
+  );
+
+  final String id;
+
+  /// The voucher's code; for an unknown code, what was typed, normalized.
+  final String code;
+
+  /// Whether the code named a voucher (false: the attempt got 404).
+  final bool known;
+
+  /// The voucher's system; null for a global or unknown voucher.
+  final String? systemId;
+
+  /// Who tried.
+  final String email;
+  final DateTime attemptedAt;
+
+  /// `api` or `page`: through the external API or rbacr's own pages.
+  final String via;
+
+  /// The HTTP status the attempt got: 402, 404 or 409.
+  final int status;
+
+  /// The error message the attempt got.
+  final String reason;
+}

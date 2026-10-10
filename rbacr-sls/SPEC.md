@@ -245,7 +245,8 @@ and the README in sync with the code.
   list a voucher's events, newest first, with `GET
   /api/vouchers/:code/redemptions`, and on the pages by opening a voucher's
   uses. Redemptions recorded before V7 report only `email` and
-  `redeemedAt`. Attempts that fail (402, 404, 409) record nothing.
+  `redeemedAt`. Attempts that fail (402, 404, 409) grant and count
+  nothing, and are kept apart as RedeemFailures (V9).
 
 - **V8 Redeem links.** A voucher's link is `/redeem/<code>`; the voucher
   lists on a system's page and on `/global` copy it to the clipboard for
@@ -264,6 +265,21 @@ and the README in sync with the code.
   url, description, screenshotUrl, maintenance, roles }] }`, 404 unless
   they redeemed that voucher. Anyone who knows a code could already
   redeem it (V2); a link only saves typing it.
+
+- **V9 Failed redemptions.** Every redeem attempt that fails (402, 404
+  or 409, by the API or a page) is kept, for good, as a **RedeemFailure**:
+  an `id`, the `code` (the voucher's, or for an unknown code what was
+  typed, normalized as in V2 and cut to 64 characters), whether it named a
+  voucher (`known`), the voucher's `systemId` (`null` when global or
+  unknown), who tried (`email`), when (`attemptedAt`), how (`via`) and
+  the answer (`status`, `reason`). It is also logged, without the
+  address. Recording it never changes the answer: if it can't be written,
+  that is logged and the attempt fails as it would have. Roots list a
+  voucher's failures, newest first, with `GET /api/vouchers/:code/failures`
+  (404 for an unknown voucher), and the latest 100 of all vouchers,
+  unknown codes included, with `GET /api/redeem-failures`; on the pages, a
+  voucher's uses show its failed attempts, and `/notifications` the latest
+  ones.
 
 ## Notifications
 
@@ -318,7 +334,8 @@ Nothing in rbacr is physically deleted, so every change can be audited.
   | Sign out | the session | `revokedAt`, `revokedBy` |
 
   `…By` is the acting root's (or the token or session owner's) address, or
-  `stripe` for the subscription sync (Q3). Redemptions (RedeemEvents, V7) are never deleted.
+  `stripe` for the subscription sync (Q3). Redemptions (RedeemEvents, V7)
+  and failed redemptions (RedeemFailures, V9) are never deleted.
   Expired tokens stay too; the main table has no TTL. The one exception is
   sessions: DynamoDB purges each one the retention period after it
   expires (S3).
@@ -532,6 +549,8 @@ ISO-8601 strings in UTC.
 | `DELETE /api/global-grants` | `{ role, grantee }` | 204 (roots; revokes it, L1) |
 | `DELETE /api/vouchers/:code` | — | the disabled voucher, with `disabledBy` |
 | `GET /api/vouchers/:code/redemptions` | — | `{ redemptions: [{ id, code, systemId, roles, discountPercent, voucherCreatedBy, email, redeemedAt, via, grants: [{ systemId, role, outcome, replaced }] }] }`, newest first (roots, V7) |
+| `GET /api/vouchers/:code/failures` | — | `{ failures: [{ id, code, known, systemId, email, attemptedAt, via, status, reason }] }`, newest first (roots, V9) |
+| `GET /api/redeem-failures` | — | `{ failures: [...] }`, the latest 100 of every voucher, unknown codes included, newest first (roots, V9) |
 | `GET /api/systems` | — | `{ systems: [{ id, name, roles, implies: { role: [role] }, subscriberRole, everyone: [role], url, maintenance, description, screenshotUrl }] }` (only manageable systems; `implies` lists direct implications) |
 | `POST /api/systems` | `{ id, name?, roles?: [string] }` | 201, the system with exactly the given roles (R4) |
 | `GET /api/systems/:id` | — | `{ id, name, roles, implies, subscriberRole, everyone, url, maintenance, description, screenshotUrl }` |
@@ -585,7 +604,8 @@ frontend (`src/lib/vpi.ts`) is its only client. The routes are
 `PUT|DELETE /vpi/systems/:id/roles/:role`, `POST|DELETE /vpi/systems/:id/grants`,
 `POST /vpi/systems/:id/vouchers`, `DELETE /vpi/vouchers/:code`,
 `GET /vpi/global`, `POST|DELETE /vpi/global/grants`,
-`POST /vpi/global/vouchers`, `GET /vpi/vouchers/:code/redemptions`,
+`POST /vpi/global/vouchers`, `GET /vpi/vouchers/:code/redemptions` (with
+its `failures`, V9), `GET /vpi/redeem-failures`,
 `GET /vpi/notifications`, `POST /vpi/notifications/check` and
 `DELETE /vpi/notifications/:id` (N1-N4). `GET /vpi/session` gives roots
 the number of open notifications. They return the same errors as `/api`; a
@@ -603,7 +623,8 @@ id), `/systems/:id` (its URL; its card, R13; its roles, each marked for everyone
 and with the roles it implies, added and removed one at a time; grants;
 vouchers) `/global` (roots: global
 grants and vouchers) and `/notifications` (roots: open notifications, with
-a check-now button and dismissal, then the resolved and dismissed ones). Roles are always picked from those that exist,
+a check-now button and dismissal, then the resolved and dismissed ones,
+and the latest failed redeem attempts, V9). Roles are always picked from those that exist,
 never typed (except a new role's name): grant and subscriber forms offer a
 list, voucher forms checkboxes, of the system's roles, or on `/global` of
 every role some system has. Wherever a system's role names are printed

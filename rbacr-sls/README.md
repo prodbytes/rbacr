@@ -58,6 +58,10 @@ app on AWS Lambda. Run every command below from this folder
   systems they open. Every redemption is kept as a **RedeemEvent** (who, when, from
   the API or the page, and what it did to each role); open a voucher's
   uses on its page to see them, or `GET /api/vouchers/:code/redemptions`.
+  Failed attempts (unknown code, expired, used up, already redeemed, needs
+  payment) are kept too, as **RedeemFailures**: under the voucher's uses,
+  the latest on `/notifications`, or `GET /api/vouchers/:code/failures` and
+  `GET /api/redeem-failures`.
 - **Notifications** warn roots about things that need attention, on
   `/notifications` (the navigation shows how many are open). rbacr checks
   each time a root signs in, or on demand from that page. For now it warns

@@ -77,6 +77,7 @@ await admin.disableVoucher(voucher.code); // DELETE: disabled for good (disabled
 | `createVoucher(systemId?, roles or role, code?, discountPercent?, startsAt?, endsAt?, maxUses?)` | `POST /api/systems/:id/vouchers`, or `POST /api/vouchers` without a system | the `Voucher` (roots) |
 | `listVouchers(systemId?)` | `GET /api/systems/:id/vouchers`, or `GET /api/vouchers` | the `Voucher`s, newest first (roots) |
 | `listRedemptions(code)` | `GET /api/vouchers/:code/redemptions` | the `RedeemEvent`s, newest first (roots) |
+| `listRedeemFailures({code})` | `GET /api/vouchers/:code/failures`, or without `code` `GET /api/redeem-failures` | the `RedeemFailure`s (failed attempts, V9), newest first (roots) |
 | `disableVoucher(code)` | `DELETE /api/vouchers/:code` | the disabled `Voucher` (roots) |
 
 Errors are `RbacrException`s with rbacr's message and `statusCode`
