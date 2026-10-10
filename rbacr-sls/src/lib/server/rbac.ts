@@ -1,6 +1,7 @@
 import { GetCommand, PutCommand, TransactWriteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { cancellationReasons, queryAll, queryIndex, queryPrefix, type Item, type Table } from './dynamo';
 import { Allowlist, granteesFor, normalizeEmail, parseGrantee } from './identity';
+import { MAX_CODE_LENGTH, MIN_CODE_LENGTH, compactVoucherCode, normalizeVoucherCode, suggestVoucherCode } from '../vouchers';
 
 /**
  * The only built-in role (R1, R2): held by every identity on RBACR_ROOT_LIST,
@@ -8,6 +9,16 @@ import { Allowlist, granteesFor, normalizeEmail, parseGrantee } from './identity
  * rbacr. Every other role, and every implication, is registered data.
  */
 export const ROOT_ROLE = 'root';
+
+/**
+ * The grantee of a role every identity holds (R9): its grant is to this,
+ * not to an address or domain. Grants to it come only from the role's
+ * `everyone` property, never from the grants API.
+ */
+export const EVERYONE = '*';
+
+/** Longest system URL accepted. */
+const MAX_URL_LENGTH = 2048;
 
 /** The `grantedBy` of grants made by the paid-subscription sync (Q2). */
 export const SUBSCRIPTION_GRANTOR = 'stripe';
@@ -18,6 +29,8 @@ const NAME_RE = /^[a-z0-9][a-z0-9_.:-]{0,62}$/;
 export interface PaymentRequired {
 	code: string;
 	systemId: string | null;
+	roles: string[];
+	/** The first of `roles`, for clients that predate several roles per voucher. */
 	role: string;
 	discountPercent: number;
 }
@@ -57,6 +70,10 @@ export interface System {
 	implies: Record<string, string[]>;
 	/** The catalog role paying Substack subscribers hold in this system (Q2), or null for none. */
 	subscriberRole: string | null;
+	/** Roles every identity holds here (R9), sorted. */
+	everyone: string[];
+	/** Where the system's users go (http or https), which pages link role names to; null for none. */
+	url: string | null;
 }
 
 /** A role check (C3, C3a): whether the role is held, and until when at most (null: no end). */
@@ -130,8 +147,11 @@ export interface GrantWithImplied extends Grant {
 export interface Voucher {
 	code: string;
 	systemId: string | null;
+	/** The roles redeeming it grants, sorted (V1). */
+	roles: string[];
+	/** The first of `roles`, for clients that predate several roles per voucher. */
 	role: string;
-	/** 100 grants the role on redemption; anything lower requires payment (not available yet). */
+	/** 100 grants the roles on redemption; anything lower requires payment (not available yet). */
 	discountPercent: number;
 	startsAt: Date | null;
 	endsAt: Date | null;
@@ -147,7 +167,9 @@ export interface Voucher {
 export interface VoucherInput {
 	/** null for a global voucher (roots only). */
 	systemId: string | null;
-	role: string;
+	roles: string[];
+	/** The code to give it; omitted, one is made up (V2). */
+	code?: string | null;
 	/** 0-100, default 100. */
 	discountPercent?: number | null;
 	startsAt?: Date | null;
@@ -177,23 +199,27 @@ export function validName(kind: string, raw: string): string {
 	return name;
 }
 
+/** An absolute http or https URL, as given; anything else (javascript:, data:, relative) is refused. */
+export function validUrl(raw: string): string {
+	const value = raw.trim();
+	let url: URL;
+	try {
+		url = new URL(value);
+	} catch {
+		throw badRequest(`Invalid URL "${raw}"`);
+	}
+	if (url.protocol !== 'https:' && url.protocol !== 'http:') throw badRequest('A system URL must start with https:// or http://');
+	if (value.length > MAX_URL_LENGTH) throw badRequest(`A system URL can have at most ${MAX_URL_LENGTH} characters`);
+	return value;
+}
+
 /** Management (systems, catalogs, grants, vouchers) is for roots only (P1). */
 function requireRoot(actor: Actor, message = 'Only roots can do this'): void {
 	if (!actor.root) throw forbidden(message);
 }
 
-const VOUCHER_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // 32 symbols, no 0/O/1/I
-
-export function generateVoucherCode(): string {
-	const bytes = crypto.getRandomValues(new Uint8Array(16));
-	const chars = Array.from(bytes, (b) => VOUCHER_ALPHABET[b & 31]).join('');
-	return chars.match(/.{4}/g)!.join('-');
-}
-
-export function normalizeVoucherCode(raw: string): string {
-	const chars = raw.toUpperCase().replace(/[^A-Z0-9]/g, '');
-	return chars.match(/.{1,4}/g)?.join('-') ?? '';
-}
+/** Most roles one voucher may grant: redeeming writes them all in one transaction. */
+export const MAX_VOUCHER_ROLES = 20;
 
 /**
  * Item layout in the table (src/lib/server/dynamo.ts). Dates are ISO strings;
@@ -205,8 +231,10 @@ export function normalizeVoucherCode(raw: string): string {
  *   grant       PK SYS#<id>       SK GRANT#<role>#<grantee>    GSI1 GRANTEE#<grantee> / SYS#<id>#<role>
  *   global grant PK GLOBAL        SK GRANT#<role>#<grantee>    GSI1 GRANTEE#<grantee> / GLOBAL#<role>
  *               (grants carry optional startsAt / endsAt, G1)
- *   voucher     PK VOUCHER#<code> SK META                      GSI1 VOUCHERS#<id, or * if global> / <createdAt>#<code>
- *   redemption  PK VOUCHER#<code> SK REDEEMED#<email>
+ *   voucher     PK VOUCHER#<key>  SK META                      GSI1 VOUCHERS#<id, or * if global> / <createdAt>#<code>
+ *   redemption  PK VOUCHER#<key>  SK REDEEMED#<email>
+ *               (<key> is the code's letters and digits, V2; vouchers made before
+ *               custom codes are keyed by their XXXX-XXXX-XXXX-XXXX code)
  *   history     PK as the item   SK HIST#<its SK>#<when it was deleted>  (L4)
  *
  * Nothing is deleted (L1): a revoked grant carries revokedAt / revokedBy, a
@@ -226,7 +254,14 @@ const grantKey = (systemId: string | null, role: string, grantee: string) => ({
 	PK: systemId === null ? GLOBAL_PK : sysPK(systemId),
 	SK: `GRANT#${role}#${grantee}`
 });
-const voucherKey = (code: string) => ({ PK: `VOUCHER#${code}`, SK: 'META' });
+const voucherKey = (code: string) => ({ PK: `VOUCHER#${compactVoucherCode(code)}`, SK: 'META' });
+/** Where a voucher made before custom codes lives: its 16 random characters in groups of four. */
+const legacyVoucherKey = (code: string) => {
+	const compact = compactVoucherCode(code);
+	return compact.length === 16 ? { PK: `VOUCHER#${compact.match(/.{4}/g)!.join('-')}`, SK: 'META' } : null;
+};
+/** A voucher's roles; vouchers made before several roles per voucher hold one `role`. */
+const rolesOfVoucher = (it: Item): string[] => (it.roles as string[] | undefined) ?? [it.role as string];
 const iso = (d: Date | null | undefined) => (d ? d.toISOString() : undefined);
 const date = (v: unknown) => (v ? new Date(v as string) : null);
 
@@ -321,7 +356,8 @@ const toGrant = (it: Item): Grant => ({
 const toVoucher = (it: Item): Voucher => ({
 	code: it.code as string,
 	systemId: (it.systemId as string | undefined) ?? null,
-	role: it.role as string,
+	roles: rolesOfVoucher(it),
+	role: rolesOfVoucher(it)[0],
 	discountPercent: it.discountPercent as number,
 	startsAt: date(it.startsAt),
 	endsAt: date(it.endsAt),
@@ -439,7 +475,8 @@ export class Rbac {
 	 */
 	private async grantItemsOf(email: string): Promise<Item[]> {
 		const now = this.now();
-		const pages = await Promise.all(granteesFor(email).map((g) => queryIndex(this.table, `GRANTEE#${g}`)));
+		const grantees = [...granteesFor(email), EVERYONE];
+		const pages = await Promise.all(grantees.map((g) => queryIndex(this.table, `GRANTEE#${g}`)));
 		return pages.flat().filter((it) => live(it) && it.role !== ROOT_ROLE && grantStatus(toGrant(it), now) === 'active');
 	}
 
@@ -560,13 +597,15 @@ export class Rbac {
 		for (const it of items.filter((it) => (it.SK as string).startsWith('IMPL#'))) {
 			(implies[it.role as string] ??= []).push(it.implies as string);
 		}
-		const roles = items.filter((it) => (it.SK as string).startsWith('ROLE#')).map((it) => it.name as string);
+		const roleItems = items.filter((it) => (it.SK as string).startsWith('ROLE#'));
 		return {
 			id: systemId,
 			name: meta.name as string,
-			roles,
+			roles: roleItems.map((it) => it.name as string),
 			implies,
 			subscriberRole: (meta.subscriberRole as string | undefined) ?? null,
+			everyone: roleItems.filter((it) => it.everyone === true).map((it) => it.name as string),
+			url: (meta.url as string | undefined) ?? null,
 			implVersion: (meta.implVersion as number) ?? 0
 		};
 	}
@@ -618,7 +657,7 @@ export class Rbac {
 			}))
 		]);
 		if (reasons) throw new RbacError(409, `System "${id}" already exists`);
-		return { id, name, roles: [...roles].sort(), implies: {}, subscriberRole: null };
+		return { id, name, roles: [...roles].sort(), implies: {}, subscriberRole: null, everyone: [], url: null };
 	}
 
 	/**
@@ -712,7 +751,7 @@ export class Rbac {
 		await this.mark(grants, 'revoked', actor.email, at);
 		await this.mark(implications, 'removed', actor.email, at);
 		await this.clearSubscriberRole(systemId, role);
-		const vouchers = (await queryIndex(this.table, `VOUCHERS#${systemId}`)).filter((it) => it.role === role);
+		const vouchers = (await queryIndex(this.table, `VOUCHERS#${systemId}`)).filter((it) => rolesOfVoucher(it).includes(role));
 		await this.disableVouchers(vouchers, actor.email, at);
 	}
 
@@ -773,6 +812,119 @@ export class Rbac {
 		} catch (err) {
 			if ((err as Error).name !== 'ConditionalCheckFailedException') throw err;
 		}
+	}
+
+	/** Applies the system settings given (Q2, R10); at least one is required. */
+	async configureSystem(
+		actor: Actor,
+		systemId: string,
+		settings: { subscriberRole?: string | null; url?: string | null }
+	): Promise<System> {
+		if (settings.subscriberRole === undefined && settings.url === undefined) {
+			throw badRequest('Give "subscriberRole" or "url" (null clears either)');
+		}
+		let system: System | undefined;
+		if (settings.subscriberRole !== undefined) system = await this.setSubscriberRole(actor, systemId, settings.subscriberRole);
+		if (settings.url !== undefined) system = await this.setSystemUrl(actor, systemId, settings.url);
+		return system!;
+	}
+
+	/** Applies the role settings given (R7, R9); at least one is required. */
+	async configureRole(
+		actor: Actor,
+		systemId: string,
+		role: string,
+		settings: { implies?: string[]; everyone?: boolean }
+	): Promise<System> {
+		if (settings.implies === undefined && settings.everyone === undefined) {
+			throw badRequest('Give "implies" or "everyone"');
+		}
+		let system: System | undefined;
+		if (settings.implies !== undefined) system = await this.setImplications(actor, systemId, role, settings.implies);
+		if (settings.everyone !== undefined) system = await this.setEveryone(actor, systemId, role, settings.everyone);
+		return system!;
+	}
+
+	/**
+	 * Makes every identity hold `role` in a system, or stops it (R9): a grant
+	 * to EVERYONE, written together with the role's `everyone` flag, which the
+	 * catalog shows. Removing the role revokes that grant like any other (L3).
+	 */
+	async setEveryone(actor: Actor, systemId: string, rawRole: string, everyone: boolean): Promise<System> {
+		requireRoot(actor, 'Only roots can configure roles');
+		const role = rawRole.trim().toLowerCase();
+		const flag = {
+			Update: {
+				TableName: this.table.name,
+				Key: roleKey(systemId, role),
+				UpdateExpression: everyone ? 'SET everyone = :yes' : 'REMOVE everyone',
+				ConditionExpression: LIVE_ROLE,
+				...(everyone && { ExpressionAttributeValues: { ':yes': true } })
+			}
+		};
+		for (let attempt = 0; attempt < 3; attempt++) {
+			const existing = await this.get(grantKey(systemId, role, EVERYONE));
+			const held = existing && live(existing) ? toGrant(existing) : null;
+			let change;
+			if (everyone) {
+				// A grant that already gives the role now and forever is kept.
+				const forever = { startsAt: null, endsAt: null };
+				if (!(held && sameValidity(held, forever) && grantStatus(held, this.now()) === 'active')) {
+					await this.archive(existing);
+					const item = grantItem(systemId, role, EVERYONE, actor.email, this.now(), forever);
+					change = { Put: { TableName: this.table.name, Item: item, ...unchangedSince(existing) } };
+				}
+			} else if (held) {
+				change = {
+					Update: {
+						TableName: this.table.name,
+						Key: grantKey(systemId, role, EVERYONE),
+						UpdateExpression: 'SET revokedAt = :at, revokedBy = :by',
+						ConditionExpression: 'attribute_exists(PK) AND attribute_not_exists(revokedAt)',
+						ExpressionAttributeValues: { ':at': this.now().toISOString(), ':by': actor.email }
+					}
+				};
+			}
+			const reasons = await this.transact([flag, ...(change ? [change] : [])]);
+			if (!reasons) return this.getSystem(actor, systemId);
+			if (reasons[0] === 'ConditionalCheckFailed') throw notFound(`Role "${role}" not found in "${systemId}"`);
+			// Otherwise the grant changed meanwhile: read it again.
+		}
+		throw new RbacError(409, 'The role changed meanwhile; try again');
+	}
+
+	/**
+	 * Sets where a system's users go (an http or https URL), which the pages
+	 * link its role names to, or none (null).
+	 */
+	async setSystemUrl(actor: Actor, systemId: string, rawUrl: string | null): Promise<System> {
+		requireRoot(actor, 'Only roots can configure systems');
+		const url = rawUrl === null ? null : validUrl(rawUrl);
+		try {
+			await this.table.doc.send(
+				new UpdateCommand({
+					TableName: this.table.name,
+					Key: { PK: sysPK(systemId), SK: 'META' },
+					UpdateExpression: url === null ? 'REMOVE #url' : 'SET #url = :url',
+					ConditionExpression: LIVE_SYSTEM,
+					ExpressionAttributeNames: { '#url': 'url' },
+					...(url !== null && { ExpressionAttributeValues: { ':url': url } })
+				})
+			);
+		} catch (err) {
+			if ((err as Error).name === 'ConditionalCheckFailedException') throw notFound(`System "${systemId}" not found`);
+			throw err;
+		}
+		return this.getSystem(actor, systemId);
+	}
+
+	/**
+	 * The URLs of the given systems that have one (anyone may ask: the pages
+	 * link the roles a person holds to their systems).
+	 */
+	async systemUrls(systemIds: string[]): Promise<Record<string, string>> {
+		const metas = await Promise.all([...new Set(systemIds)].map((id) => this.get({ PK: sysPK(id), SK: 'META' })));
+		return Object.fromEntries(metas.filter((m) => m && live(m) && m.url).map((m) => [m!.id as string, m!.url as string]));
 	}
 
 	/**
@@ -857,7 +1009,9 @@ export class Rbac {
 
 	async listGrants(actor: Actor, systemId: string): Promise<GrantWithImplied[]> {
 		await this.getSystem(actor, systemId);
-		return this.withImpliedRoles((await queryPrefix(this.table, sysPK(systemId), 'GRANT#')).filter(live).map(toGrant));
+		// Grants to everyone show as their role's `everyone` property instead (R9).
+		const items = (await queryPrefix(this.table, sysPK(systemId), 'GRANT#')).filter((it) => live(it) && it.grantee !== EVERYONE);
+		return this.withImpliedRoles(items.map(toGrant));
 	}
 
 	private async withImplied(grant: Grant): Promise<GrantWithImplied> {
@@ -1040,8 +1194,10 @@ export class Rbac {
 
 	async createVoucher(actor: Actor, input: VoucherInput): Promise<Voucher> {
 		const { systemId } = input;
-		const role = systemId === null ? validName('role', input.role) : input.role;
 		requireRoot(actor, 'Only roots can create vouchers');
+		const roles = [...new Set(input.roles.map((r) => validName('role', r)))].sort();
+		if (!roles.length) throw badRequest('A voucher needs at least one role');
+		if (roles.length > MAX_VOUCHER_ROLES) throw badRequest(`A voucher can grant at most ${MAX_VOUCHER_ROLES} roles`);
 		const { startsAt, endsAt } = validValidity(input);
 		const maxUses = input.maxUses ?? null;
 		const discountPercent = input.discountPercent ?? 100;
@@ -1051,42 +1207,60 @@ export class Rbac {
 		if (maxUses !== null && (!Number.isInteger(maxUses) || maxUses < 1)) {
 			throw badRequest('Usage count must be a positive integer');
 		}
-		const code = generateVoucherCode();
-		const createdAt = this.now().toISOString();
-		const item: Item = {
-			...voucherKey(code),
-			GSI1PK: `VOUCHERS#${systemId ?? GLOBAL_VOUCHERS}`,
-			GSI1SK: `${createdAt}#${code}`,
-			code,
-			systemId: systemId ?? undefined,
-			role,
-			discountPercent,
-			startsAt: iso(startsAt),
-			endsAt: iso(endsAt),
-			maxUses: maxUses ?? undefined,
-			uses: 0,
-			createdBy: actor.email,
-			createdAt
-		};
-		const reasons = await this.transact([
-			...(systemId === null
-				? []
-				: [
-						{
-							ConditionCheck: {
-								TableName: this.table.name,
-								Key: roleKey(systemId, role),
-								ConditionExpression: LIVE_ROLE
-							}
-						}
-					]),
-			{ Put: { TableName: this.table.name, Item: item, ConditionExpression: 'attribute_not_exists(PK)' } }
-		]);
-		if (reasons && systemId !== null && reasons[0] === 'ConditionalCheckFailed') {
-			throw notFound(`Role "${role}" not found in "${systemId}"`);
+		const custom = input.code ? normalizeVoucherCode(input.code) : null;
+		if (custom !== null) {
+			const length = compactVoucherCode(custom).length;
+			if (length < MIN_CODE_LENGTH || length > MAX_CODE_LENGTH) {
+				throw badRequest(`A code needs ${MIN_CODE_LENGTH} to ${MAX_CODE_LENGTH} letters and digits`);
+			}
 		}
-		if (reasons) throw new RbacError(409, 'Voucher code collision; try again');
-		return toVoucher(item);
+		const createdAt = this.now();
+		// A made-up code is retried on the (unlikely) clash with an existing one.
+		for (let attempt = 0; attempt < (custom ? 1 : 3); attempt++) {
+			const code = custom ?? suggestVoucherCode(createdAt);
+			const legacy = legacyVoucherKey(code);
+			const item: Item = {
+				...voucherKey(code),
+				GSI1PK: `VOUCHERS#${systemId ?? GLOBAL_VOUCHERS}`,
+				GSI1SK: `${createdAt.toISOString()}#${code}`,
+				code,
+				systemId: systemId ?? undefined,
+				roles,
+				// Read by versions that knew one role per voucher.
+				role: roles[0],
+				discountPercent,
+				startsAt: iso(startsAt),
+				endsAt: iso(endsAt),
+				maxUses: maxUses ?? undefined,
+				uses: 0,
+				createdBy: actor.email,
+				createdAt: createdAt.toISOString()
+			};
+			const reasons = await this.transact([
+				...(systemId === null
+					? []
+					: roles.map((role) => ({
+							ConditionCheck: { TableName: this.table.name, Key: roleKey(systemId, role), ConditionExpression: LIVE_ROLE }
+						}))),
+				// Codes are unique however they were keyed (V2).
+				...(legacy
+					? [{ ConditionCheck: { TableName: this.table.name, Key: legacy, ConditionExpression: 'attribute_not_exists(PK)' } }]
+					: []),
+				{ Put: { TableName: this.table.name, Item: item, ConditionExpression: 'attribute_not_exists(PK)' } }
+			]);
+			if (!reasons) return toVoucher(item);
+			const missing = systemId === null ? -1 : reasons.slice(0, roles.length).indexOf('ConditionalCheckFailed');
+			if (missing >= 0) throw notFound(`Role "${roles[missing]}" not found in "${systemId}"`);
+			if (custom) throw new RbacError(409, `A voucher with the code ${custom} already exists`);
+		}
+		throw new RbacError(409, 'Voucher code collision; try again');
+	}
+
+	/** The voucher a code names, however it is typed and whenever it was made (V2). */
+	private async voucherItem(rawCode: string): Promise<Item | undefined> {
+		if (!compactVoucherCode(rawCode)) return undefined;
+		const legacy = legacyVoucherKey(rawCode);
+		return (await this.get(voucherKey(rawCode))) ?? (legacy ? await this.get(legacy) : undefined);
 	}
 
 	/** Global vouchers (roots only), newest first. */
@@ -1103,15 +1277,14 @@ export class Rbac {
 
 	async disableVoucher(actor: Actor, rawCode: string): Promise<Voucher> {
 		requireRoot(actor, 'Only roots can disable vouchers');
-		const code = normalizeVoucherCode(rawCode);
-		const existing = code ? await this.get(voucherKey(code)) : undefined;
+		const existing = await this.voucherItem(rawCode);
 		if (!existing) {
 			throw notFound('Voucher not found');
 		}
 		const { Attributes } = await this.table.doc.send(
 			new UpdateCommand({
 				TableName: this.table.name,
-				Key: voucherKey(code),
+				Key: { PK: existing.PK, SK: existing.SK },
 				UpdateExpression: 'SET disabledAt = if_not_exists(disabledAt, :now), disabledBy = if_not_exists(disabledBy, :by)',
 				ConditionExpression: 'attribute_exists(PK)',
 				ExpressionAttributeValues: { ':now': this.now().toISOString(), ':by': actor.email },
@@ -1122,17 +1295,16 @@ export class Rbac {
 	}
 
 	/**
-	 * Redeems a voucher for `email`, granting its role (globally for a global
-	 * voucher). Each identity can redeem a given voucher once; counting the
-	 * use, recording the redemption and granting happen in one transaction
-	 * whose conditions keep uses within maxUses. The grant starts now and
-	 * never ends; it replaces an existing grant of that role unless that one
-	 * already gives it now and forever (G3). A voucher with less than 100%
-	 * discount needs payment, which isn't available yet: it fails with 402 and
-	 * the voucher's terms, recording nothing.
+	 * Redeems a voucher for `email`, granting each of its roles (globally for
+	 * a global voucher). Each identity can redeem a given voucher once;
+	 * counting the use, recording the redemption and granting happen in one
+	 * transaction whose conditions keep uses within maxUses. The grants start
+	 * now and never end; each replaces an existing grant of its role unless
+	 * that one already gives it now and forever (G3). A voucher with less
+	 * than 100% discount needs payment, which isn't available yet: it fails
+	 * with 402 and the voucher's terms, recording nothing.
 	 */
-	async redeemVoucher(email: string, rawCode: string): Promise<GrantWithImplied> {
-		const code = normalizeVoucherCode(rawCode);
+	async redeemVoucher(email: string, rawCode: string): Promise<GrantWithImplied[]> {
 		const now = this.now();
 		const reasonsByStatus: Record<Exclude<VoucherStatus, 'active'>, string> = {
 			disabled: 'This voucher has been disabled',
@@ -1147,24 +1319,32 @@ export class Rbac {
 			if (status !== 'active') throw new RbacError(409, reasonsByStatus[status]);
 			return voucher;
 		};
-		const voucher = requireActive(code ? await this.get(voucherKey(code)) : undefined);
+		const item = await this.voucherItem(rawCode);
+		const voucher = requireActive(item);
+		const key = { PK: item!.PK, SK: item!.SK };
 		if (voucher.discountPercent < 100) {
+			const { code, systemId, roles, role, discountPercent } = voucher;
 			throw new RbacError(402, 'This voucher requires payment, which is not available yet', {
-				payment: { code, systemId: voucher.systemId, role: voucher.role, discountPercent: voucher.discountPercent }
+				payment: { code, systemId, roles, role, discountPercent }
 			});
 		}
 		const forever = { startsAt: null, endsAt: null };
-		const grant = grantItem(voucher.systemId, voucher.role, email, voucher.createdBy, now, forever, code);
+		const grants = voucher.roles.map((role) =>
+			grantItem(voucher.systemId, role, email, voucher.createdBy, now, forever, voucher.code)
+		);
 		for (let attempt = 0; attempt < 2; attempt++) {
-			const found = await this.get({ PK: grant.PK, SK: grant.SK });
-			const previous = found && live(found) ? toGrant(found) : null;
-			await this.archive(found);
-			const kept = previous && previous.endsAt === null && grantStatus(previous, now) === 'active' ? previous : null;
+			const found = await Promise.all(grants.map((g) => this.get({ PK: g.PK, SK: g.SK })));
+			for (const f of found) await this.archive(f);
+			// A grant that already gives its role now and forever is kept.
+			const kept = found.map((f) => {
+				const previous = f && live(f) ? toGrant(f) : null;
+				return previous && previous.endsAt === null && grantStatus(previous, now) === 'active' ? previous : null;
+			});
 			const reasons = await this.transact([
 				{
 					Update: {
 						TableName: this.table.name,
-						Key: voucherKey(code),
+						Key: key,
 						UpdateExpression: 'SET uses = uses + :one',
 						ConditionExpression:
 							'attribute_exists(PK) AND attribute_not_exists(disabledAt) AND (attribute_not_exists(maxUses) OR uses < maxUses)',
@@ -1174,20 +1354,21 @@ export class Rbac {
 				{
 					Put: {
 						TableName: this.table.name,
-						Item: { PK: voucherKey(code).PK, SK: `REDEEMED#${email}`, email, redeemedAt: now.toISOString() },
+						Item: { PK: key.PK, SK: `REDEEMED#${email}`, email, redeemedAt: now.toISOString() },
 						ConditionExpression: 'attribute_not_exists(PK)'
 					}
 				},
-				// A grant that already gives the role now and forever is kept.
-				...(kept ? [] : [{ Put: { TableName: this.table.name, Item: grant, ...unchangedSince(found) } }])
+				...grants.flatMap((grant, i) =>
+					kept[i] ? [] : [{ Put: { TableName: this.table.name, Item: grant, ...unchangedSince(found[i]) } }]
+				)
 			]);
-			if (!reasons) return this.withImplied(kept ?? toGrant(grant));
+			if (!reasons) return this.withImpliedRoles(grants.map((g, i) => kept[i] ?? toGrant(g)));
 			if (reasons[0] === 'ConditionalCheckFailed') {
-				requireActive(await this.get(voucherKey(code)));
+				requireActive(await this.get(key));
 				throw new RbacError(409, 'This voucher has no uses left');
 			}
 			if (reasons[1] === 'ConditionalCheckFailed') throw new RbacError(409, 'You have already redeemed this voucher');
-			// Otherwise the grant changed meanwhile: retry with it.
+			// Otherwise a grant changed meanwhile: retry with it.
 		}
 		throw new RbacError(409, 'The voucher changed meanwhile; try again');
 	}

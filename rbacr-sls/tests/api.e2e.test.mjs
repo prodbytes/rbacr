@@ -7,7 +7,7 @@
 //
 //   RBACR_E2E_URL=http://127.0.0.1:5173 npm run test:e2e
 import assert from 'node:assert/strict';
-import { describe, it } from 'node:test';
+import { after, describe, it } from 'node:test';
 
 const BASE = process.env.RBACR_E2E_URL ?? 'http://127.0.0.1:5173';
 const ROOT = process.env.RBACR_E2E_ROOT ?? 'root@e2e.test';
@@ -48,16 +48,28 @@ function client(token) {
 	return (method, path, body) => call(path, { method, body, headers: { authorization: `Bearer ${token}` } });
 }
 
+/** Every token this run minted, revoked when it ends (see `after` below). */
+const minted = [];
+
 /** Signs in and mints a personal API token through the VPI. */
 async function tokenFor(email) {
 	const cookie = await login(email);
 	const res = await vpi(cookie, 'POST', '/tokens', { name: 'e2e', expiresInDays: 1 });
 	assert.equal(res.status, 201, JSON.stringify(res.body));
+	minted.push({ cookie, id: res.body.id });
 	return { cookie, token: res.body.token, id: res.body.id };
 }
 
 describe('rbacr API', { skip: !(await fetch(`${BASE}/health`).then((r) => r.ok, () => false)) && `no server at ${BASE}` }, () => {
 	let root, admin, user, other, voucher, creds;
+	/** Roles in the system under test only: other systems' roles for everyone (R9) apply to these identities too. */
+	const here = (me) => ({ [SYSTEM]: me.body.roles[SYSTEM] });
+
+	// Revoke the tokens this run minted, even if it failed midway, so repeated
+	// runs stay under the per-person limit (T1).
+	after(async () => {
+		for (const t of minted) await vpi(t.cookie, 'DELETE', `/tokens/${t.id}`);
+	});
 
 	it('reports itself healthy, with its configuration', async () => {
 		const res = await call('/health');
@@ -115,7 +127,7 @@ describe('rbacr API', { skip: !(await fetch(`${BASE}/health`).then((r) => r.ok, 
 
 	it('gives a role named admin no powers: only roots manage', async () => {
 		const me = await admin('GET', '/api/me');
-		assert.deepEqual(me.body.roles, { [SYSTEM]: ['admin'] });
+		assert.deepEqual(here(me), { [SYSTEM]: ['admin'] });
 		assert.equal(me.body.adminOf, undefined);
 		assert.deepEqual((await admin('GET', '/api/systems')).body, { systems: [] });
 		assert.equal((await admin('POST', `/api/systems/${SYSTEM}/grants`, { role: 'viewer', grantee: USER })).status, 403);
@@ -133,7 +145,7 @@ describe('rbacr API', { skip: !(await fetch(`${BASE}/health`).then((r) => r.ok, 
 		const redeemed = await user('POST', '/api/vouchers/redeem', { code: voucher.toLowerCase() });
 		assert.equal(redeemed.status, 200);
 		assert.deepEqual(redeemed.body.impliedRoles, []);
-		assert.deepEqual((await user('GET', '/api/me')).body.roles, { [SYSTEM]: ['viewer'] });
+		assert.deepEqual(here(await user('GET', '/api/me')), { [SYSTEM]: ['viewer'] });
 
 		const exhausted = await other('POST', '/api/vouchers/redeem', { code: voucher });
 		assert.equal(exhausted.status, 409);
@@ -153,7 +165,7 @@ describe('rbacr API', { skip: !(await fetch(`${BASE}/health`).then((r) => r.ok, 
 		const refused = await other('POST', '/api/vouchers/redeem', { code: again.body.code });
 		assert.equal(refused.status, 409);
 		assert.match(refused.body.error, /disabled/);
-		assert.deepEqual((await user('GET', '/api/me')).body.roles, { [SYSTEM]: ['viewer'] });
+		assert.deepEqual(here(await user('GET', '/api/me')), { [SYSTEM]: ['viewer'] });
 	});
 
 	it('gives implied roles, registered only by roots', async () => {
@@ -182,6 +194,49 @@ describe('rbacr API', { skip: !(await fetch(`${BASE}/health`).then((r) => r.ok, 
 		assert.equal((await user('POST', '/api/vouchers/redeem', { code: premium })).status, 409);
 	});
 
+	it('lets roots issue vouchers for several roles, with a code of their own (V1, V2)', async () => {
+		const code = `e2e several ${Date.now()}`;
+		const created = await root('POST', `/api/systems/${SYSTEM}/vouchers`, { roles: ['viewer', 'admin'], code, maxUses: 1 });
+		assert.equal(created.status, 201, JSON.stringify(created.body));
+		assert.equal(created.body.code, code.toUpperCase().replaceAll(' ', '-'));
+		assert.deepEqual([created.body.roles, created.body.role], [['admin', 'viewer'], 'admin']);
+		const taken = await root('POST', '/api/vouchers', { roles: ['viewer'], code });
+		assert.equal(taken.status, 409);
+
+		// Separators don't matter; the answer is the first grant plus all of them.
+		const redeemed = await other('POST', '/api/vouchers/redeem', { code: code.replaceAll(' ', '') });
+		assert.equal(redeemed.status, 200, JSON.stringify(redeemed.body));
+		assert.equal(redeemed.body.role, 'admin');
+		assert.deepEqual(redeemed.body.grants.map((g) => g.role), ['admin', 'viewer']);
+		assert.deepEqual((await other('GET', '/api/me')).body.roles[SYSTEM], ['admin', 'viewer']);
+
+		for (const role of ['admin', 'viewer']) await root('DELETE', `/api/systems/${SYSTEM}/grants`, { role, grantee: OTHER });
+		await root('DELETE', `/api/vouchers/${encodeURIComponent(created.body.code)}`);
+	});
+
+	it('gives roles marked for everyone to every identity, and links systems by URL (R9, R10)', async () => {
+		const role = `everyone${Date.now()}`;
+		assert.equal((await root('POST', `/api/systems/${SYSTEM}/roles`, { role })).status, 200);
+		assert.equal((await admin('PUT', `/api/systems/${SYSTEM}/roles/${role}`, { everyone: true })).status, 403);
+		assert.equal((await root('PUT', `/api/systems/${SYSTEM}/roles/${role}`, { everyone: 'yes' })).status, 400);
+		const set = await root('PUT', `/api/systems/${SYSTEM}/roles/${role}`, { everyone: true });
+		assert.equal(set.status, 200, JSON.stringify(set.body));
+		assert.deepEqual(set.body.everyone, [role]);
+		const stranger = `stranger${Date.now()}@elsewhere.test`;
+		assert.equal((await root('POST', '/api/check', { email: stranger, systemId: SYSTEM, role })).body.allowed, true);
+		assert.ok((await user('GET', '/api/me')).body.roles[SYSTEM].includes(role));
+
+		const url = await root('PATCH', `/api/systems/${SYSTEM}`, { url: 'https://e2e.example.com' });
+		assert.equal(url.status, 200, JSON.stringify(url.body));
+		assert.equal(url.body.url, 'https://e2e.example.com');
+		assert.equal((await root('PATCH', `/api/systems/${SYSTEM}`, { url: 'javascript:alert(1)' })).status, 400);
+
+		assert.equal((await root('PUT', `/api/systems/${SYSTEM}/roles/${role}`, { everyone: false })).status, 200);
+		assert.equal((await root('POST', '/api/check', { email: stranger, systemId: SYSTEM, role })).body.allowed, false);
+		assert.equal((await root('DELETE', `/api/systems/${SYSTEM}/roles/${role}`)).status, 204);
+		assert.equal((await root('PATCH', `/api/systems/${SYSTEM}`, { url: null })).body.url, null);
+	});
+
 	it('lets roots issue global vouchers; paid ones answer 402', async () => {
 		const role = `e2e${Date.now()}`;
 		assert.equal((await root('POST', `/api/systems/${SYSTEM}/roles`, { role })).status, 200);
@@ -203,7 +258,7 @@ describe('rbacr API', { skip: !(await fetch(`${BASE}/health`).then((r) => r.ok, 
 		const paid = await root('POST', '/api/vouchers', { role, discountPercent: 25 });
 		const res = await user('POST', '/api/vouchers/redeem', { code: paid.body.code });
 		assert.equal(res.status, 402);
-		assert.deepEqual(res.body.payment, { code: paid.body.code, systemId: null, role, discountPercent: 25 });
+		assert.deepEqual(res.body.payment, { code: paid.body.code, systemId: null, roles: [role], role, discountPercent: 25 });
 
 		assert.equal((await root('DELETE', '/api/global-grants', { role, grantee: OTHER })).status, 204);
 		assert.deepEqual((await other('GET', '/api/me')).body.globalRoles, []);
@@ -309,6 +364,6 @@ describe('rbacr API', { skip: !(await fetch(`${BASE}/health`).then((r) => r.ok, 
 
 	it('lets roots delete systems', async () => {
 		assert.equal((await root('DELETE', `/api/systems/${SYSTEM}`)).status, 204);
-		assert.deepEqual((await user('GET', '/api/me')).body.roles, {});
+		assert.equal((await user('GET', '/api/me')).body.roles[SYSTEM], undefined);
 	});
 });

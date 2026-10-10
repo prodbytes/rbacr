@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { invalidateAll } from '$app/navigation';
 	import { formatDate, formValues, vpiFetch, VpiError, type Payment } from '#lib/vpi.js';
+	import RoleName from '#lib/RoleName.svelte';
 	import type { PageProps } from './$types';
 
 	let { data }: PageProps = $props();
@@ -67,7 +68,12 @@
 		<thead><tr><th>System</th><th>Roles</th></tr></thead>
 		<tbody>
 			{#each systems as [system, roles] (system)}
-				<tr><td><code>{system}</code></td><td>{roles.join(', ')}</td></tr>
+				<tr>
+					<td><code>{system}</code></td>
+					<td>
+						{#each roles as role, i (role)}{i ? ', ' : ''}<RoleName {role} url={data.urls[system]} />{/each}
+					</td>
+				</tr>
 			{/each}
 		</tbody>
 	</table>
@@ -77,12 +83,13 @@
 
 <h2>Redeem a voucher</h2>
 <form class="row" onsubmit={onRedeem}>
-	<input name="code" placeholder="XXXX-XXXX-XXXX-XXXX" required autocomplete="off" />
+	<input name="code" placeholder="2026Q4-OTTER-FALCON-LEMUR" required autocomplete="off" />
 	<button>Redeem</button>
 </form>
 {#if redeem.payment}
 	<p class="error">
-		This voucher gives {redeem.payment.discountPercent}% off the <strong>{redeem.payment.role}</strong> role
+		This voucher gives {redeem.payment.discountPercent}% off the <strong>{redeem.payment.roles.join(', ')}</strong>
+		role{redeem.payment.roles.length > 1 ? 's' : ''}
 		{redeem.payment.systemId ? `in ${redeem.payment.systemId}` : 'in all systems'}, and needs payment, which is not
 		available yet.
 	</p>

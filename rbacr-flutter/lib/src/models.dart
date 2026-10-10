@@ -170,6 +170,7 @@ class Voucher {
   const Voucher({
     required this.code,
     required this.systemId,
+    required this.roles,
     required this.role,
     required this.discountPercent,
     required this.startsAt,
@@ -186,6 +187,7 @@ class Voucher {
   factory Voucher.fromJson(Map<String, Object?> json) => Voucher(
     code: json['code'] as String,
     systemId: json['systemId'] as String?,
+    roles: _rolesOf(json),
     role: json['role'] as String,
     discountPercent: (json['discountPercent'] as num).toInt(),
     startsAt: _date(json['startsAt']),
@@ -199,14 +201,20 @@ class Voucher {
     disabledBy: json['disabledBy'] as String?,
   );
 
-  /// Shown as `XXXX-XXXX-XXXX-XXXX` (V2).
+  /// Upper case, words separated by dashes, e.g. `2026Q4-OTTER-FALCON-LEMUR`;
+  /// matched ignoring case and separators (V2).
   final String code;
 
   /// null for a global voucher: redeeming it makes a global grant.
   final String? systemId;
+
+  /// The roles redeeming it grants, sorted (V1).
+  final List<String> roles;
+
+  /// The first of [roles], as rbacr reported before vouchers had several.
   final String role;
 
-  /// 100 grants the role on redemption; lower needs payment (V4a).
+  /// 100 grants the roles on redemption; lower needs payment (V4a).
   final int discountPercent;
 
   /// null: redeemable immediately.
@@ -233,20 +241,36 @@ class Voucher {
 
 /// The terms of a voucher that needs payment (SPEC V4a), sent with a 402.
 class Payment {
-  const Payment({required this.code, required this.systemId, required this.role, required this.discountPercent});
+  const Payment({
+    required this.code,
+    required this.systemId,
+    required this.roles,
+    required this.role,
+    required this.discountPercent,
+  });
 
   factory Payment.fromJson(Map<String, Object?> json) => Payment(
     code: json['code'] as String,
     systemId: json['systemId'] as String?,
+    roles: _rolesOf(json),
     role: json['role'] as String,
     discountPercent: (json['discountPercent'] as num).toInt(),
   );
 
   final String code;
   final String? systemId;
+
+  /// The roles the voucher grants (V1).
+  final List<String> roles;
+
+  /// The first of [roles].
   final String role;
   final int discountPercent;
 }
+
+/// A voucher's `roles`, or its single `role` from servers that predate several.
+List<String> _rolesOf(Map<String, Object?> json) =>
+    json['roles'] == null ? List.unmodifiable([json['role'] as String]) : _strings(json['roles']);
 
 List<String> _strings(Object? value) => List.unmodifiable((value as List<Object?>).cast<String>());
 

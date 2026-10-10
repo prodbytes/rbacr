@@ -1,15 +1,27 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
-	import { formValues, vpiFetch, VpiError } from '#lib/vpi.js';
+	import { vpiFetch, VpiError } from '#lib/vpi.js';
+	import RoleName from '#lib/RoleName.svelte';
 	import type { PageProps } from './$types';
 
 	let { data }: PageProps = $props();
 	let error = $state('');
 
+	let name = $state('');
+	/** The id a name makes: lower case, other characters as dashes (SPEC: system ids are slugs). */
+	let id = $derived(
+		name
+			.trim()
+			.toLowerCase()
+			.replace(/[^a-z0-9_.:-]+/g, '-')
+			.replace(/^[^a-z0-9]+|-+$/g, '')
+	);
+
+	/** Creates the system with no roles; they are added on its page. */
 	async function onCreate(e: SubmitEvent) {
-		const { id, name, roles } = formValues(e);
+		e.preventDefault();
 		try {
-			const system = await vpiFetch<{ id: string }>(fetch, '/systems', { method: 'POST', body: { id, name, roles } });
+			const system = await vpiFetch<{ id: string }>(fetch, '/systems', { method: 'POST', body: { id, name: name.trim() } });
 			await goto(`/systems/${system.id}`);
 		} catch (err) {
 			if (!(err instanceof VpiError)) throw err;
@@ -28,7 +40,9 @@
 				<tr>
 					<td><a href="/systems/{system.id}"><code>{system.id}</code></a></td>
 					<td>{system.name}</td>
-					<td>{system.roles.join(', ')}</td>
+					<td>
+						{#each system.roles as role, i (role)}{i ? ', ' : ''}<RoleName {role} url={system.url} />{/each}
+					</td>
 				</tr>
 			{/each}
 		</tbody>
@@ -40,10 +54,9 @@
 {#if data.root}
 	<h2>New system</h2>
 	<form class="row" onsubmit={onCreate}>
-		<label>Id <input name="id" placeholder="billing" required /></label>
-		<label>Name <input name="name" placeholder="Billing" /></label>
-		<label>Roles (besides admin) <input name="roles" placeholder="viewer, editor" /></label>
-		<button>Create</button>
+		<label>Name <input bind:value={name} placeholder="TabScan" required /></label>
+		<button disabled={!id}>Create</button>
+		{#if id}<span class="muted">id <code>{id}</code>; add its roles on the next page</span>{/if}
 	</form>
 	{#if error}<p class="error">{error}</p>{/if}
 {/if}

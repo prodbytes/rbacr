@@ -9,6 +9,7 @@ import { error, redirect } from '@sveltejs/kit';
 export interface Payment {
 	code: string;
 	systemId: string | null;
+	roles: string[];
 	role: string;
 	discountPercent: number;
 }
@@ -65,6 +66,11 @@ export function formValues(event: SubmitEvent): Record<string, string> {
 /** <input type="datetime-local"> has no zone; the UI labels these fields as UTC. */
 export function utcIso(value: string | undefined): string | null {
 	return value ? `${value}:00Z` : null;
+}
+
+/** The other way: a Date as a `datetime-local` value, in UTC. */
+export function utcInputValue(d: Date): string {
+	return d.toISOString().slice(0, 16);
 }
 
 export function formatDate(iso: string | null): string {

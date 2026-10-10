@@ -104,30 +104,49 @@ class RbacrClient {
   Future<AllRoles> allRoles({required String email}) async =>
       AllRoles.fromJson(await _send('POST', '/api/roles', {'email': email}));
 
-  /// Redeems a voucher for the token's owner and returns the grant (V4). A
-  /// voucher that needs payment throws [RbacrPaymentRequired] (V4a).
+  /// Redeems a voucher for the token's owner and returns the grant of its
+  /// first role (V4); [redeemVoucherGrants] returns them all. A voucher that
+  /// needs payment throws [RbacrPaymentRequired] (V4a).
   Future<Grant> redeemVoucher(String code) async =>
       Grant.fromJson(await _send('POST', '/api/vouchers/redeem', {'code': code}));
 
-  /// Creates a voucher for [role] in [systemId], or a global voucher without
-  /// a system (V1); roots only, so call it from your server, never an app.
-  /// [discountPercent] defaults to 100 (free); [endsAt] is exclusive.
+  /// Redeems a voucher for the token's owner and returns a grant for each of
+  /// its roles (V4).
+  Future<List<Grant>> redeemVoucherGrants(String code) async {
+    final json = await _send('POST', '/api/vouchers/redeem', {'code': code});
+    final grants = (json['grants'] as List<Object?>?) ?? [json];
+    return List.unmodifiable(grants.map((g) => Grant.fromJson(g as Map<String, Object?>)));
+  }
+
+  /// Creates a voucher granting [roles] in [systemId], or a global voucher
+  /// without a system (V1); roots only, so call it from your server, never
+  /// an app. Pass [roles], or a single [role] as before. [code] is a code of
+  /// your own; without one rbacr makes one up from the quarter and animal
+  /// names (V2). [discountPercent] defaults to 100 (free); [endsAt] is
+  /// exclusive.
   Future<Voucher> createVoucher({
     String? systemId,
-    required String role,
+    List<String>? roles,
+    String? role,
+    String? code,
     int? discountPercent,
     DateTime? startsAt,
     DateTime? endsAt,
     int? maxUses,
-  }) async => Voucher.fromJson(
-    await _send('POST', _vouchersPath(systemId), {
-      'role': role,
-      'discountPercent': ?discountPercent,
-      'startsAt': ?startsAt?.toUtc().toIso8601String(),
-      'endsAt': ?endsAt?.toUtc().toIso8601String(),
-      'maxUses': ?maxUses,
-    }),
-  );
+  }) async {
+    if ((roles == null) == (role == null)) throw ArgumentError('Pass either roles or role');
+    return Voucher.fromJson(
+      await _send('POST', _vouchersPath(systemId), {
+        'roles': ?roles,
+        'role': ?role,
+        'code': ?code,
+        'discountPercent': ?discountPercent,
+        'startsAt': ?startsAt?.toUtc().toIso8601String(),
+        'endsAt': ?endsAt?.toUtc().toIso8601String(),
+        'maxUses': ?maxUses,
+      }),
+    );
+  }
 
   /// The vouchers of [systemId], or the global vouchers without a system,
   /// newest first, disabled ones included (V6); roots only.

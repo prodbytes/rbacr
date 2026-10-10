@@ -20,6 +20,11 @@ app on AWS Lambda. Run every command below from this folder
   others, e.g. `admin` implies `premium` and `free`, `premium` implies
   `free`, and `free` implies nothing. Implication is transitive. Grants
   returned by the API list the roles they imply (`impliedRoles`).
+- **Roles for everyone.** A role marked *all users* on its system's page
+  (e.g. `free`) is held by every identity, signed in or asked about, with
+  what it implies; no grant per person needed.
+- **System URLs.** A system can have a URL; role names on the pages link to
+  it in a new tab, so you can follow a role into its system.
 - **Grants have a validity**: an optional start and end (`startsAt`,
   `endsAt`). No start means immediately, no end means forever. Outside it a
   grant gives nothing, and shows as `not-started` or `expired`.
@@ -28,13 +33,16 @@ app on AWS Lambda. Run every command below from this folder
   record with who did it and when (e.g. `revokedBy`, `revokedAt`), and
   rbacr hides it from then on, so every change can be audited. Only
   sign-in sessions are purged, a year (configurable) after they expire.
-- **Vouchers** are codes like `7JH2-UQF5-XA7B-VMQT` that grant a role when
-  redeemed, either in one system or **globally**. A global voucher gives the
-  role in every system that defines it, and only roots can create global
-  vouchers. Each voucher has a **discount**: a 100% voucher grants the role
-  immediately, while a lower discount will require payment (not built yet; it
-  answers 402 Payment Required). The start date, end date and usage count
-  are all optional.
+- **Vouchers** are codes like `2026Q4-OTTER-FALCON-LEMUR` that grant one or
+  more roles when redeemed, either in one system or **globally**. A global
+  voucher gives its roles in every system that defines them. The voucher
+  forms offer the existing roles as checkboxes and suggest a code (the
+  quarter plus random animals, or type your own, e.g. `SPRING-SALE`) valid
+  through the current quarter; codes ignore case and separators. Each
+  voucher has a **discount**: a 100% voucher grants its roles immediately,
+  while a lower discount will require payment (not built yet; it answers 402
+  Payment Required). The start date, end date and usage count are all
+  optional.
 - **Everyone** can sign in, see their own roles at `/me` and redeem vouchers.
   `/settings` shows the running version and the API's address; roots also
   see the root allow list there.

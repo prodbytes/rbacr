@@ -46,12 +46,14 @@ answer.ttl;       // the same as a Duration from now: never cache the "yes" long
 
 final me = await rbacr.me();                        // the token owner's own roles
 final roles = await rbacr.rolesIn(email: user.email, systemId: 'presence');
-final grant = await rbacr.redeemVoucher('7JH2-UQF5-XA7B-VMQT');
+final grant = await rbacr.redeemVoucher('2026Q4-OTTER-FALCON-LEMUR'); // its first role
+final grants = await rbacr.redeemVoucherGrants('spring sale');          // one per role
 
 // Voucher management, with a root's token on your server (see Tokens).
 final admin = RbacrClient(tokenProvider: () => serverSecrets.read('rbacr_root_token'));
-final voucher = await admin.createVoucher(systemId: 'presence', role: 'premium', maxUses: 100);
-final global = await admin.createVoucher(role: 'pro', endsAt: DateTime.utc(2027)); // no system: global
+final voucher = await admin.createVoucher(systemId: 'presence', roles: ['premium'], maxUses: 100);
+final sale = await admin.createVoucher(systemId: 'presence', roles: ['free', 'premium'], code: 'SPRING-SALE');
+final global = await admin.createVoucher(roles: ['pro'], endsAt: DateTime.utc(2027)); // no system: global
 final vouchers = await admin.listVouchers(systemId: 'presence'); // newest first; none: global ones
 await admin.disableVoucher(voucher.code); // DELETE: disabled for good (disabledBy), still listed
 ```
@@ -63,8 +65,9 @@ await admin.disableVoucher(voucher.code); // DELETE: disabled for good (disabled
 | `allows(email, systemId?, role)` | `POST /api/check` | `bool`, `false` on any error |
 | `rolesIn(email, systemId)` | `POST /api/roles` | the effective roles, sorted |
 | `allRoles(email)` | `POST /api/roles` | `AllRoles`: global roles and roles per system |
-| `redeemVoucher(code)` | `POST /api/vouchers/redeem` | the `Grant` |
-| `createVoucher(systemId?, role, discountPercent?, startsAt?, endsAt?, maxUses?)` | `POST /api/systems/:id/vouchers`, or `POST /api/vouchers` without a system | the `Voucher` (roots) |
+| `redeemVoucher(code)` | `POST /api/vouchers/redeem` | the `Grant` of its first role |
+| `redeemVoucherGrants(code)` | `POST /api/vouchers/redeem` | a `Grant` per role |
+| `createVoucher(systemId?, roles or role, code?, discountPercent?, startsAt?, endsAt?, maxUses?)` | `POST /api/systems/:id/vouchers`, or `POST /api/vouchers` without a system | the `Voucher` (roots) |
 | `listVouchers(systemId?)` | `GET /api/systems/:id/vouchers`, or `GET /api/vouchers` | the `Voucher`s, newest first (roots) |
 | `disableVoucher(code)` | `DELETE /api/vouchers/:code` | the disabled `Voucher` (roots) |
 

@@ -11,7 +11,7 @@ and the README in sync with the code.
 |------|---------|
 | Identity | A Google account's verified e-mail address, lower-cased. |
 | Domain | The part of an address after `@`. Matching is exact: `example.com` does not cover `sub.example.com`. |
-| Grantee | Who a grant applies to: one address (`ana@example.com`) or a whole domain (stored as `@example.com`; input `example.com` is accepted too). |
+| Grantee | Who a grant applies to: one address (`ana@example.com`) or a whole domain (stored as `@example.com`; input `example.com` is accepted too). Internally also `*`, everyone, for roles marked so (R9); the grants API never accepts it. |
 | System | An application whose roles rbacr manages. Its id is a slug: 1-63 characters from `a-z 0-9 _ . : -`, starting with a letter or digit. Its configuration names the role paying subscribers hold there (`subscriberRole`, Q2). |
 | Role | A name a root registers in a system's catalog, with the same slug rules (any name but `root`). A role may **imply** other roles of the same system (R6). Both are data; `root` is the only built-in role (R2). |
 | Grant | Gives (system, role) to a grantee, during its validity (G1). A **global grant** gives a role in every system whose catalog has a role of that name, now or later. |
@@ -54,7 +54,7 @@ and the README in sync with the code.
   can hold it. `root` is therefore reserved and can't be a role name in any
   system's catalog. Roots alone manage rbacr (P1).
 - **R3** Everyone else's effective roles combine the grants to their own
-  address and to their domain that are valid now (G1). A global grant of role R adds R in every system
+  address, to their domain and to everyone (R9) that are valid now (G1). A global grant of role R adds R in every system
   whose catalog has R, including systems created later. Their `globalRoles`
   are the roles of those global grants.
 - **R4 Roles are registered data.** A system has exactly the roles a root
@@ -84,6 +84,23 @@ and the README in sync with the code.
   implies in its system, sorted, without the role itself. A global grant
   gives its role in every system that defines it, so it has
   `impliedRoles: []` and `impliedRolesBySystem: { systemId: [role] }`.
+- **R9 Roles for everyone.** A root can mark a role `everyone` (`PUT
+  /api/systems/:id/roles/:role` with `{ everyone: true }`, `false` to
+  stop): every identity then holds it in that system, with what it
+  implies, as an effective role (R3, `/api/check`, `/api/roles`,
+  `/api/me`): anyone who signs in, and any address an application asks
+  about. It is a grant to the grantee `*` made with the flag, in one
+  transaction, starting now and never ending; turning it off revokes that
+  grant (L1). A system lists such roles in `everyone`; the grant isn't
+  listed among the system's grants. Removing the role revokes it (L3), and
+  a re-added role starts unmarked. For example, mark `free` so everyone
+  signed in gets the free tier.
+- **R10 System URLs.** A system may have a `url`, an absolute `http://` or
+  `https://` address of at most 2048 characters (anything else, such as
+  `javascript:`, gives 400), set or cleared with `PATCH /api/systems/:id`
+  `{ url }`. The pages print each role name of the system as a link to it
+  that opens in a new tab. `/vpi/me` gives the URLs of the systems the
+  signed-in person holds roles in.
 
 ## Grant validity
 
@@ -128,27 +145,38 @@ and the README in sync with the code.
 ## Vouchers
 
 - **V1** A voucher has a code and a scope: one system, or **global**
-  (`systemId: null`, roots only). It also has a role, a **discount**
+  (`systemId: null`, roots only). It also has one or more **roles**
+  (`roles`, sorted, at most 20; `role` is the first of them, for clients
+  that predate several roles per voucher), a **discount**
   (`discountPercent`, a whole number from 0 to 100, default 100), an
   optional start date (`startsAt`), an optional end date (`endsAt`,
   exclusive) and an optional usage count (`maxUses` ≥ 1). It records its
   creator and its uses. If both dates are set, the start must come before
-  the end. A system voucher's role must be in that system's catalog. A
-  global voucher's role only has to be a valid name other than `root`.
-- **V2** Codes are 16 random characters from a 32-symbol alphabet with no
-  `0/O/1/I` (80 bits), shown as `XXXX-XXXX-XXXX-XXXX`. Input is
-  case-insensitive and ignores separators.
+  the end. A system voucher's roles must be in that system's catalog. A
+  global voucher's roles only have to be valid names other than `root`.
+  Requests send `roles`, or a single `role` as before.
+- **V2** A root may choose the code (`code`); without one, rbacr makes
+  one up from the current calendar quarter (UTC) and three random animal
+  names out of 256, e.g. `2026Q4-OTTER-FALCON-LEMUR` (24 random bits;
+  redeeming needs a signed-in identity, V5). The pages suggest such a code
+  and, as the validity, the current quarter: from its first day to the
+  next quarter's first day. A code is stored upper case with any run of
+  other characters as one dash, and needs 6 to 40 letters and digits.
+  Codes are matched ignoring case and separators, so `spring sale` and
+  `SPRING-SALE` are the same code, and they are unique: reusing one, even
+  a disabled voucher's, gives 409. Vouchers made before codes could be
+  chosen keep their `XXXX-XXXX-XXXX-XXXX` codes and still redeem.
 - **V3** A voucher is `active` unless it is `disabled`, `not-started` (now <
   startsAt), `expired` (now ≥ endsAt) or `exhausted` (uses ≥ maxUses), checked
   in that order.
-- **V4** Redeeming an active voucher with a **100% discount** grants its role
-  to the redeemer's address (G3) and increments `uses`. A system voucher creates a
-  grant in its system; a global voucher creates a global grant. Redemption
-  runs in one transaction with a row lock, so concurrent redemptions cannot
-  exceed `maxUses`.
+- **V4** Redeeming an active voucher with a **100% discount** grants each of
+  its roles to the redeemer's address (G3) and increments `uses`. A system
+  voucher creates grants in its system; a global voucher creates global
+  grants. Redemption runs in one transaction with a row lock, so concurrent
+  redemptions cannot exceed `maxUses`, and grants all the roles or none.
 - **V4a** A voucher with a discount **below 100%** requires payment, which is
   *not implemented yet*. Redeeming it answers 402 with
-  `{ error, payment: { code, systemId, role, discountPercent } }`, and
+  `{ error, payment: { code, systemId, roles, role, discountPercent } }`, and
   records nothing: no use, redemption or grant. Inactive vouchers report their
   status (V3/V5) before payment comes into it. When payment is implemented,
   a confirmed payment completes the redemption as in V4.
@@ -189,7 +217,8 @@ Nothing in rbacr is physically deleted, so every change can be audited.
   audit views.
 - **L3** Removing a role or deleting a system marks its dependents with
   the same actor and time: the role's grants are revoked, its
-  implications (both directions) removed and its vouchers disabled.
+  implications (both directions) removed and its vouchers (every voucher
+  granting it, among other roles too) disabled.
   Deleting a system does that for every role, then marks the system.
   Global grants belong to no system and are not touched.
 - **L4** A deleted name or key can be used again: granting a revoked grant
@@ -380,26 +409,26 @@ ISO-8601 strings in UTC.
 | Method & path | Body | Response |
 |---------------|------|----------|
 | `GET /api/me` | — | `{ email, root, globalRoles: ["root"] or [], roles: { systemId: [role] } }` |
-| `POST /api/vouchers/redeem` | `{ code }` | the resulting grant with `impliedRoles` (`systemId: null` and `impliedRolesBySystem` when global), or 402 (V4a) |
+| `POST /api/vouchers/redeem` | `{ code }` | the grant of the voucher's first role with `impliedRoles` (`systemId: null` and `impliedRolesBySystem` when global), plus `grants`: one per role (V4); or 402 (V4a) |
 | `GET /api/vouchers` | — | `{ vouchers: [...] }`, the global vouchers (roots) |
-| `POST /api/vouchers` | `{ role, discountPercent?, startsAt?, endsAt?, maxUses? }` | 201, a global voucher (roots) |
+| `POST /api/vouchers` | `{ roles (or role), code?, discountPercent?, startsAt?, endsAt?, maxUses? }` | 201, a global voucher (roots) |
 | `GET /api/global-grants` | — | `{ grants: [{ systemId: null, role, grantee, grantedBy, grantedAt, startsAt, endsAt, status, voucherCode, impliedRoles: [], impliedRolesBySystem }] }` (roots, R8, G1) |
 | `POST /api/global-grants` | `{ role, grantee, startsAt?, endsAt? }` | 201, the global grant, with `impliedRolesBySystem` (roots, G1, G2) |
 | `DELETE /api/global-grants` | `{ role, grantee }` | 204 (roots; revokes it, L1) |
 | `DELETE /api/vouchers/:code` | — | the disabled voucher, with `disabledBy` |
-| `GET /api/systems` | — | `{ systems: [{ id, name, roles, implies: { role: [role] }, subscriberRole }] }` (only manageable systems; `implies` lists direct implications) |
+| `GET /api/systems` | — | `{ systems: [{ id, name, roles, implies: { role: [role] }, subscriberRole, everyone: [role], url }] }` (only manageable systems; `implies` lists direct implications) |
 | `POST /api/systems` | `{ id, name?, roles?: [string] }` | 201, the system with exactly the given roles (R4) |
-| `GET /api/systems/:id` | — | `{ id, name, roles, implies, subscriberRole }` |
-| `PATCH /api/systems/:id` | `{ subscriberRole: role or null }` | the system (roots, Q2) |
+| `GET /api/systems/:id` | — | `{ id, name, roles, implies, subscriberRole, everyone, url }` |
+| `PATCH /api/systems/:id` | `{ subscriberRole?: role or null, url?: URL or null }`, at least one | the system (roots, Q2, R10) |
 | `DELETE /api/systems/:id` | — | 204 (marks it and its contents deleted, L1, L3) |
 | `POST /api/systems/:id/roles` | `{ role }` | the system |
 | `DELETE /api/systems/:id/roles/:role` | — | 204 (removes it, L1, L3) |
-| `PUT /api/systems/:id/roles/:role` | `{ implies: [role] }` | the system, with the role's implied roles replaced (roots, R7) |
+| `PUT /api/systems/:id/roles/:role` | `{ implies?: [role], everyone?: boolean }`, at least one | the system, with the role's implied roles replaced (R7) and/or its `everyone` property set (R9) (roots) |
 | `GET /api/systems/:id/grants` | — | `{ grants: [{ systemId, role, grantee, grantedBy, grantedAt, startsAt, endsAt, status, voucherCode, impliedRoles }] }` (R8, G1) |
 | `POST /api/systems/:id/grants` | `{ role, grantee, startsAt?, endsAt? }` | 201, the grant with `impliedRoles` (G1; re-granting with the same validity is idempotent, G2) |
 | `DELETE /api/systems/:id/grants` | `{ role, grantee }` | 204 (revokes it, L1) |
-| `GET /api/systems/:id/vouchers` | — | `{ vouchers: [{ code, systemId, role, discountPercent, startsAt, endsAt, maxUses, uses, status, createdBy, createdAt, disabledAt, disabledBy }] }` |
-| `POST /api/systems/:id/vouchers` | `{ role, discountPercent?, startsAt?, endsAt?, maxUses? }` | 201, the voucher |
+| `GET /api/systems/:id/vouchers` | — | `{ vouchers: [{ code, systemId, roles, role, discountPercent, startsAt, endsAt, maxUses, uses, status, createdBy, createdAt, disabledAt, disabledBy }] }` |
+| `POST /api/systems/:id/vouchers` | `{ roles (or role), code?, discountPercent?, startsAt?, endsAt?, maxUses? }` | 201, the voucher |
 | `POST /api/check` | `{ email, systemId?, role }` | `{ email, systemId, role, allowed, expiresAt, ttl }` (T6, C3a) |
 | `POST /api/roles` | `{ email, systemId? }` | `{ email, systemId, roles: [role] }`, or without `systemId`, `{ email, globalRoles, roles: { systemId: [role] } }` (T6) |
 
@@ -446,8 +475,18 @@ missing session gives 401.
 `/` (sign in), `/me` (own roles, redeem a voucher, API tokens), `/settings`
 (the running version, the API's address, the signed-in account; roots also
 see the root allow list), `/systems`
-(manageable systems, create a system), `/systems/:id` (catalog, grants,
-vouchers) and `/global` (roots: global grants and vouchers). Pages load
+(manageable systems; create one from its name alone, which also makes its
+id), `/systems/:id` (its URL; its roles, each marked for everyone or not
+and with the roles it implies, added and removed one at a time; grants;
+vouchers) and `/global` (roots: global
+grants and vouchers). Roles are always picked from those that exist,
+never typed (except a new role's name): grant and subscriber forms offer a
+list, voucher forms checkboxes, of the system's roles, or on `/global` of
+every role some system has. Wherever a system's role names are printed
+(the systems list, a system's page, `/me`), they link to the system's URL
+in a new tab (R10); global roles belong to no one system and aren't
+linked.
+Pages load
 through `/vpi`; a page whose data needs a session sends anonymous visitors
 to `/`. The pages need JavaScript.
 

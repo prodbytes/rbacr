@@ -1,5 +1,5 @@
 import { json, type RequestEvent } from '@sveltejs/kit';
-import { RbacError, type Actor, type GrantWithImplied, type Validity, type Voucher } from './rbac';
+import { RbacError, type Actor, type GrantWithImplied, type Validity, type Voucher, type VoucherInput } from './rbac';
 import { getServices, type Services } from './services';
 import type { ApiToken } from './tokens';
 
@@ -88,14 +88,42 @@ export function optInt(value: unknown, field: string): number | null {
 }
 
 /** The `subscriberRole` of a system configuration body: a role, or null (or blank) for none. */
-export function subscriberRole(body: Record<string, unknown>): string | null {
-	if (!('subscriberRole' in body)) throw new RbacError(400, '"subscriberRole" is required (a role, or null for none)');
-	return optStr(body.subscriberRole, 'subscriberRole');
+/** A system's settings from a PATCH body: the fields present, null clearing one (Q2, R10). */
+export function systemSettings(body: Record<string, unknown>): { subscriberRole?: string | null; url?: string | null } {
+	return {
+		...('subscriberRole' in body && { subscriberRole: optStr(body.subscriberRole, 'subscriberRole') }),
+		...('url' in body && { url: optStr(body.url, 'url') })
+	};
+}
+
+/** A role's settings from a PUT body: the fields present (R7, R9). */
+export function roleSettings(body: Record<string, unknown>): { implies?: string[]; everyone?: boolean } {
+	if ('everyone' in body && typeof body.everyone !== 'boolean') throw new RbacError(400, '"everyone" must be true or false');
+	return {
+		...('implies' in body && { implies: strList(body.implies, 'implies') }),
+		...('everyone' in body && { everyone: body.everyone as boolean })
+	};
 }
 
 /** A grant's optional `startsAt` and `endsAt` (G1); blank or missing means immediately and forever. */
 export function validity(body: Record<string, unknown>): Validity {
 	return { startsAt: optDate(body.startsAt, 'startsAt'), endsAt: optDate(body.endsAt, 'endsAt') };
+}
+
+/**
+ * A voucher's terms from a request body (V1, V2): `roles`, or a single
+ * `role` as older clients send it, and an optional `code`.
+ */
+export function voucherInput(body: Record<string, unknown>, systemId: string | null): VoucherInput {
+	return {
+		systemId,
+		roles: body.roles === undefined ? [str(body.role, 'role')] : strList(body.roles, 'roles'),
+		code: optStr(body.code, 'code'),
+		startsAt: optDate(body.startsAt, 'startsAt'),
+		endsAt: optDate(body.endsAt, 'endsAt'),
+		maxUses: optInt(body.maxUses, 'maxUses'),
+		discountPercent: optInt(body.discountPercent, 'discountPercent')
+	};
 }
 
 export const grantJson = (g: GrantWithImplied) => ({

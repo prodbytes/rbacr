@@ -1,4 +1,4 @@
-import { grantJson, readJson, subscriberRole, vpi, voucherJson } from '#lib/server/http.js';
+import { grantJson, readJson, systemSettings, vpi, voucherJson } from '#lib/server/http.js';
 import { voucherStatus } from '#lib/server/rbac.js';
 import type { RequestHandler } from './$types';
 
@@ -18,7 +18,7 @@ export const GET: RequestHandler = (event) =>
 
 export const PATCH: RequestHandler = (event) =>
 	vpi(event, async ({ rbac, actor }) =>
-		rbac.setSubscriberRole(actor, event.params.system, subscriberRole(await readJson(event.request)))
+		rbac.configureSystem(actor, event.params.system, systemSettings(await readJson(event.request)))
 	);
 
 export const DELETE: RequestHandler = (event) =>
