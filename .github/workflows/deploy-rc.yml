@@ -49,6 +49,8 @@ jobs:
     steps:
       - name: Resolve the tag
         id: tag
+        # Runs before the checkout, so rbacr-sls doesn't exist yet.
+        working-directory: .
         env:
           INPUT_TAG: ${{ inputs.tag }}
           REF_TYPE: ${{ github.ref_type }}
