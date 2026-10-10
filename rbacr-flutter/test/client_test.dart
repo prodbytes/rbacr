@@ -124,6 +124,36 @@ void main() {
       expect(me.hasRole('other', 'free'), isFalse);
     });
 
+    test('system status, one or all, escaping the id (R12)', () async {
+      final seen = <http.Request>[];
+      final presence = {'id': 'presence', 'name': 'Presence', 'url': 'https://presence.test', 'maintenance': true};
+      final client = fake(
+        (r) => r.url.path.endsWith('/status')
+            ? reply(presence)
+            : reply({
+                'systems': [
+                  {...presence, 'roles': <String>[], 'implies': <String, Object>{}},
+                  {'id': 'crm', 'name': 'crm', 'url': null, 'maintenance': false},
+                ],
+              }),
+        seen: seen,
+      );
+      final status = await client.systemStatus('a/b');
+      expect(
+        [status.id, status.name, status.url, status.maintenance],
+        ['presence', 'Presence', 'https://presence.test', true],
+      );
+      final all = await client.systems();
+      expect(all.map((s) => [s.id, s.url, s.maintenance]), [
+        ['presence', 'https://presence.test', true],
+        ['crm', null, false],
+      ]);
+      expect(seen.map((r) => '${r.method} ${r.url}'), [
+        'GET https://rbacr.test/api/systems/a%2Fb/status',
+        'GET https://rbacr.test/api/systems',
+      ]);
+    });
+
     test('check carries how long a yes holds (C3a)', () async {
       final yes = await fake(
         (_) => reply({

@@ -114,6 +114,13 @@ and the README in sync with the code.
   and vouchers are kept and still managed, global roles are unaffected,
   and the system's roles count again as soon as it is off. The system
   page shows a toggle and a warning, the systems list a badge.
+- **R12 System status.** `GET /api/systems/:id/status` answers `{ id,
+  name, url, maintenance }` to any valid token, not only roots, so an
+  application (or a client library holding only its users' own tokens) can
+  check that its system exists and whether it is in maintenance (R11), and
+  tell "nobody has roles right now" from "this user lacks the role". An
+  unknown or deleted system gives 404. It shows nothing else of the system:
+  its roles, grants, subscriber role and vouchers stay roots-only (P1).
 
 ## Grant validity
 
@@ -139,6 +146,7 @@ and the README in sync with the code.
 | See own roles, redeem a voucher | ✓ | ✓ |
 | Create, list or revoke **own API tokens** | ✓ | ✓ |
 | Ask about **own** roles (`/api/me`, `/api/check`, `/api/roles`) | ✓ | ✓ |
+| See a system's status: name, URL, maintenance (R12) | ✓ | ✓ |
 | Ask about **another** identity's roles, global roles included | ✓ | — |
 | List or see systems, their grants and vouchers | ✓ | — |
 | Create, configure or delete systems; add or remove roles; register implications | ✓ | — |
@@ -146,7 +154,7 @@ and the README in sync with the code.
 | Create, list or disable vouchers (per system or global) | ✓ | — |
 | See the root allow list (`/settings`) | ✓ | — |
 
-- **P1** Only roots manage: everything but the first three rows is refused
+- **P1** Only roots manage: everything but the first four rows is refused
   to anyone else with 403. Holding a role (any name) never grants
   management.
 - **P2** Removing a role also revokes its grants, removes its implications,
@@ -432,6 +440,7 @@ ISO-8601 strings in UTC.
 | `GET /api/systems` | — | `{ systems: [{ id, name, roles, implies: { role: [role] }, subscriberRole, everyone: [role], url, maintenance }] }` (only manageable systems; `implies` lists direct implications) |
 | `POST /api/systems` | `{ id, name?, roles?: [string] }` | 201, the system with exactly the given roles (R4) |
 | `GET /api/systems/:id` | — | `{ id, name, roles, implies, subscriberRole, everyone, url, maintenance }` |
+| `GET /api/systems/:id/status` | — | `{ id, name, url, maintenance }` (any token, R12) |
 | `PATCH /api/systems/:id` | `{ subscriberRole?: role or null, url?: URL or null, maintenance?: boolean }`, at least one | the system (roots, Q2, R10, R11) |
 | `DELETE /api/systems/:id` | — | 204 (marks it and its contents deleted, L1, L3) |
 | `POST /api/systems/:id/roles` | `{ role }` | the system |

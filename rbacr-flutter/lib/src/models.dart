@@ -77,6 +77,28 @@ class AllRoles {
   final RoleMap roles;
 }
 
+/// A system's status: `GET /api/systems/:id/status` (SPEC R12), readable with any token.
+class SystemStatus {
+  const SystemStatus({required this.id, required this.name, required this.url, required this.maintenance});
+
+  factory SystemStatus.fromJson(Map<String, Object?> json) => SystemStatus(
+    id: json['id'] as String,
+    name: json['name'] as String,
+    url: json['url'] as String?,
+    maintenance: json['maintenance'] as bool,
+  );
+
+  final String id;
+  final String name;
+
+  /// Where the system's users go (R10); null for none.
+  final String? url;
+
+  /// In maintenance (R11), rbacr gives nobody any role in this system, roots
+  /// included: every check answers no until it is turned off.
+  final bool maintenance;
+}
+
 /// Whether a grant gives its role now (SPEC G1).
 enum GrantStatus {
   active('active'),

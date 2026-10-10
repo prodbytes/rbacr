@@ -78,6 +78,14 @@ export interface System {
 	maintenance: boolean;
 }
 
+/** What any token may see of a system (R12): enough for its application to check it. */
+export interface SystemStatus {
+	id: string;
+	name: string;
+	url: string | null;
+	maintenance: boolean;
+}
+
 /** A role check (C3, C3a): whether the role is held, and until when at most (null: no end). */
 export interface RoleCheck {
 	allowed: boolean;
@@ -634,6 +642,22 @@ export class Rbac {
 		const [system] = await this.allSystems([systemId]);
 		if (!system) throw notFound(`System "${systemId}" not found`);
 		return system;
+	}
+
+	/**
+	 * A system's status (R12): its name, URL and whether it is in maintenance
+	 * (R11). Anyone may ask, so an application holding only its users' own
+	 * tokens can tell maintenance from a missing role.
+	 */
+	async systemStatus(systemId: string): Promise<SystemStatus> {
+		const meta = await this.get({ PK: sysPK(systemId), SK: 'META' });
+		if (!meta || !live(meta)) throw notFound(`System "${systemId}" not found`);
+		return {
+			id: systemId,
+			name: meta.name as string,
+			url: (meta.url as string | undefined) ?? null,
+			maintenance: meta.maintenance === true
+		};
 	}
 
 	async createSystem(actor: Actor, input: { id: string; name?: string; roles?: string[] }): Promise<System> {

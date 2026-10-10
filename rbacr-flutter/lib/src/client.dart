@@ -104,6 +104,21 @@ class RbacrClient {
   Future<AllRoles> allRoles({required String email}) async =>
       AllRoles.fromJson(await _send('POST', '/api/roles', {'email': email}));
 
+  /// [systemId]'s status (R12): name, URL and whether it is in maintenance
+  /// (R11). Any token may ask, so an app can tell "down for maintenance"
+  /// from a missing role. An unknown system throws a 404 [RbacrException].
+  Future<SystemStatus> systemStatus(String systemId) async =>
+      SystemStatus.fromJson(await _send('GET', '/api/systems/${Uri.encodeComponent(systemId)}/status'));
+
+  /// Every system's status, sorted by id: `GET /api/systems`. Roots only;
+  /// anyone else's token gets an empty list (P1).
+  Future<List<SystemStatus>> systems() async {
+    final json = await _send('GET', '/api/systems');
+    return List.unmodifiable(
+      (json['systems'] as List<Object?>).map((s) => SystemStatus.fromJson(s as Map<String, Object?>)),
+    );
+  }
+
   /// Redeems a voucher for the token's owner and returns the grant of its
   /// first role (V4); [redeemVoucherGrants] returns them all. A voucher that
   /// needs payment throws [RbacrPaymentRequired] (V4a).

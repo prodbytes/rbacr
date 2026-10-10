@@ -247,9 +247,17 @@ describe('rbacr API', { skip: !(await fetch(`${BASE}/health`).then((r) => r.ok, 
 		assert.equal(on.status, 200, JSON.stringify(on.body));
 		assert.equal(on.body.maintenance, true);
 		assert.equal(await check(), false);
+		// Any token sees the status (R12), so an app can tell maintenance from a missing role.
+		const status = await user('GET', `${path}/status`);
+		assert.equal(status.status, 200, JSON.stringify(status.body));
+		assert.deepEqual(Object.keys(status.body).sort(), ['id', 'maintenance', 'name', 'url']);
+		assert.equal(status.body.maintenance, true);
+		assert.equal((await user('GET', '/api/systems/no-such-system/status')).status, 404);
+		assert.equal((await call(`${path}/status`)).status, 401);
 		assert.deepEqual((await user('POST', '/api/roles', { email: USER, systemId: SYSTEM })).body.roles, []);
 		assert.deepEqual((await root('GET', '/api/me')).body.roles[SYSTEM], []);
 		assert.equal((await root('PATCH', path, { maintenance: false })).body.maintenance, false);
+		assert.equal((await user('GET', `${path}/status`)).body.maintenance, false);
 		assert.equal(await check(), true);
 	});
 
