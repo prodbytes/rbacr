@@ -1,14 +1,14 @@
 import { ScanCommand } from '@aws-sdk/lib-dynamodb';
 import { inject } from 'vitest';
-import { createTable, ensureTable, type Item, type Table } from '../dynamo';
+import { createTable, ensureTable, type Item, type Table, type TableKind } from '../dynamo';
 
 /**
  * A fresh, empty table on DynamoDB Local for one test, on the endpoint that
  * src/lib/server/testing/setup.ts provides.
  */
-export async function createTestTable(): Promise<Table> {
+export async function createTestTable(kind: TableKind = 'main'): Promise<Table> {
 	const table = createTable(`test-${crypto.randomUUID()}`, inject('dynamodbEndpoint'));
-	await ensureTable(table);
+	await ensureTable(table, kind);
 	return table;
 }
 

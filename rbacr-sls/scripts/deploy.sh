@@ -4,8 +4,9 @@
 #   1. builds the app and packages the Lambda zip (scripts/package-lambda.sh,
 #      which smoke-tests it)
 #   2. deploys the artifacts bucket (infra/artifacts.yaml, stack
-#      rbacr[-rc]-artifacts) and uploads the zip, and the DynamoDB table
-#      (infra/tables.yaml, stack rbacr[-rc]-tables, table rbacr[-rc])
+#      rbacr[-rc]-artifacts) and uploads the zip, and the DynamoDB tables
+#      (infra/tables.yaml, stack rbacr[-rc]-tables, tables rbacr[-rc] and
+#      rbacr[-rc]-sessions)
 #   3. deploys the app (infra/app.yaml, stack rbacr[-rc]: certificate,
 #      Lambda + function URL, CloudFront, DNS, and the Route 53 health check
 #      of /health with its e-mail alarm)
@@ -126,6 +127,14 @@ for pair in StripeWebhookSecret:RBACR_STRIPE_WEBHOOK_SECRET StripeApiKey:RBACR_S
   if [[ -n "${!name:-}" ]]; then params+=("$param=${!name}"); fi
 done
 params+=("HealthNotificationEmails=${HEALTH_EMAILS:-julio+health@nu01.com}")
+# Unset keeps the deployed value (default 365 days).
+if [[ -n "${RBACR_SESSION_RETENTION_DAYS:-}" ]]; then
+  if [[ ! "$RBACR_SESSION_RETENTION_DAYS" =~ ^[1-9][0-9]{0,4}$ ]]; then
+    echo "error: RBACR_SESSION_RETENTION_DAYS must be a whole number of days, 1 or more" >&2
+    exit 1
+  fi
+  params+=("SessionRetentionDays=$RBACR_SESSION_RETENTION_DAYS")
+fi
 # Addresses are people's: logged only as a count.
 roots=0; [[ -n "${RBACR_ROOT_LIST:-}" ]] && roots=$(tr ',' '\n' <<<"$RBACR_ROOT_LIST" | grep -c .)
 echo "    root allow list: $roots entr(ies)"
@@ -154,7 +163,9 @@ aws cloudformation deploy --stack-name "$TABLES_STACK" \
   --template-file infra/tables.yaml --parameter-overrides "TableName=$STACK" \
   --no-fail-on-empty-changeset
 table_arn="$(stack_output "$TABLES_STACK" TableArn)"
+sessions_table_arn="$(stack_output "$TABLES_STACK" SessionsTableArn)"
 echo "    table: $table_arn"
+echo "    sessions table: $sessions_table_arn"
 
 # 3. The app
 echo "==> deploying $STACK"
@@ -162,6 +173,7 @@ aws cloudformation deploy --stack-name "$STACK" \
   --template-file infra/app.yaml --capabilities CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND \
   --parameter-overrides "${params[@]}" "CodeBucket=$bucket" "CodeKey=$key" \
     "TableName=$STACK" "TableArn=$table_arn" \
+    "SessionsTableName=$STACK-sessions" "SessionsTableArn=$sessions_table_arn" \
   --no-fail-on-empty-changeset
 function_url="$(stack_output "$STACK" FunctionUrl)"
 

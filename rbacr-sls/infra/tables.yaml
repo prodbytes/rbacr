@@ -1,12 +1,14 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
-  rbacr-tables (and rbacr-rc-tables): the DynamoDB table holding all of a
-  stage's rbacr data (systems, roles, grants, vouchers, sessions, API
-  tokens). On-demand billing, point-in-time recovery, deletion protection,
-  and kept (Retain) if the stack goes away. Its shape matches
+  rbacr-tables (and rbacr-rc-tables): the DynamoDB tables of a stage. The
+  main table holds all rbacr data (systems, roles, grants, vouchers, API
+  tokens) and never deletes anything (SPEC L1); <name>-sessions holds the
+  sign-in sessions, purged by TTL a retention period after they expire
+  (SPEC S3). On-demand billing, point-in-time recovery, deletion
+  protection, and kept (Retain) if the stack goes away. Their shapes match
   tableDefinition() in src/lib/server/dynamo.ts. Deployed by
   scripts/deploy.sh before the app stack (infra/app.yaml), which reads the
-  table name and ARN from its outputs.
+  table names and ARNs from its outputs.
 
 Parameters:
   TableName:
@@ -50,8 +52,31 @@ Resources:
               KeyType: RANGE
           Projection:
             ProjectionType: ALL
-      # Sessions carry their expiry here (Unix seconds); DynamoDB deletes
-      # them some time after it passes.
+
+  SessionsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub ${TableName}-sessions
+      BillingMode: PAY_PER_REQUEST
+      DeletionProtectionEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      # Each session carries here (Unix seconds) its expiry plus the
+      # retention (RBACR_SESSION_RETENTION_DAYS); DynamoDB purges it after.
       TimeToLiveSpecification:
         AttributeName: ttl
         Enabled: true
@@ -61,3 +86,7 @@ Outputs:
     Value: !Ref Table
   TableArn:
     Value: !GetAtt Table.Arn
+  SessionsTableName:
+    Value: !Ref SessionsTable
+  SessionsTableArn:
+    Value: !GetAtt SessionsTable.Arn

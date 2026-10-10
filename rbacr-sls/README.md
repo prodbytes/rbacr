@@ -26,7 +26,8 @@ app on AWS Lambda. Run every command below from this folder
 - **Nothing is ever deleted.** Revoking a grant, removing a role, deleting a
   system, disabling a voucher, revoking a token or signing out marks the
   record with who did it and when (e.g. `revokedBy`, `revokedAt`), and
-  rbacr hides it from then on, so every change can be audited.
+  rbacr hides it from then on, so every change can be audited. Only
+  sign-in sessions are purged, a year (configurable) after they expire.
 - **Vouchers** are codes like `7JH2-UQF5-XA7B-VMQT` that grant a role when
   redeemed, either in one system or **globally**. A global voucher gives the
   role in every system that defines it, and only roots can create global
@@ -79,7 +80,9 @@ Devbox scripts: `devbox run dev | test | check | build | certs | release-rc | re
 | Variable | Required | Purpose |
 |----------|----------|---------|
 | `RBACR_DYNAMODB_TABLE` | yes | The DynamoDB table holding all data. Locally `rbacr` on DynamoDB Local; in AWS the stage's table (`rbacr`, `rbacr-rc`) |
-| `RBACR_DYNAMODB_ENDPOINT` | no | DynamoDB Local's URL in development (process-compose sets `http://127.0.0.1:8642`); the app creates the table there |
+| `RBACR_DYNAMODB_SESSIONS_TABLE` | no | The table holding sign-in sessions (default `<RBACR_DYNAMODB_TABLE>-sessions`; in AWS `rbacr-sessions`, `rbacr-rc-sessions`) |
+| `RBACR_SESSION_RETENTION_DAYS` | no | Days a session record is kept after it expires before DynamoDB's TTL purges it (default 365). In AWS, set it for `scripts/deploy.sh` (the stack's `SessionRetentionDays`). |
+| `RBACR_DYNAMODB_ENDPOINT` | no | DynamoDB Local's URL in development (process-compose sets `http://127.0.0.1:8642`); the app creates the tables there |
 | `RBACR_ROOT_LIST` | no | Comma-separated root addresses and/or domains, e.g. `ana@example.com, @example.org`: the only way to be a root. An invalid entry stops the app from starting. In AWS it defaults to `@nu01.com`. |
 | `RBACR_GOOGLE_CLIENT_ID` / `RBACR_GOOGLE_CLIENT_SECRET` | for sign-in | Google OAuth web client |
 | `RBACR_PUBLIC_ORIGIN` | no | The origin users browse, used for the Google redirect URI (default: the request's origin) |

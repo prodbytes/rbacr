@@ -8,7 +8,7 @@ rbacr's AWS infrastructure, as CloudFormation templates. Everything lives in
 | [zone.yaml](zone.yaml) | `rbacr-zone` | The public hosted zone `rbacr.nu01.com`, its NS delegation in the `nu01.com` zone, a CAA record (only Amazon issues certificates), and `local.rbacr.nu01.com → 127.0.0.1` for local HTTPS | An administrator, once |
 | [github-deploy.yaml](github-deploy.yaml) | `rbacr-github-deploy` | The `rbacr-github-deploy` role (`*GA` tags), the `rbacr-github-deploy-rc` role (`*RC*` tags and manual runs from `main`), and the `rbacr-lambda-boundary` permissions boundary | An administrator, once |
 | [artifacts.yaml](artifacts.yaml) | `rbacr-artifacts`, `rbacr-rc-artifacts` | A private bucket for the Lambda zips; old zips expire after 90 days | [scripts/deploy.sh](../scripts/deploy.sh) |
-| [tables.yaml](tables.yaml) | `rbacr-tables`, `rbacr-rc-tables` | The DynamoDB table (`rbacr`, `rbacr-rc`): on demand, point-in-time recovery, deletion protection, kept if the stack is deleted | [scripts/deploy.sh](../scripts/deploy.sh) |
+| [tables.yaml](tables.yaml) | `rbacr-tables`, `rbacr-rc-tables` | The DynamoDB tables (`rbacr` and `rbacr-sessions`, `rbacr-rc` and `rbacr-rc-sessions`): on demand, point-in-time recovery, deletion protection, kept if the stack is deleted | [scripts/deploy.sh](../scripts/deploy.sh) |
 | [app.yaml](app.yaml) | `rbacr`, `rbacr-rc` | The ACM certificate, the origin secret, the Lambda with its function URL and log group, the CloudFront distribution, the A/AAAA aliases, and the Route 53 health check of `/health` with its alarm and e-mail topic | [scripts/deploy.sh](../scripts/deploy.sh) |
 
 ## How a request flows
@@ -55,13 +55,19 @@ browser ──https──▶ CloudFront (rbacr.nu01.com, ACM certificate)
   deploy. The template uses the `AWS::LanguageExtensions` transform
   (`Fn::ForEach` over the addresses), so deploys pass
   `CAPABILITY_AUTO_EXPAND`.
-- **Database.** Each stage has one DynamoDB table (`infra/tables.yaml`,
-  stack `<stack>-tables`), deployed before the app, which gets its name and
-  ARN. On-demand billing, so an idle stage costs only storage (the first
+- **Database.** Each stage has two DynamoDB tables (`infra/tables.yaml`,
+  stack `<stack>-tables`), deployed before the app, which gets their names
+  and ARNs: the main table, which never deletes anything (SPEC L1), and
+  `<stack>-sessions` for sign-in sessions. On-demand billing, so an idle stage costs only storage (the first
   25 GB are free). Point-in-time recovery, deletion protection and
   `DeletionPolicy: Retain` keep the data safe from a mistaken stack
-  deletion. The function's role may only read and write that table and its
-  index. Expired sessions are removed by DynamoDB's TTL (`ttl` attribute).
+  deletion. The function's role may only read and write those tables and
+  the main one's index. DynamoDB's TTL (`ttl` attribute) purges a session
+  `SessionRetentionDays` after it expires (default 365;
+  `RBACR_SESSION_RETENTION_DAYS` for scripts/deploy.sh; unset keeps the
+  deployed value). The sessions tables are named in `rbacr-lambda-boundary`
+  and the deploy roles ([github-deploy.yaml](github-deploy.yaml)), so
+  redeploy that stack by hand before the first deploy that creates them.
 
 ## Releases
 

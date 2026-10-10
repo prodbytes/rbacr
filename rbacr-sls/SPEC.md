@@ -28,6 +28,9 @@ and the README in sync with the code.
   The browser holds a random token in the `rbacr_session` cookie (`HttpOnly`,
   `SameSite=Lax`, `Secure` outside dev). The database stores only the token's
   SHA-256 hash. Signing out (`POST /logout`) revokes the session (L1).
+  Sessions are kept in a table of their own, which DynamoDB's TTL purges
+  `RBACR_SESSION_RETENTION_DAYS` days (default 365) after each session
+  expires. This retention is the only physical deletion in rbacr (L1).
 - **S4** For local development only, `/login/dev` signs in as any address
   without Google when `RBACR_DEV_LOGIN=1`. Production builds always return 404
   for it.
@@ -173,6 +176,9 @@ Nothing in rbacr is physically deleted, so every change can be audited.
 
   `…By` is the acting root's (or the token or session owner's) address, or
   `stripe` for the subscription sync (Q3). Redemptions are never deleted.
+  Expired tokens stay too; the main table has no TTL. The one exception is
+  sessions: DynamoDB purges each one the retention period after it
+  expires (S3).
 - **L2** A record is deleted once its deletion date is set; rbacr then
   treats it as gone. A revoked grant gives no role and isn't listed; a
   removed role or implication, or a deleted system, isn't in the catalog
@@ -444,7 +450,9 @@ All settings come from environment variables prefixed `RBACR_`:
 
 | Variable | Required | Purpose |
 |----------|----------|---------|
-| `RBACR_DYNAMODB_TABLE` | yes | The DynamoDB table holding all data (`rbacr`, `rbacr-rc`; `infra/tables.yaml`) |
+| `RBACR_DYNAMODB_TABLE` | yes | The DynamoDB table holding all data but sessions (`rbacr`, `rbacr-rc`; `infra/tables.yaml`) |
+| `RBACR_DYNAMODB_SESSIONS_TABLE` | no | The sessions table (S3); default `<RBACR_DYNAMODB_TABLE>-sessions` |
+| `RBACR_SESSION_RETENTION_DAYS` | no | Whole days (1 or more) a session record is kept after it expires, then purged by TTL (S3); default 365. An invalid value stops the app from starting. In AWS it is the app stack's `SessionRetentionDays` parameter. |
 | `RBACR_DYNAMODB_ENDPOINT` | no | DynamoDB Local's URL for development (e.g. `http://127.0.0.1:8642`); the app creates its table there. Unset in AWS. |
 | `RBACR_ROOT_LIST` | no (no roots if empty; in AWS the default is `@nu01.com`) | Root addresses and domains (R1, R1a) |
 | `RBACR_GOOGLE_CLIENT_ID`, `RBACR_GOOGLE_CLIENT_SECRET` | for Google sign-in | OAuth web client. Without them `/login/google` returns 503. |
@@ -461,8 +469,9 @@ All settings come from environment variables prefixed `RBACR_`:
   fronted by CloudFront ([infra/app.yaml](infra/app.yaml)). The request's
   host comes from the `x-rbacr-host` header (adapter-node's `HOST_HEADER`),
   which CloudFront sets, and the protocol is assumed to be `https`.
-- DynamoDB: one on-demand table per stage ([infra/tables.yaml](infra/tables.yaml)),
-  DynamoDB Local in development ([compose.yaml](compose.yaml)) and in the
+- DynamoDB: two on-demand tables per stage ([infra/tables.yaml](infra/tables.yaml)),
+  the main one and `<name>-sessions` (S3),
+  on DynamoDB Local in development ([compose.yaml](compose.yaml)) and in the
   unit tests. The item layout is documented in
   [src/lib/server/rbac.ts](src/lib/server/rbac.ts); it needs no migrations.
 - **D1** Writes that must not race are single DynamoDB transactions with
