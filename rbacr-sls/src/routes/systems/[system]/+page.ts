@@ -29,6 +29,8 @@ export interface Voucher {
 	createdBy: string;
 	createdAt: string;
 	disabledAt: string | null;
+	/** Who disabled it (SPEC L1, L3). */
+	disabledBy: string | null;
 }
 
 export const load: PageLoad = ({ fetch, params }) =>

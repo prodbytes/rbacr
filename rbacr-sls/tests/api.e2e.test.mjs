@@ -294,6 +294,10 @@ describe('rbacr API', { skip: !(await fetch(`${BASE}/health`).then((r) => r.ok, 
 		const html = await res.text();
 		assert.match(html, new RegExp(SYSTEM));
 		assert.match(html, /viewer/);
+		// Roots see who disabled a voucher (L1).
+		const page = await fetch(`${BASE}/systems/${SYSTEM}`, { headers: { cookie: creds[0].cookie, accept: 'text/html' } });
+		assert.equal(page.status, 200);
+		assert.match(await page.text(), new RegExp(`Disabled by ${ROOT}`));
 	});
 
 	it('validates input with JSON errors', async () => {

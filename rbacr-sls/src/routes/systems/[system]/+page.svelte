@@ -217,7 +217,13 @@
 					<td class="muted">{formatDate(v.startsAt)}</td>
 					<td class="muted">{formatDate(v.endsAt)}</td>
 					<td class="muted">{v.createdBy}</td>
-					<td>{#if !v.disabledAt}<button class="danger" onclick={() => disable(v.code)}>Disable</button>{/if}</td>
+					<td>
+						{#if v.disabledAt}
+							<span class="muted">Disabled by {v.disabledBy ?? '—'}, {formatDate(v.disabledAt)}</span>
+						{:else}
+							<button class="danger" onclick={() => disable(v.code)}>Disable</button>
+						{/if}
+					</td>
 				</tr>
 			{/each}
 		</tbody>
