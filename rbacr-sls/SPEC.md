@@ -18,6 +18,7 @@ and the README in sync with the code.
 | Voucher | A code that grants a role to whoever redeems it: in one system, or globally (a global grant). |
 | Subscriber | A paying subscriber of the newsletter (Substack) whose payments run on the publisher's Stripe account. |
 | API token | A person's secret token for the external API (`/api`). It acts as that person, with their current roles. |
+| Notification | A warning for the roots (rbacr's admins), raised by a verification rule (N1-N4). |
 
 ## Identity and sign-in
 
@@ -153,6 +154,7 @@ and the README in sync with the code.
 | Grant or revoke roles, to addresses, domains or globally | ✓ | — |
 | Create, list or disable vouchers (per system or global) | ✓ | — |
 | See the root allow list (`/settings`) | ✓ | — |
+| See, check or dismiss notifications (N1-N4) | ✓ | — |
 
 - **P1** Only roots manage: everything but the first four rows is refused
   to anyone else with 403. Holding a role (any name) never grants
@@ -219,6 +221,40 @@ and the README in sync with the code.
   uses. Redemptions recorded before V7 report only `email` and
   `redeemedAt`. Attempts that fail (402, 404, 409) record nothing.
 
+## Notifications
+
+- **N1** rbacr warns its admins, the roots, about things that need their
+  attention with **notifications**, which only roots see (403 for anyone
+  else) and which every root shares. Each has an `id` naming its finding, a
+  `kind`, a `severity` (`warning`), a `message`, the details of its kind,
+  when it was raised (`raisedAt`), and a `status`: `open`, `resolved` or
+  `dismissed`. The `/notifications` page lists them, open ones first, and
+  the navigation shows roots how many are open.
+- **N2** Notifications come from **verification rules**, which run every
+  time a root signs in (Google or the dev login, S1, S4) and when a root
+  asks on the page (`POST /vpi/notifications/check`). If they fail, the
+  failure is logged and the sign-in goes ahead. A run raises a notification
+  for each new finding, raises one again (`open`, a new `raisedAt`) when
+  the finding of a resolved one is back, updates an open one's details,
+  and marks open ones whose finding is gone `resolved` (`resolvedAt`). A
+  finding is raised once however often the rules run, since its `id`
+  names it.
+- **N3 Expiring vouchers.** A voucher that is not disabled or used up
+  (V3) and ends within 7 days (now < `endsAt` ≤ now + 7 days) needs a
+  **replacement** for each of its roles: another voucher of the same scope
+  (the same system, or global for a global voucher) that grants the role,
+  isn't disabled, used up or expired, is valid by the time the first one
+  ends (`startsAt` ≤ its `endsAt`, so no gap) and ends later or never. If
+  some role has none, a `voucher-expiring` warning names the voucher
+  (`voucherCode`, `systemId`, `endsAt`) and the roles left without one
+  (`roles`); its `id` is `voucher-expiring:<code's letters and digits>`.
+  It resolves once every role has a replacement, or the voucher has
+  expired or been disabled.
+- **N4** A root can dismiss a notification for every root
+  (`DELETE /vpi/notifications/:id`), for good: it records `dismissedAt`
+  and `dismissedBy` (L1), keeps the first dismissal if dismissed again, and
+  is never raised or resolved again. An unknown id gives 404.
+
 ## Logical deletion
 
 Nothing in rbacr is physically deleted, so every change can be audited.
@@ -233,6 +269,7 @@ Nothing in rbacr is physically deleted, so every change can be audited.
   | Drop an implication (R7) | the implication | `removedAt`, `removedBy` |
   | Delete a system | the system | `deletedAt`, `deletedBy` |
   | Disable a voucher | the voucher | `disabledAt`, `disabledBy` |
+  | Dismiss a notification (N4) | the notification | `dismissedAt`, `dismissedBy` |
   | Revoke an API token | the token | `revokedAt`, `revokedBy` |
   | Sign out | the session | `revokedAt`, `revokedBy` |
 
@@ -502,8 +539,11 @@ frontend (`src/lib/vpi.ts`) is its only client. The routes are
 `GET|PATCH|DELETE /vpi/systems/:id`, `POST /vpi/systems/:id/roles`,
 `PUT|DELETE /vpi/systems/:id/roles/:role`, `POST|DELETE /vpi/systems/:id/grants`,
 `POST /vpi/systems/:id/vouchers`, `DELETE /vpi/vouchers/:code`,
-`GET /vpi/global`, `POST|DELETE /vpi/global/grants` and
-`POST /vpi/global/vouchers`. They return the same errors as `/api`; a
+`GET /vpi/global`, `POST|DELETE /vpi/global/grants`,
+`POST /vpi/global/vouchers`, `GET /vpi/vouchers/:code/redemptions`,
+`GET /vpi/notifications`, `POST /vpi/notifications/check` and
+`DELETE /vpi/notifications/:id` (N1-N4). `GET /vpi/session` gives roots
+the number of open notifications. They return the same errors as `/api`; a
 missing session gives 401.
 
 ### Pages
@@ -514,8 +554,9 @@ see the root allow list), `/systems`
 (manageable systems; create one from its name alone, which also makes its
 id), `/systems/:id` (its URL; its roles, each marked for everyone or not
 and with the roles it implies, added and removed one at a time; grants;
-vouchers) and `/global` (roots: global
-grants and vouchers). Roles are always picked from those that exist,
+vouchers) `/global` (roots: global
+grants and vouchers) and `/notifications` (roots: open notifications, with
+a check-now button and dismissal, then the resolved and dismissed ones). Roles are always picked from those that exist,
 never typed (except a new role's name): grant and subscriber forms offer a
 list, voucher forms checkboxes, of the system's roles, or on `/global` of
 every role some system has. Wherever a system's role names are printed
@@ -593,9 +634,9 @@ All settings come from environment variables prefixed `RBACR_`:
 
 | Suite | Command | Covers |
 |-------|---------|--------|
-| Unit and domain | `npx vitest --run` | Identity parsing, the R*, G*, P*, V*, Q*, T*, L* and D* rules against DynamoDB Local (a Docker container started by the test setup, or `RBACR_TEST_DYNAMODB_ENDPOINT`), the A3 guard, sessions, Google OAuth exchange |
+| Unit and domain | `npx vitest --run` | Identity parsing, the R*, G*, P*, V*, N*, Q*, T*, L* and D* rules against DynamoDB Local (a Docker container started by the test setup, or `RBACR_TEST_DYNAMODB_ENDPOINT`), the A3 guard, sessions, Google OAuth exchange |
 | Lambda smoke | `npm run test:lambda` | The production build invoked through `lambda.js` with function URL (v2) events: H1, H2, A1, A3 and the Stripe webhook's signature check (Q1), the version, redirects, 401s, static assets. `scripts/package-lambda.sh` reruns it against the deployable bundle. |
-| End-to-end | `npm run test:e2e` | `/api` with personal tokens, `/vpi` as the frontend, the A1/A3 separation, and the pages, against a running dev server with DynamoDB Local, directly or through Floci over HTTPS |
+| End-to-end | `npm run test:e2e` | `/api` with personal tokens, `/vpi` as the frontend (notifications included), the A1/A3 separation, and the pages, against a running dev server with DynamoDB Local, directly or through Floci over HTTPS |
 | Live | `scripts/deploy.sh` (last step) | The deployed site: version, sign-in page, 401 (also for an unknown token, which reads DynamoDB), 404 for `/login/dev`, 403 for the bare function URL |
 
 `npm test` runs the first two.

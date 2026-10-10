@@ -50,6 +50,13 @@ app on AWS Lambda. Run every command below from this folder
   optional. Every redemption is kept as a **RedeemEvent** (who, when, from
   the API or the page, and what it did to each role); open a voucher's
   uses on its page to see them, or `GET /api/vouchers/:code/redemptions`.
+- **Notifications** warn roots about things that need attention, on
+  `/notifications` (the navigation shows how many are open). rbacr checks
+  each time a root signs in, or on demand from that page. For now it warns
+  when a voucher ends within a week and no other voucher of the same
+  system (or global) takes over its roles, valid from when it ends and
+  ending later. A warning clears itself once its cause is gone; a root
+  can also dismiss it for everyone.
 - **Everyone** can sign in, see their own roles at `/me` and redeem vouchers.
   `/settings` shows the running version and the API's address; roots also
   see the root allow list there.

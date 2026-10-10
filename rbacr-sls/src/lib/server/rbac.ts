@@ -121,6 +121,36 @@ export interface RedeemEvent {
 	grants: RedeemedGrant[];
 }
 
+/** How long before a voucher ends its roots are warned that nothing replaces it (N3). */
+export const VOUCHER_EXPIRY_WARNING_DAYS = 7;
+
+/** open: needs attention; resolved: its finding no longer holds (N2); dismissed: a root set it aside (N4). */
+export type NotificationStatus = 'open' | 'resolved' | 'dismissed';
+
+/**
+ * A notification for the roots (N1), raised by a verification rule (N2).
+ * Its id names its finding, so a finding is raised once however often the
+ * rules run. The only kind so far is `voucher-expiring` (N3).
+ */
+export interface Notification {
+	id: string;
+	kind: 'voucher-expiring';
+	severity: 'warning';
+	message: string;
+	/** The voucher's scope: its system, or null for a global voucher. */
+	systemId: string | null;
+	voucherCode: string;
+	/** The voucher's roles no other voucher takes over, sorted. */
+	roles: string[];
+	/** When the voucher ends. */
+	endsAt: Date;
+	raisedAt: Date;
+	resolvedAt: Date | null;
+	dismissedAt: Date | null;
+	dismissedBy: string | null;
+	status: NotificationStatus;
+}
+
 /** A role check (C3, C3a): whether the role is held, and until when at most (null: no end). */
 export interface RoleCheck {
 	allowed: boolean;
@@ -280,6 +310,7 @@ export const MAX_VOUCHER_ROLES = 20;
  *   redemption  PK VOUCHER#<key>  SK REDEEMED#<email>       (the RedeemEvent, V7)
  *               (<key> is the code's letters and digits, V2; vouchers made before
  *               custom codes are keyed by their XXXX-XXXX-XXXX-XXXX code)
+ *   notification PK NOTIFS        SK NOTIF#<id>                (N1; dismissed ones carry dismissedAt / dismissedBy)
  *   history     PK as the item   SK HIST#<its SK>#<when it was deleted>  (L4)
  *
  * Nothing is deleted (L1): a revoked grant carries revokedAt / revokedBy, a
@@ -294,6 +325,8 @@ export const MAX_VOUCHER_ROLES = 20;
 const sysPK = (id: string) => `SYS#${id}`;
 const GLOBAL_PK = 'GLOBAL';
 const GLOBAL_VOUCHERS = '*';
+const NOTIFS_PK = 'NOTIFS';
+const notifKey = (id: string) => ({ PK: NOTIFS_PK, SK: `NOTIF#${id}` });
 const roleKey = (systemId: string, role: string) => ({ PK: sysPK(systemId), SK: `ROLE#${role}` });
 const grantKey = (systemId: string | null, role: string, grantee: string) => ({
 	PK: systemId === null ? GLOBAL_PK : sysPK(systemId),
@@ -442,6 +475,22 @@ const toRedeemEvent = (it: Item, voucher: Voucher): RedeemEvent => ({
 				: null
 		};
 	})
+});
+
+const toNotification = (it: Item): Notification => ({
+	id: it.id as string,
+	kind: it.kind as Notification['kind'],
+	severity: it.severity as Notification['severity'],
+	message: it.message as string,
+	systemId: (it.systemId as string | undefined) ?? null,
+	voucherCode: it.voucherCode as string,
+	roles: it.roles as string[],
+	endsAt: new Date(it.endsAt as string),
+	raisedAt: new Date(it.raisedAt as string),
+	resolvedAt: date(it.resolvedAt),
+	dismissedAt: date(it.dismissedAt),
+	dismissedBy: (it.dismissedBy as string | undefined) ?? null,
+	status: it.dismissedAt ? 'dismissed' : it.resolvedAt ? 'resolved' : 'open'
 });
 
 /** The later of two ends, where null (never) is latest and undefined means none yet. */
@@ -1536,6 +1585,131 @@ export class Rbac {
 			// Otherwise a grant changed meanwhile: retry with it.
 		}
 		throw new RbacError(409, 'The voucher changed meanwhile; try again');
+	}
+
+	// --- notifications (N1-N4, roots only) -------------------------------------
+
+	/**
+	 * N3: vouchers (not disabled or used up) ending within a week whose roles
+	 * no other voucher of the same scope takes over: a voucher, not disabled,
+	 * used up or expired, granting that role, valid by the time this one
+	 * ends (no gap) and ending later (or never). One finding per voucher,
+	 * naming the roles left uncovered.
+	 */
+	private async expiringVoucherFindings(now: Date): Promise<Item[]> {
+		const horizon = new Date(now.getTime() + VOUCHER_EXPIRY_WARNING_DAYS * 24 * 60 * 60 * 1000);
+		const usable = (v: Voucher) => ['active', 'not-started'].includes(voucherStatus(v, now));
+		const systems = (await queryIndex(this.table, 'SYSTEMS')).filter(live).map((it) => it.id as string);
+		const findings: Item[] = [];
+		for (const scope of [GLOBAL_VOUCHERS, ...systems]) {
+			const vouchers = (await queryIndex(this.table, `VOUCHERS#${scope}`)).map(toVoucher).filter(usable);
+			for (const v of vouchers) {
+				const endsAt = v.endsAt;
+				if (!endsAt || endsAt > horizon) continue;
+				const replaces = (o: Voucher, role: string) =>
+					o.code !== v.code &&
+					o.roles.includes(role) &&
+					(o.startsAt === null || o.startsAt <= endsAt) &&
+					(o.endsAt === null || o.endsAt > endsAt);
+				const roles = v.roles.filter((role) => !vouchers.some((o) => replaces(o, role)));
+				if (!roles.length) continue;
+				const id = `voucher-expiring:${compactVoucherCode(v.code)}`;
+				const where = v.systemId === null ? 'Global voucher' : `Voucher of ${v.systemId}`;
+				const when = endsAt.toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
+				findings.push({
+					...notifKey(id),
+					id,
+					kind: 'voucher-expiring',
+					severity: 'warning',
+					message: `${where} ${v.code} ends ${when}, and no other voucher grants ${roles.join(', ')} after it.`,
+					systemId: v.systemId ?? undefined,
+					voucherCode: v.code,
+					roles,
+					endsAt: endsAt.toISOString()
+				});
+			}
+		}
+		return findings;
+	}
+
+	/**
+	 * Runs the verification rules (N2), as a root's sign-in does: raises a
+	 * notification for each new finding, reopens a resolved one whose finding
+	 * is back, updates an open one's roles, and resolves open ones whose
+	 * finding is gone. Dismissed notifications are left alone (N4). Returns
+	 * the notifications, as listNotifications does.
+	 */
+	async verify(actor: Actor): Promise<Notification[]> {
+		requireRoot(actor, 'Only roots can run the verification rules');
+		const now = this.now();
+		const findings = await this.expiringVoucherFindings(now);
+		const existing = new Map((await queryPrefix(this.table, NOTIFS_PK, 'NOTIF#')).map((it) => [it.id as string, it]));
+		const ignoreRace = (err: unknown) => {
+			// Another sign-in (or a dismissal) got there first; its result stands.
+			if ((err as Error).name !== 'ConditionalCheckFailedException') throw err;
+		};
+		for (const f of findings) {
+			const it = existing.get(f.id as string);
+			if (it?.dismissedAt) continue;
+			const open = it && !it.resolvedAt;
+			if (open && (it.roles as string[]).join() === (f.roles as string[]).join()) continue;
+			await this.put(
+				{ ...f, raisedAt: open ? it.raisedAt : now.toISOString() },
+				it ? 'attribute_not_exists(dismissedAt)' : 'attribute_not_exists(PK)'
+			).catch(ignoreRace);
+		}
+		const found = new Set(findings.map((f) => f.id as string));
+		for (const it of existing.values()) {
+			if (found.has(it.id as string) || it.resolvedAt || it.dismissedAt) continue;
+			await this.table.doc
+				.send(
+					new UpdateCommand({
+						TableName: this.table.name,
+						Key: notifKey(it.id as string),
+						UpdateExpression: 'SET resolvedAt = :at',
+						ConditionExpression: 'raisedAt = :raised AND attribute_not_exists(resolvedAt) AND attribute_not_exists(dismissedAt)',
+						ExpressionAttributeValues: { ':at': now.toISOString(), ':raised': it.raisedAt }
+					})
+				)
+				.catch(ignoreRace);
+		}
+		return this.listNotifications(actor);
+	}
+
+	/** The roots' notifications (N1): open ones first, then the rest, each newest first. */
+	async listNotifications(actor: Actor): Promise<Notification[]> {
+		requireRoot(actor, 'Only roots can see notifications');
+		const order: Record<NotificationStatus, number> = { open: 0, resolved: 1, dismissed: 1 };
+		return (await queryPrefix(this.table, NOTIFS_PK, 'NOTIF#'))
+			.map(toNotification)
+			.sort((a, b) => order[a.status] - order[b.status] || b.raisedAt.getTime() - a.raisedAt.getTime());
+	}
+
+	/** How many notifications are open (N1); 0 for anyone but roots, who see none. */
+	async openNotificationCount(actor: Actor): Promise<number> {
+		if (!actor.root) return 0;
+		return (await this.listNotifications(actor)).filter((n) => n.status === 'open').length;
+	}
+
+	/** Dismisses a notification for every root, for good (N4, L1). Dismissing it again changes nothing. */
+	async dismissNotification(actor: Actor, id: string): Promise<Notification> {
+		requireRoot(actor, 'Only roots can dismiss notifications');
+		try {
+			const { Attributes } = await this.table.doc.send(
+				new UpdateCommand({
+					TableName: this.table.name,
+					Key: notifKey(id),
+					UpdateExpression: 'SET dismissedAt = if_not_exists(dismissedAt, :at), dismissedBy = if_not_exists(dismissedBy, :by)',
+					ConditionExpression: 'attribute_exists(PK)',
+					ExpressionAttributeValues: { ':at': this.now().toISOString(), ':by': actor.email },
+					ReturnValues: 'ALL_NEW'
+				})
+			);
+			return toNotification(Attributes!);
+		} catch (err) {
+			if ((err as Error).name === 'ConditionalCheckFailedException') throw notFound('Notification not found');
+			throw err;
+		}
 	}
 
 	// --- role queries (the external API) -------------------------------------

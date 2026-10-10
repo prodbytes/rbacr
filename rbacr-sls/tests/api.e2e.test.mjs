@@ -397,6 +397,43 @@ describe('rbacr API', { skip: !(await fetch(`${BASE}/health`).then((r) => r.ok, 
 		assert.equal((await root('POST', '/api/systems', 'nope')).status, 400);
 	});
 
+	it('warns roots when they sign in about vouchers ending with nothing to replace them (N1-N4)', async () => {
+		// A role of its own, so no voucher from the tests above replaces this one.
+		assert.equal((await root('POST', `/api/systems/${SYSTEM}/roles`, { role: 'notified' })).status, 200);
+		const day = 24 * 60 * 60 * 1000;
+		const voucher = (endsAt) =>
+			root('POST', `/api/systems/${SYSTEM}/vouchers`, { roles: ['notified'], endsAt: new Date(Date.now() + endsAt).toISOString() });
+		const v = (await voucher(3 * day)).body;
+		const cookie = await login(ROOT); // a root's sign-in runs the rules
+		const mine = async (path = '/notifications', method = 'GET') => {
+			const res = await vpi(cookie, method, path);
+			assert.equal(res.status, 200, JSON.stringify(res.body));
+			return res.body.notifications.find((n) => n.voucherCode === v.code);
+		};
+		const n = await mine();
+		assert.deepEqual(
+			{ status: n.status, kind: n.kind, systemId: n.systemId, roles: n.roles },
+			{ status: 'open', kind: 'voucher-expiring', systemId: SYSTEM, roles: ['notified'] }
+		);
+		assert.ok((await vpi(cookie, 'GET', '/session')).body.user.openNotifications >= 1);
+		assert.equal((await vpi(creds[2].cookie, 'GET', '/notifications')).status, 403);
+		assert.equal((await vpi(creds[2].cookie, 'POST', '/notifications/check')).status, 403);
+		assert.equal((await vpi(creds[2].cookie, 'GET', '/session')).body.user.openNotifications, 0);
+		// A replacement resolves it; losing the replacement opens it again.
+		const substitute = (await voucher(30 * day)).body;
+		assert.equal((await mine('/notifications/check', 'POST')).status, 'resolved');
+		assert.equal((await root('DELETE', `/api/vouchers/${substitute.code}`)).status, 200);
+		assert.equal((await mine('/notifications/check', 'POST')).status, 'open');
+		const page = await fetch(`${BASE}/notifications`, { headers: { cookie, accept: 'text/html' } });
+		assert.match(await page.text(), new RegExp(v.code));
+		// Dismissed for good.
+		const dismissed = await vpi(cookie, 'DELETE', `/notifications/${encodeURIComponent(n.id)}`);
+		assert.equal(dismissed.status, 200);
+		assert.equal(dismissed.body.dismissedBy, ROOT);
+		assert.equal((await mine('/notifications/check', 'POST')).status, 'dismissed');
+		assert.equal((await vpi(cookie, 'DELETE', '/notifications/voucher-expiring%3ANOPE')).status, 404);
+	});
+
 	it('lets roots delete systems', async () => {
 		assert.equal((await root('DELETE', `/api/systems/${SYSTEM}`)).status, 204);
 		assert.equal((await user('GET', '/api/me')).body.roles[SYSTEM], undefined);

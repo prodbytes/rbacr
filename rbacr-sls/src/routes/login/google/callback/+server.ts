@@ -20,6 +20,6 @@ export const GET: RequestHandler = async ({ url, cookies }) => {
 		console.error(err);
 		error(401, 'Google sign-in failed');
 	}
-	await signIn((await getServices()).sessions, cookies, email);
+	await signIn(await getServices(), cookies, email);
 	redirect(303, '/me');
 };

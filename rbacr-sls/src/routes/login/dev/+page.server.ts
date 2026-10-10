@@ -22,7 +22,7 @@ export const actions: Actions = {
 		ensureEnabled();
 		const email = normalizeEmail(String((await request.formData()).get('email') ?? ''));
 		if (!email) return fail(400, { error: 'Enter a valid e-mail address' });
-		await signIn((await getServices()).sessions, cookies, email);
+		await signIn(await getServices(), cookies, email);
 		redirect(303, '/me');
 	}
 };
