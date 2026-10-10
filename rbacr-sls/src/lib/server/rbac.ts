@@ -59,6 +59,13 @@ export interface System {
 	subscriberRole: string | null;
 }
 
+/** A role check (C3, C3a): whether the role is held, and until when at most (null: no end). */
+export interface RoleCheck {
+	allowed: boolean;
+	/** Only when allowed: when the grants giving the role end; null if they never do. */
+	expiresAt: Date | null;
+}
+
 /** What the subscription sync did to one grant (Q2, Q3). */
 export interface SubscriberSync {
 	/** null for a global grant (left over from an earlier configuration). */
@@ -281,6 +288,10 @@ const toVoucher = (it: Item): Voucher => ({
 	disabledAt: date(it.disabledAt)
 });
 
+/** The later of two ends, where null (never) is latest and undefined means none yet. */
+const laterEnd = (a: Date | null | undefined, b: Date | null): Date | null =>
+	a === undefined ? b : a === null || b === null ? null : a > b ? a : b;
+
 /** Every role reachable from `held` through `edges` (role -> implied roles), `held` included. */
 function closure(held: Iterable<string>, edges: Map<string, string[]>): Set<string> {
 	const out = new Set<string>();
@@ -371,28 +382,46 @@ export class Rbac {
 	}
 
 	private async grantedRoles(email: string): Promise<RoleMap> {
-		// Direct grants, plus global grants in every system whose catalog has the
-		// role, then everything those roles imply in their system (transitively).
-		const held = new Map<string, Set<string>>();
-		const add = (systemId: string, role: string) => {
-			if (!held.has(systemId)) held.set(systemId, new Set());
-			held.get(systemId)!.add(role);
+		const ends = await this.grantedRoleEnds(email);
+		return Object.fromEntries([...ends].map(([systemId, roles]) => [systemId, [...roles.keys()].sort()]));
+	}
+
+	/**
+	 * Each role an identity holds through grants, per system, with when it
+	 * stops holding it at the latest (C3a): the last end among the grants
+	 * valid now that give it, directly or by implication; null if one of
+	 * them never ends. Direct grants, plus global grants in every system
+	 * whose catalog has the role, then everything those roles imply in their
+	 * system (transitively). Systems sorted.
+	 */
+	private async grantedRoleEnds(email: string): Promise<Map<string, Map<string, Date | null>>> {
+		const held = new Map<string, Map<string, Date | null>>();
+		const add = (systemId: string, role: string, end: Date | null) => {
+			if (!held.has(systemId)) held.set(systemId, new Map());
+			const roles = held.get(systemId)!;
+			roles.set(role, laterEnd(roles.get(role), end));
 		};
 		const items = await this.grantItemsOf(email);
-		const globalRoles = new Set<string>();
+		const globalEnds = new Map<string, Date | null>();
 		for (const it of items) {
-			if (it.PK === GLOBAL_PK) globalRoles.add(it.role as string);
-			else add(it.systemId as string, it.role as string);
+			const end = date(it.endsAt);
+			if (it.PK === GLOBAL_PK) globalEnds.set(it.role as string, laterEnd(globalEnds.get(it.role as string), end));
+			else add(it.systemId as string, it.role as string, end);
 		}
-		const defining = await Promise.all([...globalRoles].map((r) => queryIndex(this.table, `ROLENAME#${r}`)));
-		for (const roles of defining) for (const it of roles) add(it.systemId as string, it.name as string);
-		const map: RoleMap = {};
+		const defining = await Promise.all([...globalEnds.keys()].map((r) => queryIndex(this.table, `ROLENAME#${r}`)));
+		for (const roles of defining) for (const it of roles) add(it.systemId as string, it.name as string, globalEnds.get(it.name as string)!);
+		const out = new Map<string, Map<string, Date | null>>();
 		for (const systemId of [...held.keys()].sort()) {
 			const system = await this.loadSystem(systemId);
 			if (!system) continue;
-			map[systemId] = [...closure(held.get(systemId)!, new Map(Object.entries(system.implies)))].sort();
+			const edges = new Map(Object.entries(system.implies));
+			const ends = new Map<string, Date | null>();
+			for (const [granted, end] of held.get(systemId)!) {
+				for (const r of closure([granted], edges)) ends.set(r, laterEnd(ends.get(r), end));
+			}
+			out.set(systemId, ends);
 		}
-		return map;
+		return out;
 	}
 
 	/**
@@ -1043,14 +1072,31 @@ export class Rbac {
 	 * rolesOf/globalRolesOf.
 	 */
 	async hasRole(actor: Actor, rawEmail: string, systemId: string | null, rawRole: string): Promise<boolean> {
+		return (await this.checkRole(actor, rawEmail, systemId, rawRole)).allowed;
+	}
+
+	/**
+	 * hasRole, plus how long the answer holds (C3a): when allowed, the latest
+	 * end of the grants valid now that give the role (null: they never end,
+	 * as for roots). Revoking a grant can end it sooner.
+	 */
+	async checkRole(actor: Actor, rawEmail: string, systemId: string | null, rawRole: string): Promise<RoleCheck> {
 		const email = this.queriedEmail(rawEmail);
 		this.requireCanQuery(actor, email);
 		const role = rawRole.trim().toLowerCase();
-		if (systemId === null) return (await this.globalRolesOf(email)).includes(role);
+		const denied: RoleCheck = { allowed: false, expiresAt: null };
+		if (systemId === null) {
+			if (this.isRoot(email)) return role === ROOT_ROLE ? { allowed: true, expiresAt: null } : denied;
+			const items = (await this.grantItemsOf(email)).filter((it) => it.PK === GLOBAL_PK && it.role === role);
+			if (!items.length) return denied;
+			return { allowed: true, expiresAt: items.reduce<Date | null | undefined>((e, it) => laterEnd(e, date(it.endsAt)), undefined)! };
+		}
 		await this.requireSystem(systemId);
 		if (!(await this.get(roleKey(systemId, role)))) throw notFound(`Role "${role}" not found in "${systemId}"`);
-		if (this.isRoot(email)) return true;
-		return ((await this.grantedRoles(email))[systemId] ?? []).includes(role);
+		if (this.isRoot(email)) return { allowed: true, expiresAt: null };
+		const ends = (await this.grantedRoleEnds(email)).get(systemId);
+		if (!ends?.has(role)) return denied;
+		return { allowed: true, expiresAt: ends.get(role)! };
 	}
 
 	/** An identity's roles in one system (sorted). */

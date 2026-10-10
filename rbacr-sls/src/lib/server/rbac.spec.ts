@@ -520,6 +520,51 @@ describe('voucher discounts', () => {
 	});
 });
 
+describe('how long a role check holds (C3a)', () => {
+	const feb = new Date('2026-02-01T00:00:00Z');
+	const mar = new Date('2026-03-01T00:00:00Z');
+	const check = (email: string, systemId: string | null, role: string) => rbac.checkRole(root, email, systemId, role);
+
+	it('is the end of the grant giving the role; none for grants without an end or roots', async () => {
+		await rbac.grant(root, 'billing', 'viewer', USER, { endsAt: feb });
+		expect(await check(USER, 'billing', 'viewer')).toEqual({ allowed: true, expiresAt: feb });
+		await rbac.grant(root, 'billing', 'editor', USER);
+		expect(await check(USER, 'billing', 'editor')).toEqual({ allowed: true, expiresAt: null });
+		expect(await check(ROOT, 'billing', 'viewer')).toEqual({ allowed: true, expiresAt: null });
+		expect(await check(ROOT, null, 'root')).toEqual({ allowed: true, expiresAt: null });
+	});
+
+	it('is never given for a role not held', async () => {
+		await rbac.grant(root, 'billing', 'viewer', USER, { startsAt: feb });
+		expect(await check(USER, 'billing', 'viewer')).toEqual({ allowed: false, expiresAt: null });
+		expect(await check(USER, null, 'viewer')).toEqual({ allowed: false, expiresAt: null });
+	});
+
+	it('is the latest end among every grant that gives the role', async () => {
+		await rbac.grant(root, 'billing', 'viewer', USER, { endsAt: feb });
+		await rbac.grant(root, 'billing', 'viewer', 'partner.com', { endsAt: mar });
+		expect((await check(USER, 'billing', 'viewer')).expiresAt).toEqual(mar);
+		await rbac.grantGlobal(root, 'viewer', USER);
+		expect((await check(USER, 'billing', 'viewer')).expiresAt).toBeNull();
+	});
+
+	it('follows implications and global grants', async () => {
+		await rbac.setImplications(root, 'billing', 'editor', ['viewer']);
+		await rbac.grant(root, 'billing', 'editor', USER, { endsAt: mar });
+		await rbac.grant(root, 'billing', 'viewer', USER, { endsAt: feb });
+		expect(await check(USER, 'billing', 'viewer')).toEqual({ allowed: true, expiresAt: mar });
+		await rbac.grantGlobal(root, 'editor', OTHER, { endsAt: feb });
+		expect(await check(OTHER, 'billing', 'viewer')).toEqual({ allowed: true, expiresAt: feb });
+		expect(await check(OTHER, null, 'editor')).toEqual({ allowed: true, expiresAt: feb });
+	});
+
+	it('follows the billing period for subscribers', async () => {
+		await rbac.setSubscriberRole(root, 'billing', 'viewer');
+		await rbac.syncSubscriber(USER, { startsAt: new Date('2026-01-01T00:00:00Z'), endsAt: feb });
+		expect(await check(USER, 'billing', 'viewer')).toEqual({ allowed: true, expiresAt: feb });
+	});
+});
+
 describe('role queries (the external API)', () => {
 	beforeEach(async () => {
 		await rbac.grant(root, 'billing', 'viewer', USER);

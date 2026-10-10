@@ -281,6 +281,14 @@ How applications use rbacr. The README has a walkthrough with examples.
   grant valid now (G1) to its address or domain, a global grant, an
   implication, or root status (R2). A role the identity doesn't hold gives `allowed: false`. A
   system or role that doesn't exist gives 404, after the reach check (403).
+- **C3a** When the answer is `allowed: true`, it also says how long it may
+  be cached: `expiresAt`, the latest end (G1) among the grants valid now
+  that give the role (directly, through its domain, globally or by
+  implication), and `ttl`, the whole seconds left until then. Both are
+  `null` when the role has no end: one of those grants never ends, or the
+  identity is a root. A `false` answer has `expiresAt: null` and
+  `ttl: null`. The TTL bounds the grants' validity only: revoking a grant,
+  or changing implications, ends the role sooner (C6).
 - **C4** `POST /api/roles` with a `systemId` returns the same effective
   roles as a sorted list; without one, every system's and the global roles.
   `GET /api/me` returns the token owner's own roles.
@@ -288,8 +296,9 @@ How applications use rbacr. The README has a walkthrough with examples.
   returned lower-cased.
 - **C6** A change to grants, implications or vouchers shows in these
   answers within about a second (D3). A revoked or expired token is refused
-  at once (T3). Clients that cache answers should cache them briefly and
-  never cache errors, and should deny access when rbacr can't answer.
+  at once (T3). Clients that cache answers should cache them briefly (a "yes"
+  never beyond its `ttl`, C3a) and never cache errors, and should deny
+  access when rbacr can't answer.
 
 ## HTTP interface
 
@@ -324,7 +333,7 @@ ISO-8601 strings in UTC.
 | `DELETE /api/systems/:id/grants` | `{ role, grantee }` | 204 |
 | `GET /api/systems/:id/vouchers` | — | `{ vouchers: [{ code, systemId, role, discountPercent, startsAt, endsAt, maxUses, uses, status, createdBy, createdAt, disabledAt }] }` |
 | `POST /api/systems/:id/vouchers` | `{ role, discountPercent?, startsAt?, endsAt?, maxUses? }` | 201, the voucher |
-| `POST /api/check` | `{ email, systemId?, role }` | `{ email, systemId, role, allowed }` (T6) |
+| `POST /api/check` | `{ email, systemId?, role }` | `{ email, systemId, role, allowed, expiresAt, ttl }` (T6, C3a) |
 | `POST /api/roles` | `{ email, systemId? }` | `{ email, systemId, roles: [role] }`, or without `systemId`, `{ email, globalRoles, roles: { systemId: [role] } }` (T6) |
 
 `/api/check` and `/api/roles` are `POST` with a JSON body, so e-mail

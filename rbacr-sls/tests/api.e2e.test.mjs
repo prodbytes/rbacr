@@ -216,6 +216,14 @@ describe('rbacr API', { skip: !(await fetch(`${BASE}/health`).then((r) => r.ok, 
 		const now = await root('POST', `/api/systems/${SYSTEM}/grants`, { role: 'viewer', grantee, endsAt: later });
 		assert.equal(now.body.status, 'active');
 		assert.equal(await check(), true);
+		// A "yes" may be cached until the grant ends (C3a).
+		const answer = (await root('POST', '/api/check', { email: grantee, systemId: SYSTEM, role: 'viewer' })).body;
+		assert.equal(answer.expiresAt, later);
+		assert.ok(answer.ttl > 86_390 && answer.ttl <= 86_400, `ttl ${answer.ttl}`);
+		const forever = (await root('POST', '/api/check', { email: ROOT, systemId: SYSTEM, role: 'viewer' })).body;
+		assert.deepEqual([forever.allowed, forever.expiresAt, forever.ttl], [true, null, null]);
+		const no = (await root('POST', '/api/check', { email: grantee, systemId: SYSTEM, role: 'admin' })).body;
+		assert.deepEqual([no.allowed, no.expiresAt, no.ttl], [false, null, null]);
 		const global = await root('POST', '/api/global-grants', { role: 'viewer', grantee, startsAt: later });
 		assert.equal(global.body.status, 'not-started');
 		assert.equal((await root('DELETE', '/api/global-grants', { role: 'viewer', grantee })).status, 204);

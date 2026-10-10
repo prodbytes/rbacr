@@ -1,0 +1,17 @@
+name: rbacr
+description: >-
+  Dart client for the rbacr role manager's external API (/api): ask which
+  roles a user holds and redeem vouchers, from Flutter apps or Dart servers.
+version: 0.1.0
+publish_to: none
+repository: https://github.com/prodbytes/rbacr/tree/main/rbacr-flutter
+
+environment:
+  sdk: ^3.9.0
+
+dependencies:
+  http: ^1.6.0
+
+dev_dependencies:
+  lints: ^6.1.0
+  test: ^1.33.0

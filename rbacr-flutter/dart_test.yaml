@@ -1,0 +1,4 @@
+tags:
+  # Against a running rbacr dev server; see README "Tests".
+  e2e:
+    timeout: 1m
