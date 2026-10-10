@@ -1,0 +1,334 @@
+# rbacr-sls
+
+The rbacr service. A role manager for your applications. Users sign in with Google. rbacr records
+which roles each identity (e-mail address or whole domain) holds in each
+system, and serves them both as web pages and as JSON. It runs as a SvelteKit
+app on AWS Lambda. Run every command below from this folder
+(`rbacr-sls/`).
+
+## How it works
+
+- **Roots** are listed in `RBACR_ROOT_LIST`, as addresses or domains
+  (`@nu01.com` means everyone at nu01.com). They hold the single global
+  `root` role and every role in every system. The list is the only way to
+  become a root: `root` can't be granted or redeemed. `root` is the only
+  built-in role, and roots alone manage rbacr: they create systems and
+  roles, grant roles to addresses, domains or globally, and issue vouchers.
+- **Roles and implied roles are registered data.** A system has exactly the
+  roles a root registers (no role name but `root` means anything, so a role
+  called `admin` has no powers). A root also registers which roles imply
+  others, e.g. `admin` implies `premium` and `free`, `premium` implies
+  `free`, and `free` implies nothing. Implication is transitive. Grants
+  returned by the API list the roles they imply (`impliedRoles`).
+- **Grants have a validity**: an optional start and end (`startsAt`,
+  `endsAt`). No start means immediately, no end means forever. Outside it a
+  grant gives nothing, and shows as `not-started` or `expired`.
+- **Vouchers** are codes like `7JH2-UQF5-XA7B-VMQT` that grant a role when
+  redeemed, either in one system or **globally**. A global voucher gives the
+  role in every system that defines it, and only roots can create global
+  vouchers. Each voucher has a **discount**: a 100% voucher grants the role
+  immediately, while a lower discount will require payment (not built yet; it
+  answers 402 Payment Required). The start date, end date and usage count
+  are all optional.
+- **Everyone** can sign in, see their own roles at `/me` and redeem vouchers.
+  `/settings` shows the running version and the API's address; roots also
+  see the root allow list there.
+- **API tokens** let scripts and other applications call rbacr as a person.
+  Anyone creates their own on `/me`. A token can do what its owner can do;
+  for example, a root's token can ask whether anyone holds a role.
+
+[SPEC.md](SPEC.md) has the full rules, permission matrix and API reference.
+
+## Local development
+
+```bash
+cp .env.example .env          # set RBACR_ROOT_LIST to your address
+devbox run mkcert -install    # once: trust the local HTTPS certificate
+devbox services up            # DynamoDB Local, app, Floci (HTTPS) and health monitor
+```
+
+Then open **https://local.rbacr.nu01.com:8444/**, or
+https://rbacr.localhost:8444/ before the `local.rbacr.nu01.com` DNS record
+exists. `devbox services up` starts these processes, defined in
+[process-compose.yaml](process-compose.yaml):
+
+| Process | What it does |
+|---------|--------------|
+| `1-dynamodb` | DynamoDB Local in Docker as `devbox-dynamodb` on port 8642 (`RBACR_DYNAMODB_PORT`) ([compose.yaml](compose.yaml)), data kept in a volume |
+| `2-app` | `npm install`, then `vite dev` on http://localhost:5173 once DynamoDB Local is up. It uses the `rbacr` table there (`RBACR_DYNAMODB_TABLE`, `RBACR_DYNAMODB_ENDPOINT`) and creates it on first use. |
+| `3-floci` | [Floci](floci/README.md), the local AWS emulator, as the CloudFront distribution in front of the app over HTTPS (mkcert certificate, ports 4567/8444) |
+| `0-health-check` | Logs `🗄️ dynamodb ✅ 🔐 app ✅ 🔒 https ✅` every 15 s (set `HEALTH_CHECK_INTERVAL` to change) |
+
+Stop everything with `devbox services stop`. In non-interactive shells, add
+`--pcflags "--tui=false"`.
+
+Without Google credentials, set `RBACR_DEV_LOGIN=1` and use `/login/dev` to
+sign in as any address. Production builds always disable it. For real
+Google sign-in, put the OAuth web client's id and secret in `.env`. Add
+`https://local.rbacr.nu01.com:8444/login/google/callback` to the client's
+redirect URIs, and sign in through that HTTPS URL.
+
+Devbox scripts: `devbox run dev | test | check | build | certs | release-rc | release-ga | deploy`.
+
+## Configuration
+
+| Variable | Required | Purpose |
+|----------|----------|---------|
+| `RBACR_DYNAMODB_TABLE` | yes | The DynamoDB table holding all data. Locally `rbacr` on DynamoDB Local; in AWS the stage's table (`rbacr`, `rbacr-rc`) |
+| `RBACR_DYNAMODB_ENDPOINT` | no | DynamoDB Local's URL in development (process-compose sets `http://127.0.0.1:8642`); the app creates the table there |
+| `RBACR_ROOT_LIST` | no | Comma-separated root addresses and/or domains, e.g. `ana@example.com, @example.org`: the only way to be a root. An invalid entry stops the app from starting. In AWS it defaults to `@nu01.com`. |
+| `RBACR_GOOGLE_CLIENT_ID` / `RBACR_GOOGLE_CLIENT_SECRET` | for sign-in | Google OAuth web client |
+| `RBACR_PUBLIC_ORIGIN` | no | The origin users browse, used for the Google redirect URI (default: the request's origin) |
+| `RBACR_ORIGIN_SECRET` | no | When set, every request must carry it in `x-rbacr-origin-secret`. In AWS, CloudFront adds it, so the Lambda URL can't be called directly. |
+| `RBACR_VERSION` | no | The release version, reported by `/health` (default `dev`) |
+| `RBACR_DEV_LOGIN` | no | `1` enables `/login/dev` under `vite dev` |
+| `RBACR_STRIPE_WEBHOOK_SECRET` / `RBACR_STRIPE_API_KEY` | for the Substack sync | Stripe webhook signing secret (`whsec_…`) and restricted key (`rk_…`), see [Substack integration](#substack-integration) |
+
+## Using rbacr from your application
+
+rbacr answers one question for your applications: **which roles does this
+person hold in my system?** It doesn't sign your users in. Your application
+authenticates its users itself (typically with Google), then asks rbacr
+about the verified e-mail address, server-side, with an API token.
+
+### 1. Set up your system (once, in the UI)
+
+1. A root creates the system on `/systems` (its id is what your code sends
+   as `systemId`, e.g. `presence`) and registers its roles (e.g. `admin`,
+   `premium`, `free`). A system has no roles until a root registers them.
+2. Optionally, a root registers **implied roles** (`admin` implies
+   `premium` and `free`, `premium` implies `free`), so your code can ask
+   for the role a feature needs and anyone with a higher role passes too.
+3. A root grants roles to addresses, whole domains or globally, or hands
+   out vouchers that people redeem on `/me`.
+
+### 2. Create a token for your application
+
+Sign in as a root, open `/me` → **API tokens**, create one with an expiry,
+and store it as a server-side secret (it's shown once). A token acts as the
+person who created it, with their status at the time of each request:
+
+| Token owner | Can ask about |
+|---|---|
+| A **root** | anyone's roles in every system, and global roles |
+| Anyone else | only themselves (`/api/me`, or their own address) |
+
+An application asking about its users therefore needs a root's token: keep
+it server-side only, give it an expiry, and revoke it on `/me` when it's no
+longer needed (a revoked or expired token gets 401 at once). A token from
+someone who leaves the root list stops being able to ask about others.
+
+### 3. Ask about roles
+
+All calls go to `https://rbacr.nu01.com/api/…` (RC:
+`https://rc.rbacr.nu01.com`) with `Authorization: Bearer rbacr_…`. Role
+queries are `POST` with a JSON body, so e-mail addresses stay out of URLs
+and access logs.
+
+**Check one permission** when a request needs it:
+
+```bash
+curl -H "Authorization: Bearer $RBACR_TOKEN" -H "content-type: application/json" \
+  -d '{"email":"ana@example.com","systemId":"presence","role":"premium"}' \
+  https://rbacr.nu01.com/api/check
+# {"email":"ana@example.com","systemId":"presence","role":"premium","allowed":true}
+```
+
+**Fetch all of a person's roles** in your system, for example at sign-in,
+and decide locally:
+
+```bash
+curl -H "Authorization: Bearer $RBACR_TOKEN" -H "content-type: application/json" \
+  -d '{"email":"ana@example.com","systemId":"presence"}' \
+  https://rbacr.nu01.com/api/roles
+# {"email":"ana@example.com","systemId":"presence","roles":["free","premium"]}
+```
+
+Without `systemId`, `/api/roles` returns every system's roles and the
+person's global roles (root tokens only, except about yourself). A script
+acting as its owner can call `GET /api/me` for its own roles.
+
+In TypeScript (server-side only; never ship the token to a browser):
+
+```ts
+const RBACR = 'https://rbacr.nu01.com';
+
+export async function hasRole(email: string, systemId: string, role: string): Promise<boolean> {
+	const res = await fetch(`${RBACR}/api/check`, {
+		method: 'POST',
+		headers: { authorization: `Bearer ${process.env.RBACR_TOKEN}`, 'content-type': 'application/json' },
+		body: JSON.stringify({ email, systemId, role })
+	});
+	if (!res.ok) throw new Error(`rbacr ${res.status}: ${(await res.json()).error}`);
+	return (await res.json()).allowed; // treat any failure as "not allowed"
+}
+```
+
+### What the answers mean
+
+- **Roles are effective roles**: grants to the address, grants to its
+  domain, global grants of a role your system defines, and everything those
+  roles imply, as registered. Roots (`RBACR_ROOT_LIST`) hold every role of
+  every system. Grants returned by
+  the API carry `impliedRoles`, e.g. granting `premium` returns
+  `"impliedRoles": ["free"]`.
+- **E-mail addresses** are matched case-insensitively. Send the address
+  your sign-in verified; rbacr trusts what you send.
+- **`allowed: false`** means the person doesn't hold the role. A role or
+  system that doesn't exist is a 404, not `false`, so typos surface (a
+  non-root token asking about someone else gets 403 first).
+- **Fresh within about a second.** A grant or revocation can take up to a
+  second to show (SPEC D3). If you cache answers, keep it short (a minute
+  or less) and never cache errors.
+- **Errors** are JSON `{ "error": "…" }`: 400 bad input, 401 missing,
+  revoked or expired token (with `WWW-Authenticate: Bearer`), 403 asking
+  beyond the token owner's reach, 404 unknown system or role. Fail closed:
+  deny access when rbacr can't answer.
+
+### The two interfaces
+
+| | `/api`: the API (external) | `/vpi`: the VPI (view programming interface, frontend only) |
+|---|---|---|
+| For | scripts and other applications | rbacr's own pages |
+| Auth | personal API token, `Authorization: Bearer rbacr_…` | the browser session cookie |
+| Contract | stable, documented in [SPEC.md](SPEC.md#api-the-external-api-personal-api-token-a1) | shaped for the pages, may change |
+
+Every `/api` request, unknown paths included, needs a valid personal API
+token (401 otherwise), and `/api` ignores the session cookie. Besides role
+queries, it can manage systems, grants and vouchers within the token
+owner's permissions ([SPEC.md](SPEC.md#permissions)). `/vpi` refuses
+anything that isn't a same-origin request from rbacr's pages (403). The only
+unauthenticated JSON endpoint is `GET /health` (SPEC HC1-HC3), which a
+Route 53 health check polls in AWS.
+
+## Substack integration
+
+Paying subscribers of the Substack newsletter (prodbytes.substack.com)
+automatically hold a role while they pay: in each system, the one you
+choose on its page ("Substack subscribers"). Substack has no subscriber
+API or webhooks, but paid subscriptions are billed through your own Stripe
+account, so rbacr listens to Stripe instead (SPEC "Substack integration",
+Q1-Q5):
+
+1. Someone subscribes, renews, cancels or stops paying on Substack.
+2. Stripe sends a `customer.subscription.*` webhook to
+   `https://rbacr.nu01.com/webhooks/stripe`, signed with the endpoint's
+   secret.
+3. rbacr reads that customer from the Stripe API. While they have an
+   `active`, `trialing` or `past_due` subscription, their e-mail address
+   holds each system's subscriber role for the subscription's current
+   billing period: the grant starts and ends with
+   it, and each renewal moves it to the next period. Otherwise rbacr
+   removes the grants. They show `grantedBy: stripe`, and grants you
+   made by hand or through a voucher are never changed or removed (unless
+   they have expired). Changing a system's subscriber role moves each
+   subscriber over at their next subscription event.
+
+### Setting it up
+
+1. In the Stripe account connected to Substack (Substack → Settings →
+   Payments shows which), create a **restricted key** (Developers → API
+   keys) with *Read* on Customers and Subscriptions and nothing else.
+2. Add a **webhook endpoint** (Developers → Webhooks):
+   `https://rbacr.nu01.com/webhooks/stripe` (RC:
+   `https://rc.rbacr.nu01.com/webhooks/stripe`), with the events
+   `customer.subscription.created`, `.updated`, `.deleted`, `.paused` and
+   `.resumed`. Copy its signing secret.
+3. Store both as GitHub secrets, then deploy:
+
+   ```sh
+   gh secret set RBACR_GA_STRIPE_API_KEY          # rk_…
+   gh secret set RBACR_GA_STRIPE_WEBHOOK_SECRET   # whsec_…
+   ```
+
+   (`RBACR_RC_STRIPE_*` for RC; for manual deploys, the `RBACR_STRIPE_*`
+   lines in `.env.prod`.)
+4. On each system's page, choose the role subscribers hold under
+   **Substack subscribers** (or `PATCH /api/systems/:id` with
+   `{ "subscriberRole": "premium" }`). Systems set to none grant nothing.
+5. Check it: in Stripe, send a test `customer.subscription.updated` event to
+   the endpoint. The response is `{ received, outcomes }`, one per system
+   role, each `granted`, `updated`, `revoked` or `unchanged`. Without the secrets the endpoint answers 503;
+   with a wrong signing secret, 400.
+
+### Limitations
+
+- Subscribers must sign in to rbacr with the address they use on Substack.
+- Existing subscribers are picked up at their next subscription change
+  (each renewal counts), so annual subscribers can take up to a year.
+- Complimentary and gift subscriptions bypass Stripe: grant those by hand
+  (with an end date to match the gift) or with a voucher.
+- The role ends exactly at the end of the paid period. Renewing moves it
+  on when Stripe's `customer.subscription.updated` event arrives, usually
+  within seconds; until then (or while Stripe retries a failed delivery)
+  the subscriber doesn't hold it.
+- Every subscription in the Stripe account counts, so anything else sold
+  through it also earns the role.
+
+## Tests
+
+```bash
+npm test                 # unit/domain tests (DynamoDB Local in Docker) + Lambda smoke test of the production build
+                         # (safe while `devbox services up` runs: vitest uses its own .svelte-kit-vitest/)
+npm run test:e2e         # API + pages against a running dev server (devbox services up); through local HTTPS:
+                         # NODE_EXTRA_CA_CERTS="$(mkcert -CAROOT)/rootCA.pem" RBACR_E2E_URL=https://local.rbacr.nu01.com:8444 npm run test:e2e
+npm run check            # svelte-check / TypeScript
+bash scripts/package-lambda.sh   # the deployable zip, smoke-tested with production dependencies only
+```
+
+The end-to-end suite signs in through `/login/dev`, so it needs
+`RBACR_DEV_LOGIN=1`. Its root (`RBACR_E2E_ROOT`, default `root@e2e.test`)
+must be on `RBACR_ROOT_LIST`. With `RBACR_ROOT_LIST=@nu01.com`, run it as
+`RBACR_E2E_ROOT=e2e-root@nu01.com npm run test:e2e`. Keep
+[SPEC.md](SPEC.md), the tests and this README in sync with every change.
+
+## Releases and deployment
+
+https://rbacr.nu01.com (production) and https://rc.rbacr.nu01.com (release
+candidate) run on AWS. One Lambda serves the SvelteKit app through
+[lambda.js](lambda.js), behind CloudFront, with the certificate and DNS in
+the `rbacr.nu01.com` Route 53 zone. All of it is defined as CloudFormation in
+[infra/](infra/README.md).
+
+```bash
+bash scripts/release-rc.sh   # tag X.Y.Z-RC → release (prerelease) + deploy to rc.rbacr.nu01.com
+bash scripts/release-ga.sh   # tag X.Y.Z-GA (main only) → release + deploy to rbacr.nu01.com
+```
+
+The tags trigger the [Release](../.github/workflows/release.yml),
+[Deploy RC](../.github/workflows/deploy-rc.yml) and
+[Deploy](../.github/workflows/deploy.yml) workflows. They deploy through
+GitHub's OIDC with no stored AWS keys, and each finishes by checking that
+the live site serves the tagged version. X.Y come from
+[version.X.txt](version.X.txt) and [version.Y.txt](version.Y.txt). The
+one-time AWS, GitHub and Google setup is in
+[infra/README.md](infra/README.md#one-time-setup).
+
+## Project layout
+
+```
+src/env.ts                      RBACR_* variable definitions
+src/hooks.server.ts             /api token or session cookie -> locals.email, security headers
+src/lib/server/rbac.ts          all role and voucher rules (the domain model)
+src/lib/server/tokens.ts        personal API tokens (/api auth)
+src/lib/server/stripe.ts        Stripe webhook signature and subscriber lookup (Substack sync)
+src/lib/server/vpiguard.ts      the "frontend only" check for /vpi
+src/lib/vpi.ts                  the pages' /vpi client
+src/lib/server/identity.ts      e-mail/domain parsing, root allow list
+src/lib/server/dynamo.ts        the DynamoDB table: definition, client, query helpers
+src/lib/server/{session,google,auth}.ts  sign-in and sessions
+src/routes/api/**               external API (tokens)
+src/routes/vpi/**               VPI (session, frontend only)
+src/routes/webhooks/stripe/     Stripe webhook (signature, not token or session)
+src/routes/{me,systems,global}/**  UI pages (load and change data through /vpi)
+lambda.js                       Lambda entrypoint (serverless-http + adapter-node)
+infra/                          CloudFormation: zone, deploy roles, artifacts, app
+floci/                          local CloudFront (HTTPS) on Floci
+scripts/                        release, deploy, packaging, local certs, health check
+../.github/workflows/           Release, Deploy RC, Deploy (at the repository root)
+tests/                          Lambda smoke test and end-to-end suite
+```
+
+## Dev container
+
+The repository's dev container is described in the [top-level README](../README.md#dev-container).

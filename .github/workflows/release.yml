@@ -30,18 +30,18 @@ on:
   pull_request:
     paths:
       - .github/workflows/release.yml
-      - src/**
-      - static/**
-      - tests/**
-      - lambda.js
-      - package.json
-      - package-lock.json
-      - vite.config.ts
-      - tsconfig.json
-      - scripts/package-lambda.sh
-      - scripts/version.sh
-      - version.X.txt
-      - version.Y.txt
+      - rbacr-sls/src/**
+      - rbacr-sls/static/**
+      - rbacr-sls/tests/**
+      - rbacr-sls/lambda.js
+      - rbacr-sls/package.json
+      - rbacr-sls/package-lock.json
+      - rbacr-sls/vite.config.ts
+      - rbacr-sls/tsconfig.json
+      - rbacr-sls/scripts/package-lambda.sh
+      - rbacr-sls/scripts/version.sh
+      - rbacr-sls/version.X.txt
+      - rbacr-sls/version.Y.txt
 
 permissions:
   contents: read
@@ -56,6 +56,9 @@ env:
 jobs:
   prepare:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rbacr-sls
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
       version: ${{ steps.version.outputs.version }}
@@ -113,6 +116,9 @@ jobs:
   build:
     needs: prepare
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rbacr-sls
     env:
       TAG: ${{ needs.prepare.outputs.tag }}
     steps:
@@ -124,6 +130,7 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
+          cache-dependency-path: rbacr-sls/package-lock.json
 
       - run: npm ci --no-audit --no-fund
       - run: npm run check
@@ -138,7 +145,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: rbacr-lambda
-          path: dist/*.zip
+          path: rbacr-sls/dist/*.zip
           if-no-files-found: error
           retention-days: 14
 

@@ -41,6 +41,9 @@ env:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rbacr-sls
     # No `environment:` here: it would change the OIDC subject, which the
     # deploy role matches (the tag, or refs/heads/main for manual runs).
     steps:
@@ -74,6 +77,7 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
+          cache-dependency-path: rbacr-sls/package-lock.json
 
       - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:

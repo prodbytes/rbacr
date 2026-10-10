@@ -1,3 +1,7 @@
+# Pinned, so the volume keeps its name (rbacr_dynamodb-data) whatever the
+# folder is called.
+name: rbacr
+
 services:
   # The app's table (RBACR_DYNAMODB_TABLE) on DynamoDB Local, persisted in a
   # volume. The app creates the table on first use.

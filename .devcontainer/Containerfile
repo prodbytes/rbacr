@@ -30,7 +30,7 @@ RUN curl -fsSL https://nixos.org/nix/install | sh -s -- --no-daemon
 # straight from cache.nixos.org (no GitHub API needed at build time);
 # postCreateCommand runs the full `devbox install` against this warm cache.
 WORKDIR /tmp/devbox-warmup
-COPY --chown=vscode:vscode devbox.lock ./
+COPY --chown=vscode:vscode rbacr-sls/devbox.lock ./
 RUN export PATH="$HOME/.nix-profile/bin:$PATH" \
     && SYS="$(uname -m)-linux" \
     && jq -r --arg sys "$SYS" '.packages[].systems[$sys].outputs[]?.path // empty' devbox.lock \
