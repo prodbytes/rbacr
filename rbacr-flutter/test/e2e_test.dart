@@ -203,6 +203,8 @@ void main() {
     try {
       final grants = await me.redeemVoucherGrants(code.replaceAll(' ', ''));
       expect(grants.map((g) => g.role), ['free', 'premium']);
+      final event = (await root.listRedemptions(voucher.code)).single;
+      expect([event.email, event.via, event.roles], [user, 'api', voucher.roles]);
     } finally {
       await root.disableVoucher(voucher.code);
     }

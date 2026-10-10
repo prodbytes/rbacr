@@ -210,6 +210,17 @@ describe('rbacr API', { skip: !(await fetch(`${BASE}/health`).then((r) => r.ok, 
 		assert.deepEqual(redeemed.body.grants.map((g) => g.role), ['admin', 'viewer']);
 		assert.deepEqual((await other('GET', '/api/me')).body.roles[SYSTEM], ['admin', 'viewer']);
 
+		// Each redemption is kept as a RedeemEvent with its details, for roots (V7).
+		const path = `/api/vouchers/${encodeURIComponent(created.body.code)}/redemptions`;
+		assert.equal((await other('GET', path)).status, 403);
+		const events = await root('GET', path);
+		assert.equal(events.status, 200, JSON.stringify(events.body));
+		const [event] = events.body.redemptions;
+		assert.equal(event.email, OTHER);
+		assert.equal(event.via, 'api');
+		assert.deepEqual(event.roles, ['admin', 'viewer']);
+		assert.deepEqual(event.grants.map((g) => [g.role, g.outcome]), [['admin', 'granted'], ['viewer', 'granted']]);
+
 		for (const role of ['admin', 'viewer']) await root('DELETE', `/api/systems/${SYSTEM}/grants`, { role, grantee: OTHER });
 		await root('DELETE', `/api/vouchers/${encodeURIComponent(created.body.code)}`);
 	});

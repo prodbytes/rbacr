@@ -86,6 +86,41 @@ export interface SystemStatus {
 	maintenance: boolean;
 }
 
+/** Where a redemption came from: the external API or the pages (the VPI). */
+export type RedeemVia = 'api' | 'page';
+
+/** What redeeming did to one of the voucher's roles (V7). */
+export interface RedeemedGrant {
+	systemId: string | null;
+	role: string;
+	/**
+	 * granted: there was no live grant; kept: one already gave the role now
+	 * and forever, so it stayed (G3); replaced: the live grant (`replaced`)
+	 * gave way to the voucher's.
+	 */
+	outcome: 'granted' | 'kept' | 'replaced';
+	/** The live grant it replaced (outcome replaced), as it was. */
+	replaced: { grantedBy: string; grantedAt: Date; startsAt: Date | null; endsAt: Date | null; voucherCode: string | null } | null;
+}
+
+/**
+ * A voucher redemption, kept for good (V7, L1): the voucher's terms at the
+ * time, who redeemed it, when, how, and what it did to each role. Records
+ * from before V7 have only `email` and `redeemedAt`; the rest is null.
+ */
+export interface RedeemEvent {
+	id: string | null;
+	code: string;
+	systemId: string | null;
+	roles: string[];
+	discountPercent: number | null;
+	voucherCreatedBy: string | null;
+	email: string;
+	redeemedAt: Date;
+	via: RedeemVia | null;
+	grants: RedeemedGrant[];
+}
+
 /** A role check (C3, C3a): whether the role is held, and until when at most (null: no end). */
 export interface RoleCheck {
 	allowed: boolean;
@@ -242,7 +277,7 @@ export const MAX_VOUCHER_ROLES = 20;
  *   global grant PK GLOBAL        SK GRANT#<role>#<grantee>    GSI1 GRANTEE#<grantee> / GLOBAL#<role>
  *               (grants carry optional startsAt / endsAt, G1)
  *   voucher     PK VOUCHER#<key>  SK META                      GSI1 VOUCHERS#<id, or * if global> / <createdAt>#<code>
- *   redemption  PK VOUCHER#<key>  SK REDEEMED#<email>
+ *   redemption  PK VOUCHER#<key>  SK REDEEMED#<email>       (the RedeemEvent, V7)
  *               (<key> is the code's letters and digits, V2; vouchers made before
  *               custom codes are keyed by their XXXX-XXXX-XXXX-XXXX code)
  *   history     PK as the item   SK HIST#<its SK>#<when it was deleted>  (L4)
@@ -377,6 +412,36 @@ const toVoucher = (it: Item): Voucher => ({
 	createdAt: new Date(it.createdAt as string),
 	disabledAt: date(it.disabledAt),
 	disabledBy: (it.disabledBy as string | undefined) ?? null
+});
+
+/** A redemption record as a RedeemEvent (V7); records from before V7 hold only who and when. */
+const toRedeemEvent = (it: Item, voucher: Voucher): RedeemEvent => ({
+	id: (it.id as string | undefined) ?? null,
+	code: (it.code as string | undefined) ?? voucher.code,
+	systemId: it.type ? ((it.systemId as string | undefined) ?? null) : voucher.systemId,
+	roles: (it.roles as string[] | undefined) ?? [],
+	discountPercent: (it.discountPercent as number | undefined) ?? null,
+	voucherCreatedBy: (it.voucherCreatedBy as string | undefined) ?? null,
+	email: it.email as string,
+	redeemedAt: new Date(it.redeemedAt as string),
+	via: (it.via as RedeemVia | undefined) ?? null,
+	grants: ((it.grants as Item[] | undefined) ?? []).map((g) => {
+		const r = g.replaced as Item | undefined;
+		return {
+			systemId: (g.systemId as string | undefined) ?? null,
+			role: g.role as string,
+			outcome: g.outcome as RedeemedGrant['outcome'],
+			replaced: r
+				? {
+						grantedBy: r.grantedBy as string,
+						grantedAt: new Date(r.grantedAt as string),
+						startsAt: date(r.startsAt),
+						endsAt: date(r.endsAt),
+						voucherCode: (r.voucherCode as string | undefined) ?? null
+					}
+				: null
+		};
+	})
 });
 
 /** The later of two ends, where null (never) is latest and undefined means none yet. */
@@ -1353,6 +1418,16 @@ export class Rbac {
 		return toVoucher(Attributes!);
 	}
 
+	/** A voucher's RedeemEvents (V7), newest first; roots only. */
+	async listRedemptions(actor: Actor, rawCode: string): Promise<RedeemEvent[]> {
+		requireRoot(actor, 'Only roots can see redemptions');
+		const item = await this.voucherItem(rawCode);
+		if (!item) throw notFound('Voucher not found');
+		const voucher = toVoucher(item);
+		const events = (await queryPrefix(this.table, item.PK as string, 'REDEEMED#')).map((it) => toRedeemEvent(it, voucher));
+		return events.sort((a, b) => b.redeemedAt.getTime() - a.redeemedAt.getTime());
+	}
+
 	/**
 	 * Redeems a voucher for `email`, granting each of its roles (globally for
 	 * a global voucher). Each identity can redeem a given voucher once;
@@ -1363,7 +1438,7 @@ export class Rbac {
 	 * than 100% discount needs payment, which isn't available yet: it fails
 	 * with 402 and the voucher's terms, recording nothing.
 	 */
-	async redeemVoucher(email: string, rawCode: string): Promise<GrantWithImplied[]> {
+	async redeemVoucher(email: string, rawCode: string, via: RedeemVia = 'api'): Promise<GrantWithImplied[]> {
 		const now = this.now();
 		const reasonsByStatus: Record<Exclude<VoucherStatus, 'active'>, string> = {
 			disabled: 'This voucher has been disabled',
@@ -1395,10 +1470,41 @@ export class Rbac {
 			const found = await Promise.all(grants.map((g) => this.get({ PK: g.PK, SK: g.SK })));
 			for (const f of found) await this.archive(f);
 			// A grant that already gives its role now and forever is kept.
-			const kept = found.map((f) => {
-				const previous = f && live(f) ? toGrant(f) : null;
-				return previous && previous.endsAt === null && grantStatus(previous, now) === 'active' ? previous : null;
-			});
+			const previous = found.map((f) => (f && live(f) ? toGrant(f) : null));
+			const kept = previous.map((p) => (p && p.endsAt === null && grantStatus(p, now) === 'active' ? p : null));
+			// The RedeemEvent (V7): written with the grants, so it records exactly what happened.
+			const event: Item = {
+				PK: key.PK,
+				SK: `REDEEMED#${email}`,
+				type: 'RedeemEvent',
+				id: crypto.randomUUID(),
+				code: voucher.code,
+				systemId: voucher.systemId ?? undefined,
+				roles: voucher.roles,
+				discountPercent: voucher.discountPercent,
+				voucherCreatedBy: voucher.createdBy,
+				email,
+				redeemedAt: now.toISOString(),
+				via,
+				grants: voucher.roles.map((role, i) => {
+					const p = previous[i];
+					return {
+						systemId: voucher.systemId ?? undefined,
+						role,
+						outcome: kept[i] ? 'kept' : p ? 'replaced' : 'granted',
+						replaced:
+							p && !kept[i]
+								? {
+										grantedBy: p.grantedBy,
+										grantedAt: p.grantedAt.toISOString(),
+										startsAt: iso(p.startsAt),
+										endsAt: iso(p.endsAt),
+										voucherCode: p.voucherCode ?? undefined
+									}
+								: undefined
+					};
+				})
+			};
 			const reasons = await this.transact([
 				{
 					Update: {
@@ -1413,7 +1519,7 @@ export class Rbac {
 				{
 					Put: {
 						TableName: this.table.name,
-						Item: { PK: key.PK, SK: `REDEEMED#${email}`, email, redeemedAt: now.toISOString() },
+						Item: event,
 						ConditionExpression: 'attribute_not_exists(PK)'
 					}
 				},
