@@ -93,6 +93,45 @@ class RbacrClient {
   Future<Grant> redeemVoucher(String code) async =>
       Grant.fromJson(await _send('POST', '/api/vouchers/redeem', {'code': code}));
 
+  /// Creates a voucher for [role] in [systemId], or a global voucher without
+  /// a system (V1); roots only, so call it from your server, never an app.
+  /// [discountPercent] defaults to 100 (free); [endsAt] is exclusive.
+  Future<Voucher> createVoucher({
+    String? systemId,
+    required String role,
+    int? discountPercent,
+    DateTime? startsAt,
+    DateTime? endsAt,
+    int? maxUses,
+  }) async => Voucher.fromJson(
+    await _send('POST', _vouchersPath(systemId), {
+      'role': role,
+      'discountPercent': ?discountPercent,
+      'startsAt': ?startsAt?.toUtc().toIso8601String(),
+      'endsAt': ?endsAt?.toUtc().toIso8601String(),
+      'maxUses': ?maxUses,
+    }),
+  );
+
+  /// The vouchers of [systemId], or the global vouchers without a system,
+  /// newest first, disabled ones included (V6); roots only.
+  Future<List<Voucher>> listVouchers({String? systemId}) async {
+    final json = await _send('GET', _vouchersPath(systemId));
+    return List.unmodifiable(
+      (json['vouchers'] as List<Object?>).map((v) => Voucher.fromJson(v as Map<String, Object?>)),
+    );
+  }
+
+  /// Deletes a voucher, system or global, and returns it. Deletion is
+  /// logical (L1): rbacr disables it for good, records `disabledBy`, and
+  /// keeps it listed for auditing (V6). Grants already redeemed stay.
+  /// Removing its role or deleting its system disables it too (L3). Roots only.
+  Future<Voucher> disableVoucher(String code) async =>
+      Voucher.fromJson(await _send('DELETE', '/api/vouchers/${Uri.encodeComponent(code)}'));
+
+  static String _vouchersPath(String? systemId) =>
+      systemId == null ? '/api/vouchers' : '/api/systems/${Uri.encodeComponent(systemId)}/vouchers';
+
   /// Closes the HTTP client, unless it was passed in.
   void close() {
     if (_ownsHttp) _http.close();

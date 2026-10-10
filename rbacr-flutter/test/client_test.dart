@@ -166,6 +166,79 @@ void main() {
     });
   });
 
+  group('vouchers', () {
+    Map<String, Object?> voucher({String? systemId = 'presence', String status = 'active'}) => {
+      'code': 'AAAA-BBBB-CCCC-DDDD',
+      'systemId': systemId,
+      'role': 'premium',
+      'discountPercent': 100,
+      'startsAt': null,
+      'endsAt': '2027-01-01T00:00:00.000Z',
+      'maxUses': 5,
+      'uses': 1,
+      'status': status,
+      'createdBy': 'r@x.com',
+      'createdAt': '2026-10-10T08:00:00.000Z',
+      'disabledAt': status == 'disabled' ? '2026-10-11T08:00:00.000Z' : null,
+      'disabledBy': status == 'disabled' ? 'root@corp.com' : null,
+    };
+
+    test('create in a system, sending only what is set, dates in UTC', () async {
+      final seen = <http.Request>[];
+      final created = await fake(
+        (_) => reply(voucher(), 201),
+        seen: seen,
+      ).createVoucher(systemId: 'presence', role: 'premium', endsAt: DateTime.utc(2027), maxUses: 5);
+      expect(seen.single.method, 'POST');
+      expect(seen.single.url.path, '/api/systems/presence/vouchers');
+      expect(jsonDecode(seen.single.body), {'role': 'premium', 'endsAt': '2027-01-01T00:00:00.000Z', 'maxUses': 5});
+      expect(created.code, 'AAAA-BBBB-CCCC-DDDD');
+      expect(created.status, VoucherStatus.active);
+      expect([created.maxUses, created.uses, created.endsAt], [5, 1, DateTime.utc(2027)]);
+      expect(created.isGlobal, isFalse);
+    });
+
+    test('create and list global vouchers without a system', () async {
+      final seen = <http.Request>[];
+      final client = fake(
+        (r) => r.method == 'POST'
+            ? reply(voucher(systemId: null), 201)
+            : reply({
+                'vouchers': [voucher(systemId: null)],
+              }),
+        seen: seen,
+      );
+      final created = await client.createVoucher(role: 'pro', discountPercent: 25);
+      final listed = await client.listVouchers();
+      expect(seen.map((r) => '${r.method} ${r.url.path}'), ['POST /api/vouchers', 'GET /api/vouchers']);
+      expect(jsonDecode(seen.first.body), {'role': 'pro', 'discountPercent': 25});
+      expect(created.isGlobal, isTrue);
+      expect(listed.single.isGlobal, isTrue);
+    });
+
+    test('list a system and disable by code, escaping path segments', () async {
+      final seen = <http.Request>[];
+      final client = fake(
+        (r) => r.method == 'DELETE'
+            ? reply(voucher(status: 'disabled'))
+            : reply({
+                'vouchers': [voucher()],
+              }),
+        seen: seen,
+      );
+      expect((await client.listVouchers(systemId: 'presence')).single.systemId, 'presence');
+      final disabled = await client.disableVoucher('aaaa/bbbb');
+      expect(seen.map((r) => '${r.method} ${r.url}'), [
+        'GET https://rbacr.test/api/systems/presence/vouchers',
+        'DELETE https://rbacr.test/api/vouchers/aaaa%2Fbbbb',
+      ]);
+      expect(seen.last.body, isEmpty);
+      expect(disabled.status, VoucherStatus.disabled);
+      expect(disabled.disabledAt, DateTime.utc(2026, 10, 11, 8));
+      expect(disabled.disabledBy, 'root@corp.com');
+    });
+  });
+
   group('errors', () {
     test('carry the status and rbacr message', () async {
       final error = await fake(
