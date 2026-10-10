@@ -1,5 +1,5 @@
 import { json, type RequestEvent } from '@sveltejs/kit';
-import { RbacError, type Actor, type GrantWithImplied, type Voucher } from './rbac';
+import { RbacError, type Actor, type GrantWithImplied, type Validity, type Voucher } from './rbac';
 import { getServices, type Services } from './services';
 import type { ApiToken } from './tokens';
 
@@ -87,7 +87,17 @@ export function optInt(value: unknown, field: string): number | null {
 	return n;
 }
 
-export const grantJson = (g: GrantWithImplied) => ({ ...g, grantedAt: g.grantedAt.toISOString() });
+/** A grant's optional `startsAt` and `endsAt` (G1); blank or missing means immediately and forever. */
+export function validity(body: Record<string, unknown>): Validity {
+	return { startsAt: optDate(body.startsAt, 'startsAt'), endsAt: optDate(body.endsAt, 'endsAt') };
+}
+
+export const grantJson = (g: GrantWithImplied) => ({
+	...g,
+	grantedAt: g.grantedAt.toISOString(),
+	startsAt: g.startsAt?.toISOString() ?? null,
+	endsAt: g.endsAt?.toISOString() ?? null
+});
 
 export const voucherJson = (v: Voucher, status: string) => ({
 	...v,

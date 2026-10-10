@@ -14,7 +14,7 @@ and the README in sync with the code.
 | Grantee | Who a grant applies to: one address (`ana@example.com`) or a whole domain (stored as `@example.com`; input `example.com` is accepted too). |
 | System | An application whose roles rbacr manages. Its id is a slug: 1-63 characters from `a-z 0-9 _ . : -`, starting with a letter or digit. |
 | Role | A name a root registers in a system's catalog, with the same slug rules (any name but `root`). A role may **imply** other roles of the same system (R6). Both are data; `root` is the only built-in role (R2). |
-| Grant | Gives (system, role) to a grantee. A **global grant** gives a role in every system whose catalog has a role of that name, now or later. |
+| Grant | Gives (system, role) to a grantee, during its validity (G1). A **global grant** gives a role in every system whose catalog has a role of that name, now or later. |
 | Voucher | A code that grants a role to whoever redeems it: in one system, or globally (a global grant). |
 | Subscriber | A paying subscriber of the newsletter (Substack) whose payments run on the publisher's Stripe account. |
 | API token | A person's secret token for the external API (`/api`). It acts as that person, with their current roles. |
@@ -51,7 +51,7 @@ and the README in sync with the code.
   can hold it. `root` is therefore reserved and can't be a role name in any
   system's catalog. Roots alone manage rbacr (P1).
 - **R3** Everyone else's effective roles combine the grants to their own
-  address and to their domain. A global grant of role R adds R in every system
+  address and to their domain that are valid now (G1). A global grant of role R adds R in every system
   whose catalog has R, including systems created later. Their `globalRoles`
   are the roles of those global grants.
 - **R4 Roles are registered data.** A system has exactly the roles a root
@@ -80,6 +80,23 @@ and the README in sync with the code.
   implies in its system, sorted, without the role itself. A global grant
   gives its role in every system that defines it, so it has
   `impliedRoles: []` and `impliedRolesBySystem: { systemId: [role] }`.
+
+## Grant validity
+
+- **G1** Every grant has a validity: an optional start (`startsAt`) and an
+  optional end (`endsAt`, exclusive). A missing start means immediately, a
+  missing end means forever. If both are set, the start must come before
+  the end (400). A grant gives its role (R3, R6, C3) only while
+  `startsAt ≤ now < endsAt`; its `status` is `active`, `not-started` or
+  `expired` accordingly. Grants outside their validity stay listed until
+  revoked.
+- **G2** A grantee holds a role in a system (or globally) through at most
+  one grant. A root granting it again with the same validity changes
+  nothing (the original grant is kept); with another validity, the new
+  grant replaces the old one, whoever made it.
+- **G3** A voucher's grant starts at redemption and never ends. It replaces
+  an existing grant of that role to the redeemer, unless that grant already
+  gives the role now and forever, which is kept.
 
 ## Permissions
 
@@ -120,7 +137,7 @@ and the README in sync with the code.
   startsAt), `expired` (now ≥ endsAt) or `exhausted` (uses ≥ maxUses), checked
   in that order.
 - **V4** Redeeming an active voucher with a **100% discount** grants its role
-  to the redeemer's address and increments `uses`. A system voucher creates a
+  to the redeemer's address (G3) and increments `uses`. A system voucher creates a
   grant in its system; a global voucher creates a global grant. Redemption
   runs in one transaction with a row lock, so concurrent redemptions cannot
   exceed `maxUses`.
@@ -160,11 +177,21 @@ Stripe Connect. That account sends webhooks, so rbacr syncs from Stripe:
   role `RBACR_STRIPE_ROLE` (default `premium`): a global grant, or a grant
   in `RBACR_STRIPE_SYSTEM` when set (whose catalog must have the role).
   The grant's `grantedBy` is `stripe`. An existing grant of that role to
-  that address is kept as it is, whoever made it.
+  that address that someone else made (a root or a voucher) is kept as it
+  is, unless it has expired (G1), when the sync's grant replaces it.
+- **Q2a** The sync's grant is valid for the subscription's current billing
+  period: `startsAt` and `endsAt` are its `current_period_start` and
+  `current_period_end` (read from the subscription items in Stripe API
+  versions that keep them there). With several entitled subscriptions, the
+  one whose period ends last counts. Each renewal is a
+  `customer.subscription.updated` event, which moves the grant to the new
+  period, so if no renewal comes, the role ends with the period that was
+  paid for, even if the cancellation event is missed.
 - **Q3** When the customer is no longer subscribed (canceled, unpaid,
   incomplete, paused, or deleted), rbacr removes that grant, but only if
   its `grantedBy` is `stripe`: grants a root made, or that came from a
-  voucher, stay.
+  voucher, stay. The webhook answers `{ received, outcome }`, with
+  `granted`, `updated` (a new period), `revoked` or `unchanged`.
 - **Q4** Other events, and customers without an e-mail address, are
   acknowledged (200) and change nothing. If Stripe or the database fails,
   the endpoint answers 500 and Stripe retries the event. Only the Stripe
@@ -245,8 +272,8 @@ How applications use rbacr. The README has a walkthrough with examples.
   should keep it server-side, give it an expiry and revoke it when unused.
 - **C3** `POST /api/check` answers `allowed: true` exactly when the identity
   holds the role in the system as an effective role (R3, R6): through a
-  grant to its address or domain, a global grant, an implication, or root
-  status (R2). A role the identity doesn't hold gives `allowed: false`. A
+  grant valid now (G1) to its address or domain, a global grant, an
+  implication, or root status (R2). A role the identity doesn't hold gives `allowed: false`. A
   system or role that doesn't exist gives 404, after the reach check (403).
 - **C4** `POST /api/roles` with a `systemId` returns the same effective
   roles as a sorted list; without one, every system's and the global roles.
@@ -274,8 +301,8 @@ ISO-8601 strings in UTC.
 | `POST /api/vouchers/redeem` | `{ code }` | the resulting grant with `impliedRoles` (`systemId: null` and `impliedRolesBySystem` when global), or 402 (V4a) |
 | `GET /api/vouchers` | — | `{ vouchers: [...] }`, the global vouchers (roots) |
 | `POST /api/vouchers` | `{ role, discountPercent?, startsAt?, endsAt?, maxUses? }` | 201, a global voucher (roots) |
-| `GET /api/global-grants` | — | `{ grants: [{ systemId: null, role, grantee, grantedBy, grantedAt, voucherCode, impliedRoles: [], impliedRolesBySystem }] }` (roots, R8) |
-| `POST /api/global-grants` | `{ role, grantee }` | 201, the global grant, with `impliedRolesBySystem` (roots) |
+| `GET /api/global-grants` | — | `{ grants: [{ systemId: null, role, grantee, grantedBy, grantedAt, startsAt, endsAt, status, voucherCode, impliedRoles: [], impliedRolesBySystem }] }` (roots, R8, G1) |
+| `POST /api/global-grants` | `{ role, grantee, startsAt?, endsAt? }` | 201, the global grant, with `impliedRolesBySystem` (roots, G1, G2) |
 | `DELETE /api/global-grants` | `{ role, grantee }` | 204 (roots) |
 | `DELETE /api/vouchers/:code` | — | the disabled voucher |
 | `GET /api/systems` | — | `{ systems: [{ id, name, roles, implies: { role: [role] } }] }` (only manageable systems; `implies` lists direct implications) |
@@ -285,8 +312,8 @@ ISO-8601 strings in UTC.
 | `POST /api/systems/:id/roles` | `{ role }` | the system |
 | `DELETE /api/systems/:id/roles/:role` | — | 204 |
 | `PUT /api/systems/:id/roles/:role` | `{ implies: [role] }` | the system, with the role's implied roles replaced (roots, R7) |
-| `GET /api/systems/:id/grants` | — | `{ grants: [{ systemId, role, grantee, grantedBy, grantedAt, voucherCode, impliedRoles }] }` (R8) |
-| `POST /api/systems/:id/grants` | `{ role, grantee }` | 201, the grant with `impliedRoles` (re-granting is idempotent) |
+| `GET /api/systems/:id/grants` | — | `{ grants: [{ systemId, role, grantee, grantedBy, grantedAt, startsAt, endsAt, status, voucherCode, impliedRoles }] }` (R8, G1) |
+| `POST /api/systems/:id/grants` | `{ role, grantee, startsAt?, endsAt? }` | 201, the grant with `impliedRoles` (G1; re-granting with the same validity is idempotent, G2) |
 | `DELETE /api/systems/:id/grants` | `{ role, grantee }` | 204 |
 | `GET /api/systems/:id/vouchers` | — | `{ vouchers: [{ code, systemId, role, discountPercent, startsAt, endsAt, maxUses, uses, status, createdBy, createdAt, disabledAt }] }` |
 | `POST /api/systems/:id/vouchers` | `{ role, discountPercent?, startsAt?, endsAt?, maxUses? }` | 201, the voucher |
@@ -396,7 +423,7 @@ All settings come from environment variables prefixed `RBACR_`:
 
 | Suite | Command | Covers |
 |-------|---------|--------|
-| Unit and domain | `npx vitest --run` | Identity parsing, the R*, P*, V*, Q*, T* and D* rules against DynamoDB Local (a Docker container started by the test setup, or `RBACR_TEST_DYNAMODB_ENDPOINT`), the A3 guard, sessions, Google OAuth exchange |
+| Unit and domain | `npx vitest --run` | Identity parsing, the R*, G*, P*, V*, Q*, T* and D* rules against DynamoDB Local (a Docker container started by the test setup, or `RBACR_TEST_DYNAMODB_ENDPOINT`), the A3 guard, sessions, Google OAuth exchange |
 | Lambda smoke | `npm run test:lambda` | The production build invoked through `lambda.js` with function URL (v2) events: H1, H2, A1, A3 and the Stripe webhook's signature check (Q1), the version, redirects, 401s, static assets. `scripts/package-lambda.sh` reruns it against the deployable bundle. |
 | End-to-end | `npm run test:e2e` | `/api` with personal tokens, `/vpi` as the frontend, the A1/A3 separation, and the pages, against a running dev server with DynamoDB Local, directly or through Floci over HTTPS |
 | Live | `scripts/deploy.sh` (last step) | The deployed site: version, sign-in page, 401 (also for an unknown token, which reads DynamoDB), 404 for `/login/dev`, 403 for the bare function URL |

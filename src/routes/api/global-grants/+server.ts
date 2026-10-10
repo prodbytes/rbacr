@@ -1,5 +1,5 @@
 import { json } from '@sveltejs/kit';
-import { api, grantJson, readJson, str } from '#lib/server/http.js';
+import { api, grantJson, readJson, str, validity } from '#lib/server/http.js';
 import type { RequestHandler } from './$types';
 
 /** Global grants (roots only): a role in every system whose catalog has it. */
@@ -9,7 +9,7 @@ export const GET: RequestHandler = (event) =>
 export const POST: RequestHandler = (event) =>
 	api(event, async ({ rbac, actor }) => {
 		const body = await readJson(event.request);
-		const grant = await rbac.grantGlobal(actor, str(body.role, 'role'), str(body.grantee, 'grantee'));
+		const grant = await rbac.grantGlobal(actor, str(body.role, 'role'), str(body.grantee, 'grantee'), validity(body));
 		return json(grantJson(grant), { status: 201 });
 	});
 
