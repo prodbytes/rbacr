@@ -314,6 +314,17 @@ Stripe Connect. That account sends webhooks, so rbacr syncs from Stripe:
   included. Anything else gives 403. An unknown system, or a role missing
   from its catalog, gives 404. Without a `systemId`, `/api/check` asks about
   a global role (such as `root`).
+- **T7** Local development only: with `RBACR_BOOTSTRAP_TOKEN` and
+  `RBACR_BOOTSTRAP_EMAIL` set, the app makes that token a live token of that
+  address, named `bootstrap`, never expiring, the first time it reaches
+  DynamoDB. It is chosen by the operator instead of generated (T2), so it
+  must be `rbacr_` followed by at least 32 base64url characters, or the app
+  doesn't start. It is idempotent: a token already stored, revoked included,
+  is left as it is. It is refused unless `RBACR_DYNAMODB_ENDPOINT` is set
+  (DynamoDB Local), so it can't exist in AWS. The dev server image
+  (`prodbytes/rbacr-local`, README "Local rbacr for your app") uses it so
+  apps call `/api` without signing in, taking `RBACR_TOKEN` (C7) when
+  `RBACR_BOOTSTRAP_TOKEN` is unset, and else generating one.
 
 ## Client integration
 
@@ -400,7 +411,8 @@ addresses stay out of URLs and access logs.
   configured, else `missing`.
 - **HC2** The status is 200 when every required check is `ok`, else 503.
   `google` is required, except under `vite dev`, which has the dev login
-  (S4). DynamoDB is deliberately not checked: it is a managed regional
+  (S4), and on DynamoDB Local (`RBACR_DYNAMODB_ENDPOINT`), where apps use a
+  bootstrap token (T7). DynamoDB is deliberately not checked: it is a managed regional
   service, and probing it on every poll would only add cost. The deploy
   smoke test exercises it instead (an unknown API token gets 401, not
   500).
@@ -459,6 +471,7 @@ All settings come from environment variables prefixed `RBACR_`:
 | `RBACR_DYNAMODB_SESSIONS_TABLE` | no | The sessions table (S3); default `<RBACR_DYNAMODB_TABLE>-sessions` |
 | `RBACR_SESSION_RETENTION_DAYS` | no | Whole days (1 or more) a session record is kept after it expires, then purged by TTL (S3); default 365. An invalid value stops the app from starting. In AWS it is the app stack's `SessionRetentionDays` parameter. |
 | `RBACR_DYNAMODB_ENDPOINT` | no | DynamoDB Local's URL for development (e.g. `http://127.0.0.1:8642`); the app creates its table there. Unset in AWS. |
+| `RBACR_BOOTSTRAP_TOKEN`, `RBACR_BOOTSTRAP_EMAIL` | no | A fixed API token and its owner, for local development only (T7). An invalid token stops the app from starting. |
 | `RBACR_ROOT_LIST` | no (no roots if empty; in AWS the default is `@nu01.com`) | Root addresses and domains (R1, R1a) |
 | `RBACR_GOOGLE_CLIENT_ID`, `RBACR_GOOGLE_CLIENT_SECRET` | for Google sign-in | OAuth web client. Without them `/login/google` returns 503. |
 | `RBACR_PUBLIC_ORIGIN` | no | Origin for the Google redirect URI (`<origin>/login/google/callback`); default: the request's origin |
@@ -479,6 +492,9 @@ All settings come from environment variables prefixed `RBACR_`:
   on DynamoDB Local in development ([compose.yaml](compose.yaml)) and in the
   unit tests. The item layout is documented in
   [src/lib/server/rbac.ts](src/lib/server/rbac.ts); it needs no migrations.
+- Locally, the [Containerfile](Containerfile) runs the same adapter-node
+  build (not `vite dev`) on DynamoDB Local in one container, with a
+  bootstrap token (T7), so apps develop against the production code paths.
 - **D1** Writes that must not race are single DynamoDB transactions with
   conditions: a grant, voucher or implication checks that its role still
   exists; redeeming counts the use (within `maxUses`), records the

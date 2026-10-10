@@ -79,4 +79,21 @@ describe('personal API tokens', () => {
 		await expectError(tokens.create(ANA, { name: 'one too many' }), 409);
 		expect((await tokens.create(BOB, { name: 'bob' })).apiToken.name).toBe('bob');
 	});
+
+	it('can be bootstrapped with a fixed value, once (T7)', async () => {
+		const token = 'rbacr_' + 'a'.repeat(43);
+		await tokens.bootstrap(ANA, token);
+		expect(await tokens.authenticate(token)).toBe(ANA);
+		const [listed] = await tokens.list(ANA);
+		expect(listed).toMatchObject({ name: 'bootstrap', prefix: token.slice(0, 12), expiresAt: null, revokedAt: null });
+		// Again (every start): nothing changes, and a revoked token stays revoked.
+		await tokens.revoke(ANA, listed.id);
+		await tokens.bootstrap(ANA, token);
+		expect(await tokens.list(ANA)).toHaveLength(1);
+		expect(await tokens.authenticate(token)).toBeNull();
+		for (const bad of ['', 'rbacr_short', 'x'.repeat(50), `rbacr_${'a'.repeat(40)}!`]) {
+			await expect(tokens.bootstrap(BOB, bad)).rejects.toThrow(/bootstrap token/);
+		}
+		expect(await tokens.list(BOB)).toEqual([]);
+	});
 });

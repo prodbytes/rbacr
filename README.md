@@ -11,8 +11,8 @@ web pages and as JSON.
 
 | Folder | What it is |
 |--------|------------|
-| [rbacr-sls/](rbacr-sls/README.md) | The rbacr service: a SvelteKit app on AWS Lambda (serverless), with its spec ([SPEC.md](rbacr-sls/SPEC.md)), infrastructure, scripts and tests. Deployed to https://rbacr.nu01.com. |
 | [rbacr-flutter/](rbacr-flutter/README.md) | The Dart client (package `rbacr`) for Flutter apps and Dart servers: role checks, with how long a "yes" holds, and voucher redemption, instead of raw HTTP calls. |
+| [rbacr-sls/](rbacr-sls/README.md) | The rbacr service: a SvelteKit app on AWS Lambda (serverless), with its spec ([SPEC.md](rbacr-sls/SPEC.md)), infrastructure, scripts and tests. Deployed to https://rbacr.nu01.com. For developing apps against a local rbacr, its [Containerfile](rbacr-sls/Containerfile) runs it in one container ([how](rbacr-sls/README.md#local-rbacr-for-your-app)). |
 | [rbacr-lib/](rbacr-lib/README.md) | A client library for applications that ask rbacr about roles, caching role grants. Not specified yet. |
 
 Each component is self-contained: work from its folder (for the service,

@@ -1,6 +1,7 @@
 import { defineEnvVars } from '@sveltejs/kit/env';
 import { Allowlist } from './lib/server/identity';
 import { DEFAULT_SESSION_RETENTION_DAYS } from './lib/server/session';
+import { BOOTSTRAP_TOKEN_RE } from './lib/server/tokens';
 
 const optional = (value: string | undefined) => value || undefined;
 
@@ -28,6 +29,19 @@ export const variables = defineEnvVars({
 	RBACR_DYNAMODB_ENDPOINT: {
 		description:
 			'DynamoDB endpoint override for DynamoDB Local, e.g. http://127.0.0.1:8642. The table is created there if missing. Unset in AWS.',
+		schema: optional
+	},
+	RBACR_BOOTSTRAP_TOKEN: {
+		description:
+			'A fixed API token (rbacr_ and 32+ base64url characters) made a live token of RBACR_BOOTSTRAP_EMAIL when the app first reaches DynamoDB. Only with RBACR_DYNAMODB_ENDPOINT (local development).',
+		// checked here so a bad value stops the app from starting
+		schema: (value) => {
+			if (value && !BOOTSTRAP_TOKEN_RE.test(value)) throw new Error('must be rbacr_ followed by at least 32 base64url characters');
+			return value || undefined;
+		}
+	},
+	RBACR_BOOTSTRAP_EMAIL: {
+		description: 'The owner of RBACR_BOOTSTRAP_TOKEN; put it in RBACR_ROOT_LIST to make the token a root token',
 		schema: optional
 	},
 	RBACR_ROOT_LIST: {

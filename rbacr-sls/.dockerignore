@@ -1,0 +1,13 @@
+# Build context of the Containerfile: sources only, never local env files,
+# certificates or build output.
+*
+!package.json
+!package-lock.json
+!.npmrc
+!tsconfig.json
+!vite.config.ts
+!src/
+!static/
+!container/
+src/**/*.spec.ts
+src/lib/server/testing/

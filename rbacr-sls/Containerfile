@@ -1,0 +1,45 @@
+# rbacr for local development: the production server (adapter-node) on
+# DynamoDB Local, in one container, so apps can be developed against a local
+# rbacr with the same /api and clients as production. Not for deployment
+# (AWS uses Lambda, infra/). See README "Local rbacr for your app".
+#
+#   docker run -d --name rbacr -p 8686:8686 -v rbacr-data:/data prodbytes/rbacr-local
+#   docker build -t prodbytes/rbacr-local -f Containerfile .   # or build it yourself
+
+# The app: build, then keep only the runtime dependencies.
+FROM node:24-bookworm-slim AS app
+WORKDIR /app
+COPY package.json package-lock.json .npmrc ./
+RUN npm ci --no-audit --no-fund
+COPY . .
+RUN npm run build && npm prune --omit=dev --no-audit --no-fund
+
+# DynamoDB Local, and a Java runtime trimmed to the modules it uses (jdeps).
+FROM amazon/dynamodb-local:3.1.0 AS dynamodb
+FROM eclipse-temurin:21-jdk AS jre
+RUN jlink --add-modules java.base,java.compiler,java.desktop,java.management,java.naming,java.sql,jdk.unsupported \
+      --strip-debug --no-man-pages --no-header-files --compress=zip-9 --output /opt/jre \
+ && install -d -o 65532 -g 65532 /data
+
+# No shell or package manager; runs as the distroless nonroot user (65532).
+FROM gcr.io/distroless/nodejs24-debian12:nonroot
+COPY --from=jre /opt/jre /opt/jre
+COPY --from=jre --chown=65532:65532 /data /data
+COPY --from=dynamodb /home/dynamodblocal/DynamoDBLocal.jar /opt/dynamodb/
+COPY --from=dynamodb /home/dynamodblocal/DynamoDBLocal_lib /opt/dynamodb/DynamoDBLocal_lib
+WORKDIR /app
+COPY --from=app /app/package.json ./
+COPY --from=app /app/node_modules node_modules
+COPY --from=app /app/build build
+COPY container/start.mjs ./
+ENV PORT=8686 \
+    RBACR_DYNAMODB_TABLE=rbacr \
+    RBACR_ROOT_LIST=dev@rbacr.local \
+    RBACR_BOOTSTRAP_EMAIL=dev@rbacr.local \
+    RBACR_VERSION=local
+EXPOSE 8686
+VOLUME /data
+# No curl in the image: node asks /health (200 once DynamoDB Local and the server are up).
+HEALTHCHECK --interval=10s --timeout=3s --start-period=30s \
+  CMD ["/nodejs/bin/node", "-e", "fetch('http://127.0.0.1:'+(process.env.PORT||8686)+'/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+CMD ["start.mjs"]
