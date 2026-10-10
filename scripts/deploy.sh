@@ -35,9 +35,6 @@
 #   RBACR_STRIPE_WEBHOOK_SECRET, RBACR_STRIPE_API_KEY
 #                 optional (the paid-subscription sync); unset ones keep
 #                 their deployed values
-#   RBACR_STRIPE_ROLE, RBACR_STRIPE_SYSTEM
-#                 the sync's role (default premium) and system (default
-#                 none: a global grant); passed on every deploy
 #   HEALTH_EMAILS comma-separated addresses the health alarm e-mails
 #                 (default julio+health@nu01.com); passed on every deploy,
 #                 because the template's Fn::ForEach can't see defaults
@@ -128,7 +125,6 @@ for pair in StripeWebhookSecret:RBACR_STRIPE_WEBHOOK_SECRET StripeApiKey:RBACR_S
   param="${pair%%:*}" name="${pair#*:}"
   if [[ -n "${!name:-}" ]]; then params+=("$param=${!name}"); fi
 done
-params+=("StripeRole=${RBACR_STRIPE_ROLE:-premium}" "StripeSystem=${RBACR_STRIPE_SYSTEM:-}")
 params+=("HealthNotificationEmails=${HEALTH_EMAILS:-julio+health@nu01.com}")
 # Addresses are people's: logged only as a count.
 roots=0; [[ -n "${RBACR_ROOT_LIST:-}" ]] && roots=$(tr ',' '\n' <<<"$RBACR_ROOT_LIST" | grep -c .)

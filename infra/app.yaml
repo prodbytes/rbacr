@@ -57,16 +57,6 @@ Parameters:
     NoEcho: true
     Default: ''
     Description: RBACR_STRIPE_API_KEY, a restricted key reading Customers and Subscriptions
-  StripeRole:
-    Type: String
-    Default: premium
-    AllowedPattern: '[a-z0-9][a-z0-9_.:-]{0,62}'
-    Description: RBACR_STRIPE_ROLE, the role paying subscribers hold
-  StripeSystem:
-    Type: String
-    Default: ''
-    AllowedPattern: '([a-z0-9][a-z0-9_.:-]{0,62})?'
-    Description: RBACR_STRIPE_SYSTEM, the system of that role; empty means a global grant
   HealthNotificationEmails:
     Type: CommaDelimitedList
     Default: julio+health@nu01.com
@@ -178,8 +168,6 @@ Resources:
           RBACR_GOOGLE_CLIENT_SECRET: !Ref GoogleClientSecret
           RBACR_STRIPE_WEBHOOK_SECRET: !Ref StripeWebhookSecret
           RBACR_STRIPE_API_KEY: !Ref StripeApiKey
-          RBACR_STRIPE_ROLE: !Ref StripeRole
-          RBACR_STRIPE_SYSTEM: !Ref StripeSystem
           RBACR_DYNAMODB_TABLE: !Ref TableName
 
   FunctionUrl:

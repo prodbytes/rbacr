@@ -44,6 +44,10 @@
 		e.preventDefault();
 		await call(`${base}/roles/${encodeURIComponent(implRole)}`, 'PUT', { implies: implied });
 	}
+	async function setSubscriberRole(e: SubmitEvent) {
+		const { subscriberRole } = formValues(e);
+		await call(base, 'PATCH', { subscriberRole: subscriberRole || null });
+	}
 	async function grant(e: SubmitEvent) {
 		const form = e.currentTarget as HTMLFormElement;
 		const { grantee, role, startsAt, endsAt } = formValues(e);
@@ -118,6 +122,24 @@
 			{/each}
 		{/if}
 		<button disabled={!implRole}>Set implied roles</button>
+	</form>
+{/if}
+
+<h2>Substack subscribers</h2>
+<p class="muted">
+	Paying subscribers of the newsletter hold this role here for their current billing period.
+	{#if data.system.subscriberRole}Now: <span class="badge">{data.system.subscriberRole}</span>{:else}Now: none.{/if}
+</p>
+{#if data.root}
+	<form class="row" onsubmit={setSubscriberRole}>
+		<label>
+			Role for subscribers
+			<select name="subscriberRole" value={data.system.subscriberRole ?? ''}>
+				<option value="">none</option>
+				{#each data.system.roles as role (role)}<option>{role}</option>{/each}
+			</select>
+		</label>
+		<button>Save</button>
 	</form>
 {/if}
 

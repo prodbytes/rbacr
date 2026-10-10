@@ -188,6 +188,19 @@ describe('rbacr API', { skip: !(await fetch(`${BASE}/health`).then((r) => r.ok, 
 		for (const v of [free.body.code, paid.body.code]) await root('DELETE', `/api/vouchers/${v}`);
 	});
 
+	it('lets roots set the role Substack subscribers hold in a system', async () => {
+		const path = `/api/systems/${SYSTEM}`;
+		assert.equal((await root('GET', path)).body.subscriberRole, null);
+		assert.equal((await admin('PATCH', path, { subscriberRole: 'viewer' })).status, 403);
+		assert.equal((await root('PATCH', path, { subscriberRole: 'ghost' })).status, 404);
+		assert.equal((await root('PATCH', path, {})).status, 400);
+		const set = await root('PATCH', path, { subscriberRole: 'viewer' });
+		assert.equal(set.status, 200, JSON.stringify(set.body));
+		assert.equal(set.body.subscriberRole, 'viewer');
+		assert.equal((await root('GET', '/api/systems')).body.systems.find((s) => s.id === SYSTEM).subscriberRole, 'viewer');
+		assert.equal((await root('PATCH', path, { subscriberRole: null })).body.subscriberRole, null);
+	});
+
 	it('gives grants a validity window', async () => {
 		const grantee = `window-${Date.now()}@example.com`;
 		const check = async () => (await root('POST', '/api/check', { email: grantee, systemId: SYSTEM, role: 'viewer' })).body.allowed;
