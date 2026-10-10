@@ -95,6 +95,23 @@ describe('lambda handler', () => {
 		}
 	});
 
+	it('lets API clients write without an Origin, body-less DELETEs included (H2)', async () => {
+		for (const path of ['/api/vouchers/ABCD-EFGH-JKLM-NPQR', '/api/systems/x', '/api/systems/x/roles/y']) {
+			const res = await invoke(path, { method: 'DELETE' });
+			assert.equal(res.statusCode, 401, path); // the token check, not the CSRF check
+		}
+	});
+
+	it('refuses cross-site form submissions outside /api (H2)', async () => {
+		for (const headers of [{}, { origin: 'https://evil.example' }, { 'content-type': 'application/x-www-form-urlencoded' }]) {
+			const res = await invoke('/logout', { method: 'POST', headers });
+			assert.equal(res.statusCode, 403, JSON.stringify(headers));
+			assert.match(res.body, /Cross-site POST form submissions are forbidden/);
+		}
+		const own = await invoke('/logout', { method: 'POST', headers: { origin: 'https://rbacr.example.com' } });
+		assert.notEqual(own.statusCode, 403);
+	});
+
 	it('refuses /vpi calls that do not come from the frontend', async () => {
 		const attempts = [
 			{},

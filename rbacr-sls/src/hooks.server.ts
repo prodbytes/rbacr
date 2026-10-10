@@ -1,6 +1,8 @@
 import { timingSafeEqual } from 'node:crypto';
 import type { Handle } from '@sveltejs/kit/hooks';
+import { dev } from '$app/env';
 import { RBACR_ORIGIN_SECRET, RBACR_PUBLIC_ORIGIN } from '$app/env/private';
+import { isCrossSiteForm } from '#lib/server/csrf.js';
 import { getServices } from '#lib/server/services.js';
 import { SESSION_COOKIE } from '#lib/server/session.js';
 import { rejectNonFrontend } from '#lib/server/vpiguard.js';
@@ -20,9 +22,13 @@ export const handle: Handle = async ({ event, resolve }) => {
 	// page that already passed this check.
 	if (!event.isSubRequest && !fromOrigin(event.request)) return new Response('Forbidden', { status: 403 });
 	const path = event.url.pathname;
+	const own = [event.url.origin, ...(RBACR_PUBLIC_ORIGIN ? [RBACR_PUBLIC_ORIGIN] : [])];
+	// H2, in production builds only, like the SvelteKit check it replaces.
+	if (!dev && !event.isSubRequest && isCrossSiteForm(event.request, path, own)) {
+		return new Response(`Cross-site ${event.request.method} form submissions are forbidden`, { status: 403 });
+	}
 	const vpi = path === '/vpi' || path.startsWith('/vpi/');
 	if (vpi) {
-		const own = [event.url.origin, ...(RBACR_PUBLIC_ORIGIN ? [RBACR_PUBLIC_ORIGIN] : [])];
 		const reason = rejectNonFrontend(event.request, event.isSubRequest, own);
 		if (reason) {
 			return Response.json({ error: `/vpi is only for the rbacr frontend (${reason}); use /api with an API token` }, { status: 403 });

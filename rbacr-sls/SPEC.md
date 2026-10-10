@@ -442,7 +442,12 @@ to `/`. The pages need JavaScript.
   the Lambda function URL directly is refused.
 - **H2** In production builds, form submissions (`POST`/`PUT`/`PATCH`/`DELETE`
   with a form or plain-text body, or with no content type) whose `Origin` is
-  not the app's own get 403 (SvelteKit's CSRF check).
+  missing or not the app's own (the request's origin or
+  `RBACR_PUBLIC_ORIGIN`) get 403, except under `/api`, which takes bearer
+  tokens only (A1) and so can't be forged from a browser: API clients send
+  no `Origin`, and a body-less `DELETE` must reach the token check. rbacr
+  applies this itself (src/lib/server/csrf.ts); SvelteKit's own check, which
+  can't exempt a path, is off.
 
 ## Configuration
 
