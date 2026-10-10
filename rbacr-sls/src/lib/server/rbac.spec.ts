@@ -396,6 +396,81 @@ describe('system URLs', () => {
 	});
 });
 
+describe('system cards', () => {
+	it('carry a description and a screenshot, cleared with null, and anyone may read them (R13)', async () => {
+		const set = await rbac.configureSystem(root, 'billing', {
+			url: 'https://billing.example.com',
+			description: '  Invoices and payments.\nFor the finance team.  ',
+			screenshotUrl: 'https://billing.example.com/shot.png'
+		});
+		expect(set).toMatchObject({ description: 'Invoices and payments.\nFor the finance team.', screenshotUrl: 'https://billing.example.com/shot.png' });
+		expect(await rbac.systemCards(['billing', 'crm', 'nope'])).toEqual({
+			billing: {
+				id: 'billing',
+				name: 'Billing',
+				url: 'https://billing.example.com',
+				description: 'Invoices and payments.\nFor the finance team.',
+				screenshotUrl: 'https://billing.example.com/shot.png',
+				maintenance: false
+			},
+			crm: { id: 'crm', name: 'crm', url: null, description: null, screenshotUrl: null, maintenance: false }
+		});
+		const cleared = await rbac.configureSystem(root, 'billing', { description: '   ', screenshotUrl: null });
+		expect(cleared).toMatchObject({ description: null, screenshotUrl: null, url: 'https://billing.example.com' });
+		await rbac.deleteSystem(root, 'crm');
+		expect(Object.keys(await rbac.systemCards(['billing', 'crm']))).toEqual(['billing']);
+	});
+
+	it('refuse bad screenshots and long descriptions, and only roots set them (R13, P1)', async () => {
+		for (const bad of ['javascript:alert(1)', 'data:image/png;base64,AAAA', '/shot.png']) {
+			await expectError(rbac.setSystemScreenshot(root, 'billing', bad), 400);
+		}
+		await expectError(rbac.setSystemDescription(root, 'billing', 'x'.repeat(1001)), 400);
+		await rbac.setSystemDescription(root, 'billing', 'x'.repeat(1000));
+		await expectError(rbac.setSystemDescription(user, 'billing', 'hi'), 403);
+		await expectError(rbac.setSystemScreenshot(user, 'billing', 'https://x.com/a.png'), 403);
+		await expectError(rbac.setSystemDescription(root, 'nope', 'hi'), 404);
+	});
+});
+
+describe('own redemptions', () => {
+	it("give the redeemer their RedeemEvent and the voucher's system (V8)", async () => {
+		await rbac.configureSystem(root, 'billing', { url: 'https://billing.example.com', description: 'Invoices' });
+		await rbac.createVoucher(root, { systemId: 'billing', roles: ['viewer', 'editor'], code: 'OWN-SYSTEM' });
+		await expectError(rbac.ownRedemption(USER, 'OWN-SYSTEM'), 404);
+		await rbac.redeemVoucher(USER, 'own system', 'page');
+		const { redemption, systems } = await rbac.ownRedemption(USER, 'own-system');
+		expect(redemption).toMatchObject({ code: 'OWN-SYSTEM', email: USER, roles: ['editor', 'viewer'], via: 'page' });
+		expect(systems).toEqual([
+			{
+				id: 'billing',
+				name: 'Billing',
+				url: 'https://billing.example.com',
+				description: 'Invoices',
+				screenshotUrl: null,
+				maintenance: false,
+				roles: ['editor', 'viewer']
+			}
+		]);
+		// Only one's own: someone else, or an unknown code, gets 404.
+		await expectError(rbac.ownRedemption(OTHER, 'OWN-SYSTEM'), 404);
+		await expectError(rbac.ownRedemption(USER, 'NO-SUCH-CODE'), 404);
+	});
+
+	it('list, for a global voucher, every system that has one of its roles (V8)', async () => {
+		await rbac.addRole(root, 'crm', 'viewer');
+		await rbac.createSystem(root, { id: 'wiki', roles: ['editor'] });
+		await rbac.createVoucher(root, { systemId: null, roles: ['viewer', 'editor'], code: 'OWN-GLOBAL' });
+		await rbac.redeemVoucher(USER, 'OWN-GLOBAL');
+		const { systems } = await rbac.ownRedemption(USER, 'OWN-GLOBAL');
+		expect(systems.map((s) => [s.id, s.roles])).toEqual([
+			['billing', ['editor', 'viewer']],
+			['crm', ['viewer']],
+			['wiki', ['editor']]
+		]);
+	});
+});
+
 describe('vouchers', () => {
 	it('get a default code: the quarter and three animals (V2)', async () => {
 		const v = await rbac.createVoucher(root, { systemId: 'billing', roles: ['viewer'] });
@@ -931,5 +1006,111 @@ describe('role queries (the external API)', () => {
 		await expectError(rbac.hasRole(user, OTHER, 'billing', 'editor'), 403, /Only roots/);
 		await expectError(rbac.rolesIn(user, OTHER, 'billing'), 403);
 		await expectError(rbac.allRoles(user, ROOT), 403);
+	});
+});
+
+describe('notifications (N1-N4)', () => {
+	// The test clock is 2026-01-10T12:00Z; a week later is 2026-01-17T12:00Z.
+	const soon = new Date('2026-01-15T00:00:00Z');
+	const later = new Date('2026-03-01T00:00:00Z');
+	const voucher = (roles: string[], v: { startsAt?: Date; endsAt?: Date | null; systemId?: string | null; maxUses?: number } = {}) =>
+		rbac.createVoucher(root, { systemId: 'billing', roles, endsAt: soon, ...v });
+	const open = async () => (await rbac.listNotifications(root)).filter((n) => n.status === 'open');
+
+	it('warns roots about a voucher ending within a week that nothing replaces (N3)', async () => {
+		const v = await voucher(['editor', 'viewer']);
+		await voucher(['viewer'], { endsAt: later }); // too late to warn about; it also replaces `viewer`
+		await voucher(['editor'], { endsAt: null, startsAt: later }); // starts after v ends: a gap
+		await rbac.createVoucher(root, { systemId: null, roles: ['editor'], endsAt: later }); // another scope
+		const [n, ...rest] = await rbac.verify(root);
+		expect(rest).toEqual([]);
+		expect(n).toMatchObject({
+			id: `voucher-expiring:${v.code.replace(/-/g, '')}`,
+			kind: 'voucher-expiring',
+			severity: 'warning',
+			status: 'open',
+			systemId: 'billing',
+			voucherCode: v.code,
+			roles: ['editor'],
+			endsAt: soon,
+			raisedAt: clock
+		});
+		expect(n.message).toMatch(new RegExp(`${v.code} ends 2026-01-15 00:00 UTC.*editor`));
+		// Running the rules again raises nothing new.
+		clock = new Date(clock.getTime() + 1000);
+		expect(await rbac.verify(root)).toEqual([n]);
+		expect(await rbac.openNotificationCount(root)).toBe(1);
+	});
+
+	it('leaves alone vouchers that are replaced, disabled, used up or far from ending', async () => {
+		await voucher(['viewer']);
+		await voucher(['viewer'], { endsAt: null }); // replaces the one above (and never ends)
+		await rbac.disableVoucher(root, (await voucher(['editor'])).code);
+		await rbac.redeemVoucher(USER, (await voucher(['editor'], { maxUses: 1 })).code);
+		await voucher(['editor'], { endsAt: later });
+		expect(await rbac.verify(root)).toEqual([]);
+	});
+
+	it('count only usable vouchers as replacements', async () => {
+		await rbac.disableVoucher(root, (await voucher(['editor'], { endsAt: later })).code);
+		await rbac.redeemVoucher(USER, (await voucher(['editor'], { endsAt: later, maxUses: 1 })).code);
+		const v = await voucher(['editor']);
+		expect((await rbac.verify(root)).map((n) => n.voucherCode)).toEqual([v.code]);
+	});
+
+	it('covers global vouchers, which only global vouchers replace', async () => {
+		const g = await voucher(['premium'], { systemId: null });
+		await rbac.addRole(root, 'billing', 'premium');
+		await voucher(['premium'], { endsAt: later });
+		await rbac.verify(root);
+		expect((await open()).map((n) => [n.voucherCode, n.systemId])).toEqual([[g.code, null]]);
+	});
+
+	it('resolve themselves once replaced, and reopen if the replacement goes (N2)', async () => {
+		const v = await voucher(['viewer']);
+		await rbac.verify(root);
+		const substitute = await voucher(['viewer'], { endsAt: later });
+		clock = new Date(clock.getTime() + 1000);
+		const [resolved] = await rbac.verify(root);
+		expect(resolved).toMatchObject({ voucherCode: v.code, status: 'resolved', resolvedAt: clock });
+		expect(await rbac.openNotificationCount(root)).toBe(0);
+		await rbac.disableVoucher(root, substitute.code);
+		clock = new Date(clock.getTime() + 1000);
+		const [reopened] = await rbac.verify(root);
+		expect(reopened).toMatchObject({ voucherCode: v.code, status: 'open', raisedAt: clock, resolvedAt: null });
+		// Once the voucher has expired it needs no replacement any more.
+		clock = new Date('2026-01-20T00:00:00Z');
+		expect((await rbac.verify(root))[0].status).toBe('resolved');
+	});
+
+	it('update the roles left uncovered while open', async () => {
+		await voucher(['editor', 'viewer']);
+		expect((await rbac.verify(root))[0].roles).toEqual(['editor', 'viewer']);
+		await voucher(['viewer'], { endsAt: later });
+		const [n] = await rbac.verify(root);
+		expect(n).toMatchObject({ status: 'open', roles: ['editor'], raisedAt: new Date('2026-01-10T12:00:00Z') });
+	});
+
+	it('can be dismissed by a root, for good and for every root (N4)', async () => {
+		await voucher(['viewer']);
+		const [n] = await rbac.verify(root);
+		const other = await rbac.actor('other@corp.com');
+		const dismissed = await rbac.dismissNotification(other, n.id);
+		expect(dismissed).toMatchObject({ status: 'dismissed', dismissedAt: clock, dismissedBy: 'other@corp.com' });
+		// Not raised again, and dismissing again keeps the first dismissal.
+		expect(await rbac.verify(root)).toEqual([dismissed]);
+		clock = new Date(clock.getTime() + 1000);
+		expect(await rbac.dismissNotification(root, n.id)).toEqual(dismissed);
+		expect(await rbac.openNotificationCount(root)).toBe(0);
+		await expectError(rbac.dismissNotification(root, 'voucher-expiring:NOPE'), 404);
+	});
+
+	it('are for roots only (N1)', async () => {
+		await voucher(['viewer']);
+		await rbac.verify(root);
+		await expectError(rbac.verify(user), 403);
+		await expectError(rbac.listNotifications(user), 403);
+		await expectError(rbac.dismissNotification(user, 'x'), 403);
+		expect(await rbac.openNotificationCount(user)).toBe(0);
 	});
 });

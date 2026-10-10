@@ -19,6 +19,8 @@ export const EVERYONE = '*';
 
 /** Longest system URL accepted. */
 const MAX_URL_LENGTH = 2048;
+/** Longest system description (R13). */
+export const MAX_DESCRIPTION_LENGTH = 1000;
 
 /** The `grantedBy` of grants made by the paid-subscription sync (Q2). */
 export const SUBSCRIPTION_GRANTOR = 'stripe';
@@ -76,6 +78,27 @@ export interface System {
 	url: string | null;
 	/** In maintenance (R11), role queries give nobody any role here. */
 	maintenance: boolean;
+	/** What the system is for, as plain text, shown on its card (R13); null for none. */
+	description: string | null;
+	/** An image (http or https URL) of the system, shown on its card (R13); null for none. */
+	screenshotUrl: string | null;
+}
+
+/** A system as its card shows it to anyone holding roles there (R13). */
+export interface SystemCard {
+	id: string;
+	name: string;
+	url: string | null;
+	description: string | null;
+	screenshotUrl: string | null;
+	maintenance: boolean;
+}
+
+/** A person's own redemption of a voucher (V8): the RedeemEvent and the systems its roles open. */
+export interface OwnRedemption {
+	redemption: RedeemEvent;
+	/** Each system the voucher's roles are in, with those roles, sorted by id. */
+	systems: (SystemCard & { roles: string[] })[];
 }
 
 /** What any token may see of a system (R12): enough for its application to check it. */
@@ -84,6 +107,15 @@ export interface SystemStatus {
 	name: string;
 	url: string | null;
 	maintenance: boolean;
+}
+
+/** A system's settings, as PATCH gives them: absent fields stay, null clears (Q2, R10, R11, R13). */
+export interface SystemSettings {
+	subscriberRole?: string | null;
+	url?: string | null;
+	maintenance?: boolean;
+	description?: string | null;
+	screenshotUrl?: string | null;
 }
 
 /** Where a redemption came from: the external API or the pages (the VPI). */
@@ -119,6 +151,36 @@ export interface RedeemEvent {
 	redeemedAt: Date;
 	via: RedeemVia | null;
 	grants: RedeemedGrant[];
+}
+
+/** How long before a voucher ends its roots are warned that nothing replaces it (N3). */
+export const VOUCHER_EXPIRY_WARNING_DAYS = 7;
+
+/** open: needs attention; resolved: its finding no longer holds (N2); dismissed: a root set it aside (N4). */
+export type NotificationStatus = 'open' | 'resolved' | 'dismissed';
+
+/**
+ * A notification for the roots (N1), raised by a verification rule (N2).
+ * Its id names its finding, so a finding is raised once however often the
+ * rules run. The only kind so far is `voucher-expiring` (N3).
+ */
+export interface Notification {
+	id: string;
+	kind: 'voucher-expiring';
+	severity: 'warning';
+	message: string;
+	/** The voucher's scope: its system, or null for a global voucher. */
+	systemId: string | null;
+	voucherCode: string;
+	/** The voucher's roles no other voucher takes over, sorted. */
+	roles: string[];
+	/** When the voucher ends. */
+	endsAt: Date;
+	raisedAt: Date;
+	resolvedAt: Date | null;
+	dismissedAt: Date | null;
+	dismissedBy: string | null;
+	status: NotificationStatus;
 }
 
 /** A role check (C3, C3a): whether the role is held, and until when at most (null: no end). */
@@ -245,7 +307,7 @@ export function validName(kind: string, raw: string): string {
 }
 
 /** An absolute http or https URL, as given; anything else (javascript:, data:, relative) is refused. */
-export function validUrl(raw: string): string {
+export function validUrl(raw: string, what = 'A system URL'): string {
 	const value = raw.trim();
 	let url: URL;
 	try {
@@ -253,8 +315,8 @@ export function validUrl(raw: string): string {
 	} catch {
 		throw badRequest(`Invalid URL "${raw}"`);
 	}
-	if (url.protocol !== 'https:' && url.protocol !== 'http:') throw badRequest('A system URL must start with https:// or http://');
-	if (value.length > MAX_URL_LENGTH) throw badRequest(`A system URL can have at most ${MAX_URL_LENGTH} characters`);
+	if (url.protocol !== 'https:' && url.protocol !== 'http:') throw badRequest(`${what} must start with https:// or http://`);
+	if (value.length > MAX_URL_LENGTH) throw badRequest(`${what} can have at most ${MAX_URL_LENGTH} characters`);
 	return value;
 }
 
@@ -270,7 +332,8 @@ export const MAX_VOUCHER_ROLES = 20;
  * Item layout in the table (src/lib/server/dynamo.ts). Dates are ISO strings;
  * an absent attribute means null.
  *
- *   system      PK SYS#<id>       SK META                      GSI1 SYSTEMS / <id>    (optional subscriberRole)
+ *   system      PK SYS#<id>       SK META                      GSI1 SYSTEMS / <id>
+ *               (optional subscriberRole, url, maintenance, description, screenshotUrl)
  *   role        PK SYS#<id>       SK ROLE#<name>               GSI1 ROLENAME#<name> / <id>
  *   implication PK SYS#<id>       SK IMPL#<role>#<implied>
  *   grant       PK SYS#<id>       SK GRANT#<role>#<grantee>    GSI1 GRANTEE#<grantee> / SYS#<id>#<role>
@@ -280,6 +343,7 @@ export const MAX_VOUCHER_ROLES = 20;
  *   redemption  PK VOUCHER#<key>  SK REDEEMED#<email>       (the RedeemEvent, V7)
  *               (<key> is the code's letters and digits, V2; vouchers made before
  *               custom codes are keyed by their XXXX-XXXX-XXXX-XXXX code)
+ *   notification PK NOTIFS        SK NOTIF#<id>                (N1; dismissed ones carry dismissedAt / dismissedBy)
  *   history     PK as the item   SK HIST#<its SK>#<when it was deleted>  (L4)
  *
  * Nothing is deleted (L1): a revoked grant carries revokedAt / revokedBy, a
@@ -294,6 +358,8 @@ export const MAX_VOUCHER_ROLES = 20;
 const sysPK = (id: string) => `SYS#${id}`;
 const GLOBAL_PK = 'GLOBAL';
 const GLOBAL_VOUCHERS = '*';
+const NOTIFS_PK = 'NOTIFS';
+const notifKey = (id: string) => ({ PK: NOTIFS_PK, SK: `NOTIF#${id}` });
 const roleKey = (systemId: string, role: string) => ({ PK: sysPK(systemId), SK: `ROLE#${role}` });
 const grantKey = (systemId: string | null, role: string, grantee: string) => ({
 	PK: systemId === null ? GLOBAL_PK : sysPK(systemId),
@@ -442,6 +508,31 @@ const toRedeemEvent = (it: Item, voucher: Voucher): RedeemEvent => ({
 				: null
 		};
 	})
+});
+
+const toSystemCard = (meta: Item): SystemCard => ({
+	id: meta.id as string,
+	name: meta.name as string,
+	url: (meta.url as string | undefined) ?? null,
+	description: (meta.description as string | undefined) ?? null,
+	screenshotUrl: (meta.screenshotUrl as string | undefined) ?? null,
+	maintenance: meta.maintenance === true
+});
+
+const toNotification = (it: Item): Notification => ({
+	id: it.id as string,
+	kind: it.kind as Notification['kind'],
+	severity: it.severity as Notification['severity'],
+	message: it.message as string,
+	systemId: (it.systemId as string | undefined) ?? null,
+	voucherCode: it.voucherCode as string,
+	roles: it.roles as string[],
+	endsAt: new Date(it.endsAt as string),
+	raisedAt: new Date(it.raisedAt as string),
+	resolvedAt: date(it.resolvedAt),
+	dismissedAt: date(it.dismissedAt),
+	dismissedBy: (it.dismissedBy as string | undefined) ?? null,
+	status: it.dismissedAt ? 'dismissed' : it.resolvedAt ? 'resolved' : 'open'
 });
 
 /** The later of two ends, where null (never) is latest and undefined means none yet. */
@@ -687,6 +778,8 @@ export class Rbac {
 			everyone: roleItems.filter((it) => it.everyone === true).map((it) => it.name as string),
 			url: (meta.url as string | undefined) ?? null,
 			maintenance: meta.maintenance === true,
+			description: (meta.description as string | undefined) ?? null,
+			screenshotUrl: (meta.screenshotUrl as string | undefined) ?? null,
 			implVersion: (meta.implVersion as number) ?? 0
 		};
 	}
@@ -754,7 +847,7 @@ export class Rbac {
 			}))
 		]);
 		if (reasons) throw new RbacError(409, `System "${id}" already exists`);
-		return { id, name, roles: [...roles].sort(), implies: {}, subscriberRole: null, everyone: [], url: null, maintenance: false };
+		return { id, name, roles: [...roles].sort(), implies: {}, subscriberRole: null, everyone: [], url: null, maintenance: false, description: null, screenshotUrl: null };
 	}
 
 	/**
@@ -911,19 +1004,17 @@ export class Rbac {
 		}
 	}
 
-	/** Applies the system settings given (Q2, R10, R11); at least one is required. */
-	async configureSystem(
-		actor: Actor,
-		systemId: string,
-		settings: { subscriberRole?: string | null; url?: string | null; maintenance?: boolean }
-	): Promise<System> {
-		const { subscriberRole, url, maintenance } = settings;
-		if (subscriberRole === undefined && url === undefined && maintenance === undefined) {
-			throw badRequest('Give "subscriberRole", "url" (null clears either) or "maintenance"');
+	/** Applies the system settings given (Q2, R10, R11, R13); at least one is required. */
+	async configureSystem(actor: Actor, systemId: string, settings: SystemSettings): Promise<System> {
+		const { subscriberRole, url, maintenance, description, screenshotUrl } = settings;
+		if ([subscriberRole, url, maintenance, description, screenshotUrl].every((v) => v === undefined)) {
+			throw badRequest('Give "subscriberRole", "url", "description", "screenshotUrl" (null clears any of them) or "maintenance"');
 		}
 		let system: System | undefined;
 		if (subscriberRole !== undefined) system = await this.setSubscriberRole(actor, systemId, subscriberRole);
 		if (url !== undefined) system = await this.setSystemUrl(actor, systemId, url);
+		if (description !== undefined) system = await this.setSystemDescription(actor, systemId, description);
+		if (screenshotUrl !== undefined) system = await this.setSystemScreenshot(actor, systemId, screenshotUrl);
 		if (maintenance !== undefined) system = await this.setMaintenance(actor, systemId, maintenance);
 		return system!;
 	}
@@ -1023,16 +1114,37 @@ export class Rbac {
 	 */
 	async setSystemUrl(actor: Actor, systemId: string, rawUrl: string | null): Promise<System> {
 		requireRoot(actor, 'Only roots can configure systems');
-		const url = rawUrl === null ? null : validUrl(rawUrl);
+		return this.setSystemAttribute(actor, systemId, 'url', rawUrl === null ? null : validUrl(rawUrl));
+	}
+
+	/** Sets what a system is for, shown on its card as plain text (R13), or none (null or blank). */
+	async setSystemDescription(actor: Actor, systemId: string, raw: string | null): Promise<System> {
+		requireRoot(actor, 'Only roots can configure systems');
+		const description = raw?.trim() || null;
+		if (description && description.length > MAX_DESCRIPTION_LENGTH) {
+			throw badRequest(`A description can have at most ${MAX_DESCRIPTION_LENGTH} characters`);
+		}
+		return this.setSystemAttribute(actor, systemId, 'description', description);
+	}
+
+	/** Sets the image (an http or https URL) shown on a system's card (R13), or none (null). */
+	async setSystemScreenshot(actor: Actor, systemId: string, rawUrl: string | null): Promise<System> {
+		requireRoot(actor, 'Only roots can configure systems');
+		const url = rawUrl === null ? null : validUrl(rawUrl, 'A screenshot URL');
+		return this.setSystemAttribute(actor, systemId, 'screenshotUrl', url);
+	}
+
+	/** Sets (or, with null, removes) one attribute of a live system's META item. */
+	private async setSystemAttribute(actor: Actor, systemId: string, attr: string, value: string | null): Promise<System> {
 		try {
 			await this.table.doc.send(
 				new UpdateCommand({
 					TableName: this.table.name,
 					Key: { PK: sysPK(systemId), SK: 'META' },
-					UpdateExpression: url === null ? 'REMOVE #url' : 'SET #url = :url',
+					UpdateExpression: value === null ? 'REMOVE #attr' : 'SET #attr = :value',
 					ConditionExpression: LIVE_SYSTEM,
-					ExpressionAttributeNames: { '#url': 'url' },
-					...(url !== null && { ExpressionAttributeValues: { ':url': url } })
+					ExpressionAttributeNames: { '#attr': attr },
+					...(value !== null && { ExpressionAttributeValues: { ':value': value } })
 				})
 			);
 		} catch (err) {
@@ -1040,6 +1152,15 @@ export class Rbac {
 			throw err;
 		}
 		return this.getSystem(actor, systemId);
+	}
+
+	/**
+	 * The cards of the given systems that exist (R13), keyed by id. Anyone may
+	 * ask: the pages show the systems a person holds roles in.
+	 */
+	async systemCards(systemIds: string[]): Promise<Record<string, SystemCard>> {
+		const metas = await Promise.all([...new Set(systemIds)].map((id) => this.get({ PK: sysPK(id), SK: 'META' })));
+		return Object.fromEntries(metas.filter((m) => m && live(m)).map((m) => [m!.id as string, toSystemCard(m!)]));
 	}
 
 	/**
@@ -1429,6 +1550,38 @@ export class Rbac {
 	}
 
 	/**
+	 * `email`'s own redemption of a voucher (V8), for the page that follows
+	 * redeeming: the RedeemEvent and the systems its roles are in. A system
+	 * voucher's is its system; a global voucher's, every system whose catalog
+	 * has one of its roles now. 404 when the code is unknown or `email`
+	 * hasn't redeemed it.
+	 */
+	async ownRedemption(email: string, rawCode: string): Promise<OwnRedemption> {
+		const item = await this.voucherItem(rawCode);
+		const event = item && (await this.get({ PK: item.PK, SK: `REDEEMED#${email}` }));
+		if (!item || !event) throw notFound('You have not redeemed this voucher');
+		const voucher = toVoucher(item);
+		const redemption = toRedeemEvent(event, voucher);
+		const roles = redemption.roles.length ? redemption.roles : voucher.roles;
+		const rolesBySystem = new Map<string, string[]>();
+		if (redemption.systemId) {
+			rolesBySystem.set(redemption.systemId, [...roles]);
+		} else {
+			for (const role of roles) {
+				for (const it of await this.definingSystems(role)) {
+					const id = it.systemId as string;
+					rolesBySystem.set(id, [...(rolesBySystem.get(id) ?? []), role]);
+				}
+			}
+		}
+		const cards = await this.systemCards([...rolesBySystem.keys()]);
+		const systems = Object.values(cards)
+			.map((card) => ({ ...card, roles: rolesBySystem.get(card.id)!.sort() }))
+			.sort((a, b) => a.id.localeCompare(b.id));
+		return { redemption, systems };
+	}
+
+	/**
 	 * Redeems a voucher for `email`, granting each of its roles (globally for
 	 * a global voucher). Each identity can redeem a given voucher once;
 	 * counting the use, recording the redemption and granting happen in one
@@ -1536,6 +1689,131 @@ export class Rbac {
 			// Otherwise a grant changed meanwhile: retry with it.
 		}
 		throw new RbacError(409, 'The voucher changed meanwhile; try again');
+	}
+
+	// --- notifications (N1-N4, roots only) -------------------------------------
+
+	/**
+	 * N3: vouchers (not disabled or used up) ending within a week whose roles
+	 * no other voucher of the same scope takes over: a voucher, not disabled,
+	 * used up or expired, granting that role, valid by the time this one
+	 * ends (no gap) and ending later (or never). One finding per voucher,
+	 * naming the roles left uncovered.
+	 */
+	private async expiringVoucherFindings(now: Date): Promise<Item[]> {
+		const horizon = new Date(now.getTime() + VOUCHER_EXPIRY_WARNING_DAYS * 24 * 60 * 60 * 1000);
+		const usable = (v: Voucher) => ['active', 'not-started'].includes(voucherStatus(v, now));
+		const systems = (await queryIndex(this.table, 'SYSTEMS')).filter(live).map((it) => it.id as string);
+		const findings: Item[] = [];
+		for (const scope of [GLOBAL_VOUCHERS, ...systems]) {
+			const vouchers = (await queryIndex(this.table, `VOUCHERS#${scope}`)).map(toVoucher).filter(usable);
+			for (const v of vouchers) {
+				const endsAt = v.endsAt;
+				if (!endsAt || endsAt > horizon) continue;
+				const replaces = (o: Voucher, role: string) =>
+					o.code !== v.code &&
+					o.roles.includes(role) &&
+					(o.startsAt === null || o.startsAt <= endsAt) &&
+					(o.endsAt === null || o.endsAt > endsAt);
+				const roles = v.roles.filter((role) => !vouchers.some((o) => replaces(o, role)));
+				if (!roles.length) continue;
+				const id = `voucher-expiring:${compactVoucherCode(v.code)}`;
+				const where = v.systemId === null ? 'Global voucher' : `Voucher of ${v.systemId}`;
+				const when = endsAt.toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
+				findings.push({
+					...notifKey(id),
+					id,
+					kind: 'voucher-expiring',
+					severity: 'warning',
+					message: `${where} ${v.code} ends ${when}, and no other voucher grants ${roles.join(', ')} after it.`,
+					systemId: v.systemId ?? undefined,
+					voucherCode: v.code,
+					roles,
+					endsAt: endsAt.toISOString()
+				});
+			}
+		}
+		return findings;
+	}
+
+	/**
+	 * Runs the verification rules (N2), as a root's sign-in does: raises a
+	 * notification for each new finding, reopens a resolved one whose finding
+	 * is back, updates an open one's roles, and resolves open ones whose
+	 * finding is gone. Dismissed notifications are left alone (N4). Returns
+	 * the notifications, as listNotifications does.
+	 */
+	async verify(actor: Actor): Promise<Notification[]> {
+		requireRoot(actor, 'Only roots can run the verification rules');
+		const now = this.now();
+		const findings = await this.expiringVoucherFindings(now);
+		const existing = new Map((await queryPrefix(this.table, NOTIFS_PK, 'NOTIF#')).map((it) => [it.id as string, it]));
+		const ignoreRace = (err: unknown) => {
+			// Another sign-in (or a dismissal) got there first; its result stands.
+			if ((err as Error).name !== 'ConditionalCheckFailedException') throw err;
+		};
+		for (const f of findings) {
+			const it = existing.get(f.id as string);
+			if (it?.dismissedAt) continue;
+			const open = it && !it.resolvedAt;
+			if (open && (it.roles as string[]).join() === (f.roles as string[]).join()) continue;
+			await this.put(
+				{ ...f, raisedAt: open ? it.raisedAt : now.toISOString() },
+				it ? 'attribute_not_exists(dismissedAt)' : 'attribute_not_exists(PK)'
+			).catch(ignoreRace);
+		}
+		const found = new Set(findings.map((f) => f.id as string));
+		for (const it of existing.values()) {
+			if (found.has(it.id as string) || it.resolvedAt || it.dismissedAt) continue;
+			await this.table.doc
+				.send(
+					new UpdateCommand({
+						TableName: this.table.name,
+						Key: notifKey(it.id as string),
+						UpdateExpression: 'SET resolvedAt = :at',
+						ConditionExpression: 'raisedAt = :raised AND attribute_not_exists(resolvedAt) AND attribute_not_exists(dismissedAt)',
+						ExpressionAttributeValues: { ':at': now.toISOString(), ':raised': it.raisedAt }
+					})
+				)
+				.catch(ignoreRace);
+		}
+		return this.listNotifications(actor);
+	}
+
+	/** The roots' notifications (N1): open ones first, then the rest, each newest first. */
+	async listNotifications(actor: Actor): Promise<Notification[]> {
+		requireRoot(actor, 'Only roots can see notifications');
+		const order: Record<NotificationStatus, number> = { open: 0, resolved: 1, dismissed: 1 };
+		return (await queryPrefix(this.table, NOTIFS_PK, 'NOTIF#'))
+			.map(toNotification)
+			.sort((a, b) => order[a.status] - order[b.status] || b.raisedAt.getTime() - a.raisedAt.getTime());
+	}
+
+	/** How many notifications are open (N1); 0 for anyone but roots, who see none. */
+	async openNotificationCount(actor: Actor): Promise<number> {
+		if (!actor.root) return 0;
+		return (await this.listNotifications(actor)).filter((n) => n.status === 'open').length;
+	}
+
+	/** Dismisses a notification for every root, for good (N4, L1). Dismissing it again changes nothing. */
+	async dismissNotification(actor: Actor, id: string): Promise<Notification> {
+		requireRoot(actor, 'Only roots can dismiss notifications');
+		try {
+			const { Attributes } = await this.table.doc.send(
+				new UpdateCommand({
+					TableName: this.table.name,
+					Key: notifKey(id),
+					UpdateExpression: 'SET dismissedAt = if_not_exists(dismissedAt, :at), dismissedBy = if_not_exists(dismissedBy, :by)',
+					ConditionExpression: 'attribute_exists(PK)',
+					ExpressionAttributeValues: { ':at': this.now().toISOString(), ':by': actor.email },
+					ReturnValues: 'ALL_NEW'
+				})
+			);
+			return toNotification(Attributes!);
+		} catch (err) {
+			if ((err as Error).name === 'ConditionalCheckFailedException') throw notFound('Notification not found');
+			throw err;
+		}
 	}
 
 	// --- role queries (the external API) -------------------------------------

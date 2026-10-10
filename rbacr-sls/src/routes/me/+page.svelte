@@ -1,22 +1,25 @@
 <script lang="ts">
-	import { invalidateAll } from '$app/navigation';
+	import { goto, invalidateAll } from '$app/navigation';
 	import { formatDate, formValues, vpiFetch, VpiError, type Payment } from '#lib/vpi.js';
-	import RoleName from '#lib/RoleName.svelte';
+	import SystemCard from '#lib/SystemCard.svelte';
 	import type { PageProps } from './$types';
 
 	let { data }: PageProps = $props();
-	let systems = $derived(Object.entries(data.roles));
-	let redeem = $state<{ ok?: string; error?: string; payment?: Payment }>({});
+	let systems = $derived(
+		Object.entries(data.roles).map(([id, roles]) => ({
+			card: data.systems[id] ?? { id, name: id, url: data.urls[id] ?? null, description: null, screenshotUrl: null, maintenance: false },
+			roles
+		}))
+	);
+	let redeem = $state<{ error?: string; payment?: Payment }>({});
 	let tokenMsg = $state<{ created?: string; error?: string }>({});
 
 	async function onRedeem(e: SubmitEvent) {
-		const form = e.currentTarget as HTMLFormElement;
 		const { code } = formValues(e);
 		try {
-			const res = await vpiFetch<{ redeemed: string }>(fetch, '/me/redeem', { method: 'POST', body: { code } });
-			redeem = { ok: `Granted ${res.redeemed}.` };
-			form.reset();
-			await invalidateAll();
+			await vpiFetch(fetch, '/me/redeem', { method: 'POST', body: { code } });
+			// On to what it granted (V8).
+			await goto(`/redeemed/${encodeURIComponent(code.trim())}`);
 		} catch (err) {
 			if (!(err instanceof VpiError)) throw err;
 			redeem = { error: err.message, payment: err.payment };
@@ -64,19 +67,9 @@
 {/if}
 
 {#if systems.length}
-	<table>
-		<thead><tr><th>System</th><th>Roles</th></tr></thead>
-		<tbody>
-			{#each systems as [system, roles] (system)}
-				<tr>
-					<td><code>{system}</code></td>
-					<td>
-						{#each roles as role, i (role)}{i ? ', ' : ''}<RoleName {role} url={data.urls[system]} />{/each}
-					</td>
-				</tr>
-			{/each}
-		</tbody>
-	</table>
+	<div class="cards">
+		{#each systems as { card, roles } (card.id)}<SystemCard {card} {roles} />{/each}
+	</div>
 {:else}
 	<p class="muted">You don't hold any roles yet. Redeem a voucher or ask an administrator.</p>
 {/if}
@@ -94,7 +87,6 @@
 		available yet.
 	</p>
 {:else if redeem.error}<p class="error">{redeem.error}</p>{/if}
-{#if redeem.ok}<p class="ok">{redeem.ok}</p>{/if}
 
 <h2 id="tokens">API tokens</h2>
 <p class="muted">
@@ -130,3 +122,11 @@
 		</tbody>
 	</table>
 {/if}
+
+<style>
+	.cards {
+		display: grid;
+		grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+		gap: 1rem;
+	}
+</style>

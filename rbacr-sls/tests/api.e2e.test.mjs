@@ -390,11 +390,110 @@ describe('rbacr API', { skip: !(await fetch(`${BASE}/health`).then((r) => r.ok, 
 		assert.match(await page.text(), new RegExp(`Disabled by ${ROOT}`));
 	});
 
+	it('redeems vouchers through a link, signing in first, and shows the systems it opened (V8, S5, R13)', async () => {
+		const card = await root('PATCH', `/api/systems/${SYSTEM}`, {
+			url: 'https://e2e.example.com',
+			description: 'The e2e system',
+			screenshotUrl: 'https://e2e.example.com/shot.png'
+		});
+		assert.equal(card.status, 200, JSON.stringify(card.body));
+		assert.equal(card.body.description, 'The e2e system');
+		assert.equal((await root('PATCH', `/api/systems/${SYSTEM}`, { screenshotUrl: 'javascript:alert(1)' })).status, 400);
+		const code = (await root('POST', `/api/systems/${SYSTEM}/vouchers`, { role: 'viewer' })).body.code;
+		const link = `/redeem/${encodeURIComponent(code)}`;
+
+		// Anonymous visitors are sent to sign in, and come back to the link.
+		const anon = await fetch(`${BASE}${link}`, { redirect: 'manual', headers: { accept: 'text/html' } });
+		assert.equal(anon.status, 303);
+		assert.equal(anon.headers.get('location'), `/?next=${encodeURIComponent(link)}`);
+		const signIn = (next) =>
+			fetch(`${BASE}/login/dev`, {
+				method: 'POST',
+				redirect: 'manual',
+				headers: { origin: BASE, accept: 'text/html', 'content-type': 'application/x-www-form-urlencoded' },
+				body: new URLSearchParams({ email: `link${Date.now()}@partner.test`, next })
+			});
+		for (const evil of ['//evil.example', 'https://evil.example', '/\\evil.example']) {
+			assert.equal((await signIn(evil)).headers.get('location'), '/me');
+		}
+		const back = await signIn(link);
+		assert.equal(back.status, 303);
+		assert.equal(back.headers.get('location'), link);
+		const cookie = back.headers.getSetCookie().find((c) => c.startsWith('rbacr_session=')).split(';')[0];
+		// Signed in, the link's page renders (it redeems from the browser).
+		assert.equal((await fetch(`${BASE}${link}`, { headers: { cookie, accept: 'text/html' } })).status, 200);
+
+		assert.equal((await vpi(cookie, 'GET', `/me/redemptions/${code}`)).status, 404);
+		assert.equal((await vpi(cookie, 'POST', '/me/redeem', { code })).status, 200);
+		const done = await vpi(cookie, 'GET', `/me/redemptions/${code}`);
+		assert.equal(done.status, 200, JSON.stringify(done.body));
+		assert.equal(done.body.redemption.code, code);
+		assert.equal(done.body.redemption.via, 'page');
+		assert.deepEqual(done.body.systems, [
+			{
+				id: SYSTEM,
+				name: card.body.name,
+				url: 'https://e2e.example.com',
+				description: 'The e2e system',
+				screenshotUrl: 'https://e2e.example.com/shot.png',
+				maintenance: false,
+				roles: ['viewer']
+			}
+		]);
+		const page = await fetch(`${BASE}/redeemed/${code}`, { headers: { cookie, accept: 'text/html' } });
+		assert.equal(page.status, 200);
+		const html = await page.text();
+		assert.match(html, /Roles granted/);
+		assert.match(html, /The e2e system/);
+		assert.match(html, /shot\.png/);
+		assert.equal((await vpi(cookie, 'GET', '/me/redemptions/NO-SUCH-CODE')).status, 404);
+
+		const cleared = await root('PATCH', `/api/systems/${SYSTEM}`, { url: null, description: null, screenshotUrl: null });
+		assert.deepEqual([cleared.body.url, cleared.body.description, cleared.body.screenshotUrl], [null, null, null]);
+	});
+
 	it('validates input with JSON errors', async () => {
 		const bad = await root('POST', `/api/systems/${SYSTEM}/grants`, { role: 'viewer', grantee: 'not an email' });
 		assert.equal(bad.status, 400);
 		assert.match(bad.body.error, /Invalid grantee/);
 		assert.equal((await root('POST', '/api/systems', 'nope')).status, 400);
+	});
+
+	it('warns roots when they sign in about vouchers ending with nothing to replace them (N1-N4)', async () => {
+		// A role of its own, so no voucher from the tests above replaces this one.
+		assert.equal((await root('POST', `/api/systems/${SYSTEM}/roles`, { role: 'notified' })).status, 200);
+		const day = 24 * 60 * 60 * 1000;
+		const voucher = (endsAt) =>
+			root('POST', `/api/systems/${SYSTEM}/vouchers`, { roles: ['notified'], endsAt: new Date(Date.now() + endsAt).toISOString() });
+		const v = (await voucher(3 * day)).body;
+		const cookie = await login(ROOT); // a root's sign-in runs the rules
+		const mine = async (path = '/notifications', method = 'GET') => {
+			const res = await vpi(cookie, method, path);
+			assert.equal(res.status, 200, JSON.stringify(res.body));
+			return res.body.notifications.find((n) => n.voucherCode === v.code);
+		};
+		const n = await mine();
+		assert.deepEqual(
+			{ status: n.status, kind: n.kind, systemId: n.systemId, roles: n.roles },
+			{ status: 'open', kind: 'voucher-expiring', systemId: SYSTEM, roles: ['notified'] }
+		);
+		assert.ok((await vpi(cookie, 'GET', '/session')).body.user.openNotifications >= 1);
+		assert.equal((await vpi(creds[2].cookie, 'GET', '/notifications')).status, 403);
+		assert.equal((await vpi(creds[2].cookie, 'POST', '/notifications/check')).status, 403);
+		assert.equal((await vpi(creds[2].cookie, 'GET', '/session')).body.user.openNotifications, 0);
+		// A replacement resolves it; losing the replacement opens it again.
+		const substitute = (await voucher(30 * day)).body;
+		assert.equal((await mine('/notifications/check', 'POST')).status, 'resolved');
+		assert.equal((await root('DELETE', `/api/vouchers/${substitute.code}`)).status, 200);
+		assert.equal((await mine('/notifications/check', 'POST')).status, 'open');
+		const page = await fetch(`${BASE}/notifications`, { headers: { cookie, accept: 'text/html' } });
+		assert.match(await page.text(), new RegExp(v.code));
+		// Dismissed for good.
+		const dismissed = await vpi(cookie, 'DELETE', `/notifications/${encodeURIComponent(n.id)}`);
+		assert.equal(dismissed.status, 200);
+		assert.equal(dismissed.body.dismissedBy, ROOT);
+		assert.equal((await mine('/notifications/check', 'POST')).status, 'dismissed');
+		assert.equal((await vpi(cookie, 'DELETE', '/notifications/voucher-expiring%3ANOPE')).status, 404);
 	});
 
 	it('lets roots delete systems', async () => {

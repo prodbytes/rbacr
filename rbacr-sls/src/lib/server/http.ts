@@ -1,5 +1,5 @@
 import { json, type RequestEvent } from '@sveltejs/kit';
-import { RbacError, type Actor, type GrantWithImplied, type RedeemEvent, type Validity, type Voucher, type VoucherInput } from './rbac';
+import { RbacError, type Actor, type GrantWithImplied, type Notification, type OwnRedemption, type RedeemEvent, type SystemSettings, type Validity, type Voucher, type VoucherInput } from './rbac';
 import { getServices, type Services } from './services';
 import type { ApiToken } from './tokens';
 
@@ -87,20 +87,17 @@ export function optInt(value: unknown, field: string): number | null {
 	return n;
 }
 
-/** The `subscriberRole` of a system configuration body: a role, or null (or blank) for none. */
-/** A system's settings from a PATCH body: the fields present, null clearing a role or URL (Q2, R10, R11). */
-export function systemSettings(body: Record<string, unknown>): {
-	subscriberRole?: string | null;
-	url?: string | null;
-	maintenance?: boolean;
-} {
+/** A system's settings from a PATCH body: the fields present, null (or blank) clearing a role, URL or text (Q2, R10, R11, R13). */
+export function systemSettings(body: Record<string, unknown>): SystemSettings {
 	if ('maintenance' in body && typeof body.maintenance !== 'boolean') {
 		throw new RbacError(400, '"maintenance" must be true or false');
 	}
 	return {
 		...('subscriberRole' in body && { subscriberRole: optStr(body.subscriberRole, 'subscriberRole') }),
 		...('url' in body && { url: optStr(body.url, 'url') }),
-		...('maintenance' in body && { maintenance: body.maintenance as boolean })
+		...('maintenance' in body && { maintenance: body.maintenance as boolean }),
+		...('description' in body && { description: optStr(body.description, 'description') }),
+		...('screenshotUrl' in body && { screenshotUrl: optStr(body.screenshotUrl, 'screenshotUrl') })
 	};
 }
 
@@ -150,6 +147,9 @@ export const voucherJson = (v: Voucher, status: string) => ({
 	disabledAt: v.disabledAt?.toISOString() ?? null
 });
 
+/** A person's own redemption (V8): its RedeemEvent with ISO dates, and the systems its roles open. */
+export const ownRedemptionJson = ({ redemption, systems }: OwnRedemption) => ({ redemption: redeemEventJson(redemption), systems });
+
 /** A RedeemEvent (V7) with ISO dates. */
 export const redeemEventJson = (e: RedeemEvent) => ({
 	...e,
@@ -163,6 +163,15 @@ export const redeemEventJson = (e: RedeemEvent) => ({
 			endsAt: g.replaced.endsAt?.toISOString() ?? null
 		}
 	}))
+});
+
+/** A notification (N1) with ISO dates. */
+export const notificationJson = (n: Notification) => ({
+	...n,
+	endsAt: n.endsAt.toISOString(),
+	raisedAt: n.raisedAt.toISOString(),
+	resolvedAt: n.resolvedAt?.toISOString() ?? null,
+	dismissedAt: n.dismissedAt?.toISOString() ?? null
 });
 
 export const tokenJson = (t: ApiToken) => ({

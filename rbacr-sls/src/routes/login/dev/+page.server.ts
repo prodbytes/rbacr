@@ -3,6 +3,7 @@ import { dev } from '$app/env';
 import { RBACR_DEV_LOGIN } from '$app/env/private';
 import { signIn } from '#lib/server/auth.js';
 import { normalizeEmail } from '#lib/server/identity.js';
+import { safeNext } from '#lib/next.js';
 import { getServices } from '#lib/server/services.js';
 import type { Actions, PageServerLoad } from './$types';
 
@@ -20,9 +21,10 @@ export const load: PageServerLoad = () => ensureEnabled();
 export const actions: Actions = {
 	default: async ({ request, cookies }) => {
 		ensureEnabled();
-		const email = normalizeEmail(String((await request.formData()).get('email') ?? ''));
+		const form = await request.formData();
+		const email = normalizeEmail(String(form.get('email') ?? ''));
 		if (!email) return fail(400, { error: 'Enter a valid e-mail address' });
-		await signIn((await getServices()).sessions, cookies, email);
-		redirect(303, '/me');
+		await signIn(await getServices(), cookies, email);
+		redirect(303, safeNext(form.get('next')?.toString()));
 	}
 };

@@ -25,6 +25,9 @@ app on AWS Lambda. Run every command below from this folder
   what it implies; no grant per person needed.
 - **System URLs.** A system can have a URL; role names on the pages link to
   it in a new tab, so you can follow a role into its system.
+- **System cards.** A system can have a description and a screenshot (an
+  image URL), set on its page. People see each system they hold roles in
+  as a card, with a link into it, on `/me` and after redeeming a voucher.
 - **Maintenance mode.** Switched on from a system's page, the API gives
   nobody any role in that system (empty lists, every check denied, roots
   included) while you fix its application. Grants are kept and count
@@ -47,9 +50,19 @@ app on AWS Lambda. Run every command below from this folder
   voucher has a **discount**: a 100% voucher grants its roles immediately,
   while a lower discount will require payment (not built yet; it answers 402
   Payment Required). The start date, end date and usage count are all
-  optional. Every redemption is kept as a **RedeemEvent** (who, when, from
+  optional. Each voucher in a list has a **Copy link** button: the link
+  (`/redeem/<code>`) asks whoever opens it to sign in if they aren't,
+  redeems the voucher and shows the roles it granted, with cards for the
+  systems they open. Every redemption is kept as a **RedeemEvent** (who, when, from
   the API or the page, and what it did to each role); open a voucher's
   uses on its page to see them, or `GET /api/vouchers/:code/redemptions`.
+- **Notifications** warn roots about things that need attention, on
+  `/notifications` (the navigation shows how many are open). rbacr checks
+  each time a root signs in, or on demand from that page. For now it warns
+  when a voucher ends within a week and no other voucher of the same
+  system (or global) takes over its roles, valid from when it ends and
+  ending later. A warning clears itself once its cause is gone; a root
+  can also dismiss it for everyone.
 - **Everyone** can sign in, see their own roles at `/me` and redeem vouchers.
   `/settings` shows the running version and the API's address; roots also
   see the root allow list there.
@@ -248,7 +261,8 @@ about the verified e-mail address, server-side, with an API token.
    `premium` and `free`, `premium` implies `free`), so your code can ask
    for the role a feature needs and anyone with a higher role passes too.
 3. A root grants roles to addresses, whole domains or globally, or hands
-   out vouchers that people redeem on `/me`.
+   out vouchers that people redeem on `/me` or by opening the voucher's
+   link.
 
 ### 2. Create a token for your application
 

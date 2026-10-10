@@ -9,7 +9,8 @@ export const GET: RequestHandler = (event) =>
 			root: actor.root,
 			globalRoles: await rbac.globalRolesOf(actor.email),
 			roles,
-			// The page links each role to its system (R10).
-			urls: await rbac.systemUrls(Object.keys(roles))
+			// The page links each role to its system (R10) and shows each system's card (R13).
+			urls: await rbac.systemUrls(Object.keys(roles)),
+			systems: await rbac.systemCards(Object.keys(roles))
 		};
 	});

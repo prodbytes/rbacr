@@ -22,6 +22,11 @@
 			<a href="/me">My roles</a>
 			{#if data.user.root}<a href="/systems">Systems</a>{/if}
 			{#if data.user.root}<a href="/global">Global</a>{/if}
+			{#if data.user.root}
+				<a href="/notifications">
+					Notifications{#if data.user.openNotifications}{' '}<span class="badge alert">{data.user.openNotifications}</span>{/if}
+				</a>
+			{/if}
 			<a href="/settings">Settings</a>
 		</nav>
 		<span class="who">
@@ -169,6 +174,10 @@
 		color: var(--muted);
 	}
 	:global(.who .badge) {
+		border-color: var(--warn);
+		color: var(--warn);
+	}
+	.badge.alert {
 		border-color: var(--warn);
 		color: var(--warn);
 	}
