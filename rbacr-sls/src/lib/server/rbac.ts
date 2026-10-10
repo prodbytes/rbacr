@@ -27,11 +27,19 @@ export const SUBSCRIPTION_GRANTOR = 'stripe';
 
 const NAME_RE = /^[a-z0-9][a-z0-9_.:-]{0,62}$/;
 
+/** One role of one system: what a global voucher grants (V1). */
+export interface SystemRole {
+	systemId: string;
+	role: string;
+}
+
 /** Terms of a voucher that needs payment (a discount under 100%). */
 export interface PaymentRequired {
 	code: string;
 	systemId: string | null;
 	roles: string[];
+	/** A global voucher's system roles (V1); null otherwise. */
+	grants: SystemRole[] | null;
 	/** The first of `roles`, for clients that predate several roles per voucher. */
 	role: string;
 	discountPercent: number;
@@ -303,10 +311,16 @@ export interface GrantWithImplied extends Grant {
 export interface Voucher {
 	code: string;
 	systemId: string | null;
-	/** The roles redeeming it grants, sorted (V1). */
+	/** The roles redeeming it grants, sorted (V1); for a global voucher with `grants`, their names. */
 	roles: string[];
 	/** The first of `roles`, for clients that predate several roles per voucher. */
 	role: string;
+	/**
+	 * The system roles a global voucher grants, sorted by system then role
+	 * (V1); null for a system voucher, and for a global voucher made before
+	 * these, which grants `roles` globally (in every system that has them).
+	 */
+	grants: SystemRole[] | null;
 	/** 100 grants the roles on redemption; anything lower requires payment (not available yet). */
 	discountPercent: number;
 	startsAt: Date | null;
@@ -323,7 +337,10 @@ export interface Voucher {
 export interface VoucherInput {
 	/** null for a global voucher (roots only). */
 	systemId: string | null;
+	/** A system voucher's roles, or a global voucher's that it grants globally (by name). */
 	roles: string[];
+	/** A global voucher's system roles instead (V1): each must be in its system's catalog. */
+	grants?: SystemRole[] | null;
 	/** The code to give it; omitted, one is made up (V2). */
 	code?: string | null;
 	/** 0-100, default 100. */
@@ -425,6 +442,19 @@ const legacyVoucherKey = (code: string) => {
 };
 /** A voucher's roles; vouchers made before several roles per voucher hold one `role`. */
 const rolesOfVoucher = (it: Item): string[] => (it.roles as string[] | undefined) ?? [it.role as string];
+/** Whether a voucher item grants a role (any, without `role`) of `systemId`: as a system voucher, or among a global voucher's system roles. */
+const voucherGrants = (it: Item, systemId: string, role?: string): boolean =>
+	it.systemId === systemId
+		? role === undefined || rolesOfVoucher(it).includes(role)
+		: ((it.grants as Item[] | undefined) ?? []).some((g) => g.systemId === systemId && (role === undefined || g.role === role));
+
+/**
+ * What redeeming a voucher grants, one target per grant: a system voucher's
+ * roles in its system, a global voucher's system roles, or (systemId null)
+ * an older global voucher's roles globally.
+ */
+const voucherTargets = (v: Voucher): { systemId: string | null; role: string }[] =>
+	v.grants ?? v.roles.map((role) => ({ systemId: v.systemId, role }));
 const iso = (d: Date | null | undefined) => (d ? d.toISOString() : undefined);
 const date = (v: unknown) => (v ? new Date(v as string) : null);
 
@@ -521,6 +551,7 @@ const toVoucher = (it: Item): Voucher => ({
 	systemId: (it.systemId as string | undefined) ?? null,
 	roles: rolesOfVoucher(it),
 	role: rolesOfVoucher(it)[0],
+	grants: (it.grants as Item[] | undefined)?.map((g) => ({ systemId: g.systemId as string, role: g.role as string })) ?? null,
 	discountPercent: it.discountPercent as number,
 	startsAt: date(it.startsAt),
 	endsAt: date(it.endsAt),
@@ -933,7 +964,8 @@ export class Rbac {
 			await queryAll(this.table, { KeyConditionExpression: 'PK = :pk', ExpressionAttributeValues: { ':pk': sysPK(systemId) } })
 		).filter(live);
 		const sk = (it: Item) => it.SK as string;
-		await this.disableVouchers(await queryIndex(this.table, `VOUCHERS#${systemId}`), actor.email, at);
+		const globalVouchers = (await queryIndex(this.table, `VOUCHERS#${GLOBAL_VOUCHERS}`)).filter((it) => voucherGrants(it, systemId));
+		await this.disableVouchers([...(await queryIndex(this.table, `VOUCHERS#${systemId}`)), ...globalVouchers], actor.email, at);
 		await this.mark(items.filter((it) => sk(it).startsWith('GRANT#')), 'revoked', actor.email, at);
 		await this.mark(items.filter((it) => sk(it).startsWith('IMPL#') || sk(it).startsWith('ROLE#')), 'removed', actor.email, at);
 		await this.mark([meta], 'deleted', actor.email, at);
@@ -1009,7 +1041,10 @@ export class Rbac {
 		await this.mark(grants, 'revoked', actor.email, at);
 		await this.mark(implications, 'removed', actor.email, at);
 		await this.clearSubscriberRole(systemId, role);
-		const vouchers = (await queryIndex(this.table, `VOUCHERS#${systemId}`)).filter((it) => rolesOfVoucher(it).includes(role));
+		const vouchers = [
+			...(await queryIndex(this.table, `VOUCHERS#${systemId}`)),
+			...(await queryIndex(this.table, `VOUCHERS#${GLOBAL_VOUCHERS}`))
+		].filter((it) => voucherGrants(it, systemId, role));
 		await this.disableVouchers(vouchers, actor.email, at);
 	}
 
@@ -1508,9 +1543,23 @@ export class Rbac {
 	async createVoucher(actor: Actor, input: VoucherInput): Promise<Voucher> {
 		const { systemId } = input;
 		requireRoot(actor, 'Only roots can create vouchers');
-		const roles = [...new Set(input.roles.map((r) => validName('role', r)))].sort();
+		let grants: SystemRole[] | null = null;
+		if (input.grants?.length) {
+			if (systemId !== null) throw badRequest('Only a global voucher grants roles of other systems; give a system voucher its "roles"');
+			const pairs = new Map<string, SystemRole>();
+			for (const g of input.grants) {
+				const pair = { systemId: validName('system id', g.systemId), role: validName('role', g.role) };
+				pairs.set(`${pair.systemId}#${pair.role}`, pair);
+			}
+			grants = [...pairs.keys()].sort().map((k) => pairs.get(k)!);
+		}
+		const roles = grants
+			? [...new Set(grants.map((g) => g.role))].sort()
+			: [...new Set(input.roles.map((r) => validName('role', r)))].sort();
 		if (!roles.length) throw badRequest('A voucher needs at least one role');
-		if (roles.length > MAX_VOUCHER_ROLES) throw badRequest(`A voucher can grant at most ${MAX_VOUCHER_ROLES} roles`);
+		if ((grants?.length ?? roles.length) > MAX_VOUCHER_ROLES) throw badRequest(`A voucher can grant at most ${MAX_VOUCHER_ROLES} roles`);
+		// Each role it grants in a system must be in that system's catalog.
+		const checked: SystemRole[] = grants ?? (systemId === null ? [] : roles.map((role) => ({ systemId, role })));
 		const { startsAt, endsAt } = validValidity(input);
 		const maxUses = input.maxUses ?? null;
 		const discountPercent = input.discountPercent ?? 100;
@@ -1541,6 +1590,7 @@ export class Rbac {
 				roles,
 				// Read by versions that knew one role per voucher.
 				role: roles[0],
+				grants: grants ?? undefined,
 				discountPercent,
 				startsAt: iso(startsAt),
 				endsAt: iso(endsAt),
@@ -1550,11 +1600,9 @@ export class Rbac {
 				createdAt: createdAt.toISOString()
 			};
 			const reasons = await this.transact([
-				...(systemId === null
-					? []
-					: roles.map((role) => ({
-							ConditionCheck: { TableName: this.table.name, Key: roleKey(systemId, role), ConditionExpression: LIVE_ROLE }
-						}))),
+				...checked.map((g) => ({
+					ConditionCheck: { TableName: this.table.name, Key: roleKey(g.systemId, g.role), ConditionExpression: LIVE_ROLE }
+				})),
 				// Codes are unique however they were keyed (V2).
 				...(legacy
 					? [{ ConditionCheck: { TableName: this.table.name, Key: legacy, ConditionExpression: 'attribute_not_exists(PK)' } }]
@@ -1562,8 +1610,8 @@ export class Rbac {
 				{ Put: { TableName: this.table.name, Item: item, ConditionExpression: 'attribute_not_exists(PK)' } }
 			]);
 			if (!reasons) return toVoucher(item);
-			const missing = systemId === null ? -1 : reasons.slice(0, roles.length).indexOf('ConditionalCheckFailed');
-			if (missing >= 0) throw notFound(`Role "${roles[missing]}" not found in "${systemId}"`);
+			const missing = reasons.slice(0, checked.length).indexOf('ConditionalCheckFailed');
+			if (missing >= 0) throw notFound(`Role "${checked[missing].role}" not found in "${checked[missing].systemId}"`);
 			if (custom) throw new RbacError(409, `A voucher with the code ${custom} already exists`);
 		}
 		throw new RbacError(409, 'Voucher code collision; try again');
@@ -1620,8 +1668,9 @@ export class Rbac {
 	/**
 	 * `email`'s own redemption of a voucher (V8), for the page that follows
 	 * redeeming: the RedeemEvent and the systems its roles are in. A system
-	 * voucher's is its system; a global voucher's, every system whose catalog
-	 * has one of its roles now. 404 when the code is unknown or `email`
+	 * voucher's is its system; a global voucher's, the systems of its system
+	 * roles, or for an older one, every system whose catalog has one of its
+	 * roles now. 404 when the code is unknown or `email`
 	 * hasn't redeemed it.
 	 */
 	async ownRedemption(email: string, rawCode: string): Promise<OwnRedemption> {
@@ -1634,6 +1683,8 @@ export class Rbac {
 		const rolesBySystem = new Map<string, string[]>();
 		if (redemption.systemId) {
 			rolesBySystem.set(redemption.systemId, [...roles]);
+		} else if (voucher.grants) {
+			for (const g of voucher.grants) rolesBySystem.set(g.systemId, [...(rolesBySystem.get(g.systemId) ?? []), g.role]);
 		} else {
 			for (const role of roles) {
 				for (const it of await this.definingSystems(role)) {
@@ -1744,14 +1795,15 @@ export class Rbac {
 		const voucher = requireActive(item);
 		const key = { PK: item!.PK, SK: item!.SK };
 		if (voucher.discountPercent < 100) {
-			const { code, systemId, roles, role, discountPercent } = voucher;
+			const { code, systemId, roles, role, grants, discountPercent } = voucher;
 			throw new RbacError(402, 'This voucher requires payment, which is not available yet', {
-				payment: { code, systemId, roles, role, discountPercent }
+				payment: { code, systemId, roles, role, grants, discountPercent }
 			});
 		}
 		const forever = { startsAt: null, endsAt: null };
-		const grants = voucher.roles.map((role) =>
-			grantItem(voucher.systemId, role, email, voucher.createdBy, now, forever, voucher.code)
+		const targets = voucherTargets(voucher);
+		const grants = targets.map(({ systemId, role }) =>
+			grantItem(systemId, role, email, voucher.createdBy, now, forever, voucher.code)
 		);
 		for (let attempt = 0; attempt < 2; attempt++) {
 			const found = await Promise.all(grants.map((g) => this.get({ PK: g.PK, SK: g.SK })));
@@ -1773,10 +1825,10 @@ export class Rbac {
 				email,
 				redeemedAt: now.toISOString(),
 				via,
-				grants: voucher.roles.map((role, i) => {
+				grants: targets.map(({ systemId, role }, i) => {
 					const p = previous[i];
 					return {
-						systemId: voucher.systemId ?? undefined,
+						systemId: systemId ?? undefined,
 						role,
 						outcome: kept[i] ? 'kept' : p ? 'replaced' : 'granted',
 						replaced:
@@ -1828,44 +1880,48 @@ export class Rbac {
 	// --- notifications (N1-N4, roots only) -------------------------------------
 
 	/**
-	 * N3: vouchers (not disabled or used up) ending within a week whose roles
-	 * no other voucher of the same scope takes over: a voucher, not disabled,
-	 * used up or expired, granting that role, valid by the time this one
-	 * ends (no gap) and ending later (or never). One finding per voucher,
-	 * naming the roles left uncovered.
+	 * N3: vouchers (not disabled or used up) ending within a week with a role
+	 * no other voucher takes over: one granting the same role in the same
+	 * system (or, for an older global voucher's role, globally), not
+	 * disabled, used up or expired, valid by the time this one ends (no gap)
+	 * and ending later (or never). One finding per voucher, naming the roles
+	 * left uncovered (`system/role` for a global voucher's system roles).
 	 */
 	private async expiringVoucherFindings(now: Date): Promise<Item[]> {
 		const horizon = new Date(now.getTime() + VOUCHER_EXPIRY_WARNING_DAYS * 24 * 60 * 60 * 1000);
 		const usable = (v: Voucher) => ['active', 'not-started'].includes(voucherStatus(v, now));
 		const systems = (await queryIndex(this.table, 'SYSTEMS')).filter(live).map((it) => it.id as string);
-		const findings: Item[] = [];
+		const vouchers: Voucher[] = [];
 		for (const scope of [GLOBAL_VOUCHERS, ...systems]) {
-			const vouchers = (await queryIndex(this.table, `VOUCHERS#${scope}`)).map(toVoucher).filter(usable);
-			for (const v of vouchers) {
-				const endsAt = v.endsAt;
-				if (!endsAt || endsAt > horizon) continue;
-				const replaces = (o: Voucher, role: string) =>
-					o.code !== v.code &&
-					o.roles.includes(role) &&
-					(o.startsAt === null || o.startsAt <= endsAt) &&
-					(o.endsAt === null || o.endsAt > endsAt);
-				const roles = v.roles.filter((role) => !vouchers.some((o) => replaces(o, role)));
-				if (!roles.length) continue;
-				const id = `voucher-expiring:${compactVoucherCode(v.code)}`;
-				const where = v.systemId === null ? 'Global voucher' : `Voucher of ${v.systemId}`;
-				const when = endsAt.toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
-				findings.push({
-					...notifKey(id),
-					id,
-					kind: 'voucher-expiring',
-					severity: 'warning',
-					message: `${where} ${v.code} ends ${when}, and no other voucher grants ${roles.join(', ')} after it.`,
-					systemId: v.systemId ?? undefined,
-					voucherCode: v.code,
-					roles,
-					endsAt: endsAt.toISOString()
-				});
-			}
+			vouchers.push(...(await queryIndex(this.table, `VOUCHERS#${scope}`)).map(toVoucher).filter(usable));
+		}
+		const key = (t: { systemId: string | null; role: string }) => `${t.systemId ?? '*'}#${t.role}`;
+		const findings: Item[] = [];
+		for (const v of vouchers) {
+			const endsAt = v.endsAt;
+			if (!endsAt || endsAt > horizon) continue;
+			const replaces = (o: Voucher, target: string) =>
+				o.code !== v.code &&
+				voucherTargets(o).some((t) => key(t) === target) &&
+				(o.startsAt === null || o.startsAt <= endsAt) &&
+				(o.endsAt === null || o.endsAt > endsAt);
+			const uncovered = voucherTargets(v).filter((t) => !vouchers.some((o) => replaces(o, key(t))));
+			if (!uncovered.length) continue;
+			const roles = uncovered.map((t) => (v.grants ? `${t.systemId}/${t.role}` : t.role));
+			const id = `voucher-expiring:${compactVoucherCode(v.code)}`;
+			const where = v.systemId === null ? 'Global voucher' : `Voucher of ${v.systemId}`;
+			const when = endsAt.toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
+			findings.push({
+				...notifKey(id),
+				id,
+				kind: 'voucher-expiring',
+				severity: 'warning',
+				message: `${where} ${v.code} ends ${when}, and no other voucher grants ${roles.join(', ')} after it.`,
+				systemId: v.systemId ?? undefined,
+				voucherCode: v.code,
+				roles,
+				endsAt: endsAt.toISOString()
+			});
 		}
 		return findings;
 	}

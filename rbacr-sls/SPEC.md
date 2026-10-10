@@ -144,7 +144,7 @@ and the README in sync with the code.
   **generated cover**, drawn in the browser as SVG (nothing is fetched or
   stored): an icon for what the system is for, picked from words in its
   id and name, then its description (payments, conversations, analytics,
-  calendar, documents, learning, shop, people, security, media, games, or
+  camera, calendar, documents, learning, shop, people, security, media, games, or
   a generic app), on colours derived from its id, so it never changes.
   Description and screenshot are only
   shown, never interpreted: the description is text, not HTML. R12's
@@ -203,9 +203,17 @@ and the README in sync with the code.
   optional start date (`startsAt`), an optional end date (`endsAt`,
   exclusive) and an optional usage count (`maxUses` ≥ 1). It records its
   creator and its uses. If both dates are set, the start must come before
-  the end. A system voucher's roles must be in that system's catalog. A
-  global voucher's roles only have to be valid names other than `root`.
-  Requests send `roles`, or a single `role` as before.
+  the end. A system voucher's roles must be in that system's catalog.
+  A global voucher grants **system roles**: `grants`, a list of `{
+  systemId, role }` (sorted by system, then role; at most 20), each in its
+  system's catalog (404 otherwise), so it can give `premium` in
+  `presence` and in `tabscan` without matching a role name anywhere else;
+  its `roles` are their names. A system voucher takes no `grants` (400).
+  Global vouchers made before system roles have `grants: null` and grant
+  their `roles` globally, by name (every system that has them, R3);
+  `POST /api/vouchers` still makes one from `roles`, which only have to
+  be valid names other than `root`, but the pages only make system-role
+  ones. Requests send `roles`, or a single `role` as before.
 - **V2** A root may choose the code (`code`); without one, rbacr makes
   one up from the current calendar quarter (UTC) and three random animal
   names out of 256, e.g. `2026Q4-OTTER-FALCON-LEMUR` (24 random bits;
@@ -222,8 +230,9 @@ and the README in sync with the code.
   in that order.
 - **V4** Redeeming an active voucher with a **100% discount** grants each of
   its roles to the redeemer's address (G3) and increments `uses`. A system
-  voucher creates grants in its system; a global voucher creates global
-  grants. Redemption runs in one transaction with a row lock, so concurrent
+  voucher creates grants in its system; a global voucher creates a grant
+  of each of its system roles in that role's system (or, made before
+  system roles, global grants). Redemption runs in one transaction with a row lock, so concurrent
   redemptions cannot exceed `maxUses`, and grants all the roles or none.
 - **V4a** A voucher with a discount **below 100%** requires payment, which is
   *not implemented yet*. Redeeming it answers 402 with
@@ -303,13 +312,14 @@ and the README in sync with the code.
   names it.
 - **N3 Expiring vouchers.** A voucher that is not disabled or used up
   (V3) and ends within 7 days (now < `endsAt` ≤ now + 7 days) needs a
-  **replacement** for each of its roles: another voucher of the same scope
-  (the same system, or global for a global voucher) that grants the role,
-  isn't disabled, used up or expired, is valid by the time the first one
+  **replacement** for each of its roles: another voucher, system or
+  global, that grants the same role in the same system (for a global
+  voucher made before system roles, another such voucher granting the
+  role globally), isn't disabled, used up or expired, is valid by the time the first one
   ends (`startsAt` ≤ its `endsAt`, so no gap) and ends later or never. If
   some role has none, a `voucher-expiring` warning names the voucher
   (`voucherCode`, `systemId`, `endsAt`) and the roles left without one
-  (`roles`); its `id` is `voucher-expiring:<code's letters and digits>`.
+  (`roles`, as `system/role` for a global voucher's system roles); its `id` is `voucher-expiring:<code's letters and digits>`.
   It resolves once every role has a replacement, or the voucher has
   expired or been disabled.
 - **N4** A root can dismiss a notification for every root
@@ -352,7 +362,8 @@ Nothing in rbacr is physically deleted, so every change can be audited.
 - **L3** Removing a role or deleting a system marks its dependents with
   the same actor and time: the role's grants are revoked, its
   implications (both directions) removed and its vouchers (every voucher
-  granting it, among other roles too) disabled.
+  granting it, among other roles too, global vouchers of system roles
+  included) disabled.
   Deleting a system does that for every role, then marks the system.
   Global grants belong to no system and are not touched.
 - **L4** A deleted name or key can be used again: granting a revoked grant
@@ -457,7 +468,7 @@ Stripe Connect. That account sends webhooks, so rbacr syncs from Stripe:
 
 ## API tokens
 
-- **T1** Any signed-in person can create tokens for themselves on `/me`.
+- **T1** Any signed-in person can create tokens for themselves on `/global`.
   Each token has a name (1-100 characters) and an optional expiry in whole
   days (1-3650; empty means it never expires). A person can have at most 25
   active tokens (409).
@@ -592,7 +603,7 @@ ISO-8601 strings in UTC.
 | `GET /api/me` | — | `{ email, root, globalRoles: ["root"] or [], roles: { systemId: [role] } }` (ID tokens too, I4, I5) |
 | `POST /api/vouchers/redeem` (ID tokens too, I4) | `{ code }` | the grant of the voucher's first role with `impliedRoles` (`systemId: null` and `impliedRolesBySystem` when global), plus `grants`: one per role (V4); or 402 (V4a) |
 | `GET /api/vouchers` | — | `{ vouchers: [...] }`, the global vouchers (roots) |
-| `POST /api/vouchers` | `{ roles (or role), code?, discountPercent?, startsAt?, endsAt?, maxUses? }` | 201, a global voucher (roots) |
+| `POST /api/vouchers` | `{ grants: [{ systemId, role }] (or, by name, roles or role), code?, discountPercent?, startsAt?, endsAt?, maxUses? }` | 201, a global voucher (roots) |
 | `GET /api/global-grants` | — | `{ grants: [{ systemId: null, role, grantee, grantedBy, grantedAt, startsAt, endsAt, status, voucherCode, impliedRoles: [], impliedRolesBySystem }] }` (roots, R8, G1) |
 | `POST /api/global-grants` | `{ role, grantee, startsAt?, endsAt? }` | 201, the global grant, with `impliedRolesBySystem` (roots, G1, G2) |
 | `DELETE /api/global-grants` | `{ role, grantee }` | 204 (roots; revokes it, L1) |
@@ -663,20 +674,21 @@ missing session gives 401.
 ### Pages
 
 `/` (sign in, returning to `?next=`, S5), `/me` (own roles as system
-cards, R13; redeem a voucher; API tokens), `/redeem/:code` (a voucher's
+cards, R13; redeem a voucher), `/redeem/:code` (a voucher's
 link, V8), `/redeemed/:code` (what redeeming it granted, V8), `/settings`
 (the running version, the API's address, the signed-in account; roots also
 see the root allow list), `/systems`
 (manageable systems; create one from its name alone, which also makes its
 id), `/systems/:id` (its URL; its card, R13; its roles, each marked for everyone or not
 and with the roles it implies, added and removed one at a time; grants;
-vouchers) `/global` (roots: global
+vouchers), `/global` (everyone: their API tokens, T1; roots also global
 grants and vouchers) and `/notifications` (roots: open notifications, with
 a check-now button and dismissal, then the resolved and dismissed ones,
 and the latest failed redeem attempts, V9). Roles are always picked from those that exist,
 never typed (except a new role's name): grant and subscriber forms offer a
-list, voucher forms checkboxes, of the system's roles, or on `/global` of
-every role some system has. Wherever a system's role names are printed
+list, voucher forms checkboxes, of the system's roles; on `/global` the grant
+form offers every role name some system has, and the voucher form each
+system's roles, grouped by system (V1). Wherever a system's role names are printed
 (the systems list, a system's page, `/me`), they link to the system's URL
 in a new tab (R10); global roles belong to no one system and aren't
 linked.

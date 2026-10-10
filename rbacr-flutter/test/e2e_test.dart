@@ -190,6 +190,24 @@ void main() {
     }
   });
 
+  test('global vouchers grant the system roles picked (V1)', () async {
+    final global = await root.createVoucher(grants: [SystemRole(system, 'free')], maxUses: 1);
+    expect(
+      [global.isGlobal, global.grants, global.roles],
+      [
+        true,
+        [SystemRole(system, 'free')],
+        ['free'],
+      ],
+    );
+    try {
+      final grant = (await me.redeemVoucherGrants(global.code)).single;
+      expect([grant.systemId, grant.role], [system, 'free']);
+    } finally {
+      await root.disableVoucher(global.code);
+    }
+  });
+
   test('vouchers grant several roles under a code of their own', () async {
     final code = 'dart e2e ${DateTime.now().millisecondsSinceEpoch}';
     final voucher = await root.createVoucher(systemId: system, roles: ['premium', 'free'], code: code, maxUses: 1);

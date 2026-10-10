@@ -6,7 +6,9 @@ const system = (id: string, name = id, description: string | null = null) => ({ 
 describe('generated covers (R13)', () => {
 	it('pick an icon for what the system is for', () => {
 		expect(themeFor(system('billing')).label).toBe('payments');
-		expect(themeFor(system('presence', 'Presence')).label).toBe('calendar');
+		expect(themeFor(system('presence', 'Presence')).label).toBe('camera');
+		expect(themeFor(system('tabscan', 'TabScan')).label).toBe('documents');
+		expect(themeFor(system('roster', 'Roster', 'Schedules shifts.')).label).toBe('calendar');
 		expect(themeFor(system('acme', 'Acme', 'Invoices and payments for the finance team.')).label).toBe('payments');
 		expect(themeFor(system('x1', 'X1', 'A wiki for the support team.')).label).toBe('documents');
 	});

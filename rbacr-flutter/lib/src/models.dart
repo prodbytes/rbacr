@@ -187,6 +187,32 @@ enum VoucherStatus {
       values.firstWhere((s) => s.wire == value, orElse: () => throw FormatException('Unknown voucher status "$value"'));
 }
 
+/// One role of one system: what a global voucher grants (SPEC V1).
+class SystemRole {
+  const SystemRole(this.systemId, this.role);
+
+  factory SystemRole.fromJson(Map<String, Object?> json) =>
+      SystemRole(json['systemId'] as String, json['role'] as String);
+
+  final String systemId;
+  final String role;
+
+  Map<String, Object?> toJson() => {'systemId': systemId, 'role': role};
+
+  @override
+  bool operator ==(Object other) => other is SystemRole && other.systemId == systemId && other.role == role;
+
+  @override
+  int get hashCode => Object.hash(systemId, role);
+
+  @override
+  String toString() => '$systemId/$role';
+}
+
+List<SystemRole>? _systemRolesOf(Object? value) => value == null
+    ? null
+    : List.unmodifiable((value as List<Object?>).map((g) => SystemRole.fromJson(g as Map<String, Object?>)));
+
 /// A voucher, as the API returns it to roots (SPEC V1-V6).
 class Voucher {
   const Voucher({
@@ -194,6 +220,7 @@ class Voucher {
     required this.systemId,
     required this.roles,
     required this.role,
+    this.grants,
     required this.discountPercent,
     required this.startsAt,
     required this.endsAt,
@@ -211,6 +238,7 @@ class Voucher {
     systemId: json['systemId'] as String?,
     roles: _rolesOf(json),
     role: json['role'] as String,
+    grants: _systemRolesOf(json['grants']),
     discountPercent: (json['discountPercent'] as num).toInt(),
     startsAt: _date(json['startsAt']),
     endsAt: _date(json['endsAt']),
@@ -227,14 +255,20 @@ class Voucher {
   /// matched ignoring case and separators (V2).
   final String code;
 
-  /// null for a global voucher: redeeming it makes a global grant.
+  /// null for a global voucher.
   final String? systemId;
 
-  /// The roles redeeming it grants, sorted (V1).
+  /// The roles redeeming it grants, sorted (V1); for a global voucher with
+  /// [grants], their names.
   final List<String> roles;
 
   /// The first of [roles], as rbacr reported before vouchers had several.
   final String role;
+
+  /// The system roles a global voucher grants, each in its own system (V1).
+  /// null for a system voucher, and for a global voucher made before them,
+  /// which grants [roles] globally (in every system that has them).
+  final List<SystemRole>? grants;
 
   /// 100 grants the roles on redemption; lower needs payment (V4a).
   final int discountPercent;
@@ -268,6 +302,7 @@ class Payment {
     required this.systemId,
     required this.roles,
     required this.role,
+    this.grants,
     required this.discountPercent,
   });
 
@@ -276,6 +311,7 @@ class Payment {
     systemId: json['systemId'] as String?,
     roles: _rolesOf(json),
     role: json['role'] as String,
+    grants: _systemRolesOf(json['grants']),
     discountPercent: (json['discountPercent'] as num).toInt(),
   );
 
@@ -287,6 +323,9 @@ class Payment {
 
   /// The first of [roles].
   final String role;
+
+  /// A global voucher's system roles (V1); null otherwise.
+  final List<SystemRole>? grants;
   final int discountPercent;
 }
 

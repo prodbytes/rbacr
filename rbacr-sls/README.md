@@ -45,7 +45,8 @@ app on AWS Lambda. Run every command below from this folder
   sign-in sessions are purged, a year (configurable) after they expire.
 - **Vouchers** are codes like `2026Q4-OTTER-FALCON-LEMUR` that grant one or
   more roles when redeemed, either in one system or **globally**. A global
-  voucher gives its roles in every system that defines them. The voucher
+  voucher grants roles you pick from any systems (say `premium` in
+  `presence` and in `tabscan`), each in its own system. The voucher
   forms offer the existing roles as checkboxes and suggest a code (the
   quarter plus random animals, or type your own, e.g. `SPRING-SALE`) valid
   through the current quarter; codes ignore case and separators. Each
@@ -73,7 +74,7 @@ app on AWS Lambda. Run every command below from this folder
   `/settings` shows the running version and the API's address; roots also
   see the root allow list there.
 - **API tokens** let scripts and other applications call rbacr as a person.
-  Anyone creates their own on `/me`. A token can do what its owner can do;
+  Anyone creates their own on `/global`. A token can do what its owner can do;
   for example, a root's token can ask whether anyone holds a role.
 - **Apps can call rbacr as their users.** An app that signs its users in
   with Google can send the user's Google ID token instead of an API token,
@@ -279,7 +280,7 @@ about the verified e-mail address, server-side, with an API token.
 
 ### 2. Create a token for your application
 
-Sign in as a root, open `/me` → **API tokens**, create one with an expiry,
+Sign in as a root, open `/global` → **API tokens**, create one with an expiry,
 and store it as a server-side secret (it's shown once). A token acts as the
 person who created it, with their status at the time of each request:
 
@@ -289,7 +290,7 @@ person who created it, with their status at the time of each request:
 | Anyone else | only themselves (`/api/me`, or their own address) |
 
 An application asking about its users therefore needs a root's token: keep
-it server-side only, give it an expiry, and revoke it on `/me` when it's no
+it server-side only, give it an expiry, and revoke it on `/global` when it's no
 longer needed (a revoked or expired token gets 401 at once). A token from
 someone who leaves the root list stops being able to ask about others.
 

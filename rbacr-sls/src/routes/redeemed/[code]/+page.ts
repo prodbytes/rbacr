@@ -4,7 +4,14 @@ import type { PageLoad } from './$types';
 
 export const load: PageLoad = ({ fetch, params }) =>
 	vpiLoad<{
-		redemption: { code: string; systemId: string | null; roles: string[]; redeemedAt: string };
+		redemption: {
+			code: string;
+			systemId: string | null;
+			roles: string[];
+			redeemedAt: string;
+			/** What it did per role; a global voucher's system roles carry their system (SPEC V1, V7). */
+			grants: { systemId: string | null; role: string }[];
+		};
 		/** The systems the voucher's roles are in, with those roles (SPEC V8, R13). */
 		systems: (Card & { roles: string[] })[];
 	}>(fetch, `/me/redemptions/${encodeURIComponent(params.code)}`);

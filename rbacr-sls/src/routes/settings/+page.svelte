@@ -21,7 +21,7 @@
 			<th>Signed in as</th>
 			<td>{data.email}{#if data.root}{' '}<span class="badge">root</span>{/if}</td>
 		</tr>
-		<tr><th>API tokens</th><td><a href="/me#tokens">Manage on My roles</a></td></tr>
+		<tr><th>API tokens</th><td><a href="/global#tokens">Manage on Global</a></td></tr>
 	</tbody>
 </table>
 

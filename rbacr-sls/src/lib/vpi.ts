@@ -11,6 +11,8 @@ export interface Payment {
 	systemId: string | null;
 	roles: string[];
 	role: string;
+	/** A global voucher's system roles (SPEC V1). */
+	grants: { systemId: string; role: string }[] | null;
 	discountPercent: number;
 }
 

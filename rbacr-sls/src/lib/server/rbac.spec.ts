@@ -789,6 +789,7 @@ describe('voucher discounts', () => {
 			systemId: 'billing',
 			roles: ['viewer'],
 			role: 'viewer',
+			grants: null,
 			discountPercent: 50
 		});
 		expect(await rbac.rolesOf(USER)).toEqual({});
@@ -1217,5 +1218,73 @@ describe('failed redemptions (V9)', () => {
 	it('are for roots only', async () => {
 		await expectError(rbac.listRedeemFailures(user), 403);
 		await expectError(rbac.listRedeemFailures(user, 'ANY-CODE'), 403);
+	});
+});
+
+describe('global vouchers of system roles (V1)', () => {
+	beforeEach(async () => {
+		await rbac.addRole(root, 'crm', 'viewer');
+		await rbac.createSystem(root, { id: 'wiki', roles: ['viewer'] });
+	});
+	const pairs = [
+		{ systemId: 'crm', role: 'viewer' },
+		{ systemId: 'billing', role: 'viewer' },
+		{ systemId: 'billing', role: 'viewer' }
+	];
+
+	it('grant exactly the system roles picked, not every role of that name', async () => {
+		const v = await rbac.createVoucher(root, { systemId: null, roles: [], grants: pairs });
+		expect(v).toMatchObject({
+			systemId: null,
+			roles: ['viewer'],
+			grants: [
+				{ systemId: 'billing', role: 'viewer' },
+				{ systemId: 'crm', role: 'viewer' }
+			]
+		});
+		const grants = await rbac.redeemVoucher(USER, v.code, 'page');
+		expect(grants.map((g) => [g.systemId, g.role])).toEqual([
+			['billing', 'viewer'],
+			['crm', 'viewer']
+		]);
+		expect(await rbac.rolesOf(USER)).toEqual({ billing: ['viewer'], crm: ['viewer'] });
+		expect(await rbac.globalRolesOf(USER)).toEqual([]);
+		const [event] = await rbac.listRedemptions(root, v.code);
+		expect(event.grants.map((g) => [g.systemId, g.role, g.outcome])).toEqual([
+			['billing', 'viewer', 'granted'],
+			['crm', 'viewer', 'granted']
+		]);
+		expect((await rbac.ownRedemption(USER, v.code)).systems.map((s) => [s.id, s.roles])).toEqual([
+			['billing', ['viewer']],
+			['crm', ['viewer']]
+		]);
+		expect((await rbac.listGlobalVouchers(root))[0].grants).toEqual(v.grants);
+	});
+
+	it('take only roles that exist, and only on global vouchers', async () => {
+		await expectError(rbac.createVoucher(root, { systemId: null, roles: [], grants: [{ systemId: 'billing', role: 'premium' }] }), 404, /"premium" not found in "billing"/);
+		await expectError(rbac.createVoucher(root, { systemId: null, roles: [], grants: [{ systemId: 'nope', role: 'viewer' }] }), 404);
+		await expectError(rbac.createVoucher(root, { systemId: 'billing', roles: [], grants: pairs }), 400);
+		const many = Array.from({ length: 21 }, (_, i) => ({ systemId: 'billing', role: `r${i}` }));
+		await expectError(rbac.createVoucher(root, { systemId: null, roles: [], grants: many }), 400, /at most 20/);
+	});
+
+	it('are disabled when one of their roles or systems goes (L3)', async () => {
+		const a = await rbac.createVoucher(root, { systemId: null, roles: [], grants: pairs });
+		const b = await rbac.createVoucher(root, { systemId: null, roles: [], grants: [{ systemId: 'wiki', role: 'viewer' }] });
+		const other = await rbac.createVoucher(root, { systemId: null, roles: [], grants: [{ systemId: 'billing', role: 'editor' }] });
+		await rbac.removeRole(root, 'crm', 'viewer');
+		await rbac.deleteSystem(root, 'wiki');
+		const status = new Map((await rbac.listGlobalVouchers(root)).map((v) => [v.code, v.disabledBy]));
+		expect([status.get(a.code), status.get(b.code), status.get(other.code)]).toEqual([ROOT, ROOT, null]);
+	});
+
+	it('are replaced, for expiry warnings, by any voucher of the same system role (N3)', async () => {
+		const soon = new Date('2026-01-15T00:00:00Z');
+		const v = await rbac.createVoucher(root, { systemId: null, roles: [], grants: pairs, endsAt: soon });
+		await rbac.createVoucher(root, { systemId: 'billing', roles: ['viewer'], endsAt: null });
+		await rbac.createVoucher(root, { systemId: null, roles: ['viewer'], endsAt: null }); // by name: replaces no system role
+		const [n] = await rbac.verify(root);
+		expect(n).toMatchObject({ voucherCode: v.code, roles: ['crm/viewer'] });
 	});
 });

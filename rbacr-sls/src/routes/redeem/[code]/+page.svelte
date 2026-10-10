@@ -32,9 +32,15 @@
 	<p class="muted" aria-live="polite">Redeeming…</p>
 {:else if failure.payment}
 	<p class="error">
-		This voucher gives {failure.payment.discountPercent}% off the <strong>{failure.payment.roles.join(', ')}</strong>
-		role{failure.payment.roles.length > 1 ? 's' : ''}
-		{failure.payment.systemId ? `in ${failure.payment.systemId}` : 'in all systems'}, and needs payment, which is not
+		This voucher gives {failure.payment.discountPercent}% off
+		{#if failure.payment.grants}
+			<strong>{failure.payment.grants.map((g) => `${g.role} in ${g.systemId}`).join(', ')}</strong>,
+		{:else}
+			the <strong>{failure.payment.roles.join(', ')}</strong>
+			role{failure.payment.roles.length > 1 ? 's' : ''}
+			{failure.payment.systemId ? `in ${failure.payment.systemId}` : 'in all systems'},
+		{/if}
+		and needs payment, which is not
 		available yet.
 	</p>
 {:else}

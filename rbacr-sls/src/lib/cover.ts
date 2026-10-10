@@ -32,13 +32,18 @@ export const THEMES: Theme[] = [
 		icon: ['M4 4v16h16', 'M8 16v-4', 'M12 16V8', 'M16 16v-6']
 	},
 	{
+		label: 'camera',
+		words: ['presence', 'camera', 'face', 'selfie', 'photo', 'snap', 'webcam'],
+		icon: ['M3 8h4l2-3h6l2 3h4v11H3z', 'M12 17a4 4 0 1 0 0-8 4 4 0 0 0 0 8z']
+	},
+	{
 		label: 'calendar',
-		words: ['calendar', 'schedul', 'booking', 'book', 'event', 'presence', 'attend', 'meeting', 'shift'],
+		words: ['calendar', 'schedul', 'booking', 'book', 'event', 'attend', 'meeting', 'shift'],
 		icon: ['M4 6h16v14H4z', 'M4 10h16', 'M8 3v5', 'M16 3v5', 'M8 14h3']
 	},
 	{
 		label: 'documents',
-		words: ['doc', 'wiki', 'note', 'newsletter', 'blog', 'content', 'post', 'article', 'cms', 'knowledge'],
+		words: ['doc', 'tabscan', 'scan', 'pdf', 'wiki', 'note', 'newsletter', 'blog', 'content', 'post', 'article', 'cms', 'knowledge'],
 		icon: ['M6 3h8l4 4v14H6z', 'M14 3v4h4', 'M9 12h6', 'M9 16h6']
 	},
 	{
@@ -63,7 +68,7 @@ export const THEMES: Theme[] = [
 	},
 	{
 		label: 'media',
-		words: ['video', 'media', 'photo', 'image', 'music', 'audio', 'podcast', 'stream', 'gallery'],
+		words: ['video', 'media', 'image', 'music', 'audio', 'podcast', 'stream', 'gallery'],
 		icon: ['M4 5h16v14H4z', 'M10 9v6l5-3z']
 	},
 	{
