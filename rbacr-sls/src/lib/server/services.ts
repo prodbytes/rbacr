@@ -1,10 +1,12 @@
 import {
 	RBACR_DYNAMODB_ENDPOINT,
+	RBACR_DYNAMODB_SESSIONS_TABLE,
 	RBACR_DYNAMODB_TABLE,
 	RBACR_GOOGLE_CLIENT_ID,
 	RBACR_GOOGLE_CLIENT_SECRET,
 	RBACR_PUBLIC_ORIGIN,
 	RBACR_ROOT_LIST,
+	RBACR_SESSION_RETENTION_DAYS,
 	RBACR_STRIPE_API_KEY,
 	RBACR_STRIPE_WEBHOOK_SECRET
 } from '$app/env/private';
@@ -28,12 +30,13 @@ export function getServices(): Promise<Services> {
 	services ??= (async () => {
 		if (!RBACR_DYNAMODB_TABLE) throw new Error('RBACR_DYNAMODB_TABLE is not set');
 		const table = createTable(RBACR_DYNAMODB_TABLE, RBACR_DYNAMODB_ENDPOINT);
-		// Locally (DynamoDB Local) the app creates its table; in AWS infra/tables.yaml does.
-		if (RBACR_DYNAMODB_ENDPOINT) await ensureTable(table);
+		const sessionsTable = createTable(RBACR_DYNAMODB_SESSIONS_TABLE ?? `${RBACR_DYNAMODB_TABLE}-sessions`, RBACR_DYNAMODB_ENDPOINT);
+		// Locally (DynamoDB Local) the app creates its tables; in AWS infra/tables.yaml does.
+		if (RBACR_DYNAMODB_ENDPOINT) await Promise.all([ensureTable(table), ensureTable(sessionsTable, 'sessions')]);
 		return {
 			table,
 			rbac: new Rbac(table, Allowlist.parse(RBACR_ROOT_LIST)),
-			sessions: new Sessions(table),
+			sessions: new Sessions(sessionsTable, RBACR_SESSION_RETENTION_DAYS),
 			tokens: new ApiTokens(table)
 		};
 	})().catch((err) => {

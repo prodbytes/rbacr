@@ -69,6 +69,18 @@ Parameters:
   TableArn:
     Type: String
     Description: Its ARN
+  SessionsTableName:
+    Type: String
+    Description: The stage's sessions table (the same stack)
+  SessionsTableArn:
+    Type: String
+    Description: Its ARN
+  SessionRetentionDays:
+    Type: Number
+    Default: 365
+    MinValue: 1
+    MaxValue: 99999
+    Description: Days a session record is kept after the session expires, then purged by TTL (SPEC S3)
 
 Resources:
   Certificate:
@@ -120,7 +132,7 @@ Resources:
                   - logs:CreateLogStream
                   - logs:PutLogEvents
                 Resource: !Sub ${LogGroup.Arn}
-        # The stage's table and its index; nothing else.
+        # The stage's tables and the main one's index; nothing else.
         - PolicyName: dynamodb
           PolicyDocument:
             Version: '2012-10-17'
@@ -137,6 +149,7 @@ Resources:
                 Resource:
                   - !Ref TableArn
                   - !Sub ${TableArn}/index/*
+                  - !Ref SessionsTableArn
 
   Function:
     Type: AWS::Lambda::Function
@@ -169,6 +182,8 @@ Resources:
           RBACR_STRIPE_WEBHOOK_SECRET: !Ref StripeWebhookSecret
           RBACR_STRIPE_API_KEY: !Ref StripeApiKey
           RBACR_DYNAMODB_TABLE: !Ref TableName
+          RBACR_DYNAMODB_SESSIONS_TABLE: !Ref SessionsTableName
+          RBACR_SESSION_RETENTION_DAYS: !Ref SessionRetentionDays
 
   FunctionUrl:
     Type: AWS::Lambda::Url

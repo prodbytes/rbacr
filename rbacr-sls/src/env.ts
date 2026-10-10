@@ -1,5 +1,6 @@
 import { defineEnvVars } from '@sveltejs/kit/env';
 import { Allowlist } from './lib/server/identity';
+import { DEFAULT_SESSION_RETENTION_DAYS } from './lib/server/session';
 
 const optional = (value: string | undefined) => value || undefined;
 
@@ -9,6 +10,20 @@ export const variables = defineEnvVars({
 		description: 'The DynamoDB table holding all data (infra/tables.yaml), e.g. rbacr',
 		// required, but checked on first use: `vite build` evaluates this file without one
 		schema: optional
+	},
+	RBACR_DYNAMODB_SESSIONS_TABLE: {
+		description:
+			'The DynamoDB table holding sign-in sessions, which DynamoDB purges by TTL (infra/tables.yaml); default <RBACR_DYNAMODB_TABLE>-sessions',
+		schema: optional
+	},
+	RBACR_SESSION_RETENTION_DAYS: {
+		description: 'Whole days a session record is kept after the session expires, then purged by TTL (default 365)',
+		// checked here so a bad value stops the app from starting
+		schema: (value) => {
+			if (!value) return DEFAULT_SESSION_RETENTION_DAYS;
+			if (!/^[1-9][0-9]{0,4}$/.test(value)) throw new Error(`must be a whole number of days, 1 or more (got ${value})`);
+			return Number(value);
+		}
 	},
 	RBACR_DYNAMODB_ENDPOINT: {
 		description:

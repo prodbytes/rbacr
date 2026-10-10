@@ -139,7 +139,21 @@ describe('rbacr API', { skip: !(await fetch(`${BASE}/health`).then((r) => r.ok, 
 		assert.equal(exhausted.status, 409);
 		assert.match(exhausted.body.error, /no uses left/);
 		assert.equal((await admin('DELETE', `/api/vouchers/${voucher}`)).status, 403);
-		assert.equal((await root('DELETE', `/api/vouchers/${voucher}`)).body.status, 'disabled');
+		const disabled = await root('DELETE', `/api/vouchers/${voucher}`);
+		assert.equal(disabled.status, 200);
+		assert.equal(disabled.body.status, 'disabled');
+		assert.equal(disabled.body.disabledBy, ROOT);
+		assert.equal((await root('DELETE', '/api/vouchers/ZZZZ-ZZZZ-ZZZZ-ZZZZ')).status, 404);
+
+		// Disabled for good, still listed for auditing; its grant stays (V6).
+		const listed = (await root('GET', `/api/systems/${SYSTEM}/vouchers`)).body.vouchers.find((v) => v.code === voucher);
+		assert.deepEqual([listed.status, listed.uses, listed.disabledBy], ['disabled', 1, ROOT]);
+		const again = await root('POST', `/api/systems/${SYSTEM}/vouchers`, { role: 'viewer' });
+		await root('DELETE', `/api/vouchers/${again.body.code}`);
+		const refused = await other('POST', '/api/vouchers/redeem', { code: again.body.code });
+		assert.equal(refused.status, 409);
+		assert.match(refused.body.error, /disabled/);
+		assert.deepEqual((await user('GET', '/api/me')).body.roles, { [SYSTEM]: ['viewer'] });
 	});
 
 	it('gives implied roles, registered only by roots', async () => {
@@ -157,9 +171,15 @@ describe('rbacr API', { skip: !(await fetch(`${BASE}/health`).then((r) => r.ok, 
 		assert.deepEqual((await root('POST', '/api/roles', { email: ADMIN, systemId: SYSTEM })).body.roles, ['admin', 'free', 'premium', 'viewer']);
 		assert.deepEqual((await other('GET', '/api/me')).body.roles[SYSTEM], ['free', 'premium']);
 		assert.equal((await root('POST', '/api/check', { email: OTHER, systemId: SYSTEM, role: 'free' })).body.allowed, true);
+		const premium = (await root('POST', `/api/systems/${SYSTEM}/vouchers`, { role: 'premium' })).body.code;
 		assert.equal((await root('DELETE', `/api/systems/${SYSTEM}/roles/premium`)).status, 204);
 		assert.equal((await root('DELETE', `/api/systems/${SYSTEM}/roles/free`)).status, 204);
 		assert.equal((await other('GET', '/api/me')).body.roles[SYSTEM], undefined);
+
+		// Removing a role disables its vouchers, by the same root, and keeps them listed (L3, V6).
+		const cascaded = (await root('GET', `/api/systems/${SYSTEM}/vouchers`)).body.vouchers.find((v) => v.code === premium);
+		assert.deepEqual([cascaded.status, cascaded.disabledBy], ['disabled', ROOT]);
+		assert.equal((await user('POST', '/api/vouchers/redeem', { code: premium })).status, 409);
 	});
 
 	it('lets roots issue global vouchers; paid ones answer 402', async () => {
@@ -171,6 +191,8 @@ describe('rbacr API', { skip: !(await fetch(`${BASE}/health`).then((r) => r.ok, 
 		assert.equal(free.status, 201);
 		assert.equal(free.body.systemId, null);
 		assert.equal(free.body.discountPercent, 100);
+		assert.ok((await root('GET', '/api/vouchers')).body.vouchers.some((v) => v.code === free.body.code));
+		assert.equal((await admin('GET', '/api/vouchers')).status, 403);
 		const redeemed = await other('POST', '/api/vouchers/redeem', { code: free.body.code });
 		assert.equal(redeemed.status, 200);
 		assert.deepEqual(redeemed.body.impliedRolesBySystem, { [SYSTEM]: [] });
