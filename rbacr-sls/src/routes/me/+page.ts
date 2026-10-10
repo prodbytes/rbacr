@@ -1,4 +1,5 @@
 import { vpiLoad } from '#lib/vpi.js';
+import type { Card } from '#lib/SystemCard.svelte';
 import type { PageLoad } from './$types';
 
 export interface Token {
@@ -20,6 +21,8 @@ export const load: PageLoad = async ({ fetch }) => {
 			roles: Record<string, string[]>;
 			/** Each system's URL, for those that have one (SPEC R10). */
 			urls: Record<string, string>;
+			/** Each system's card (SPEC R13). */
+			systems: Record<string, Card>;
 		}>(fetch, '/me'),
 		vpiLoad<{ tokens: Token[] }>(fetch, '/tokens')
 	]);

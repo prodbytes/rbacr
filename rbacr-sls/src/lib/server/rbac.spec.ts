@@ -396,6 +396,81 @@ describe('system URLs', () => {
 	});
 });
 
+describe('system cards', () => {
+	it('carry a description and a screenshot, cleared with null, and anyone may read them (R13)', async () => {
+		const set = await rbac.configureSystem(root, 'billing', {
+			url: 'https://billing.example.com',
+			description: '  Invoices and payments.\nFor the finance team.  ',
+			screenshotUrl: 'https://billing.example.com/shot.png'
+		});
+		expect(set).toMatchObject({ description: 'Invoices and payments.\nFor the finance team.', screenshotUrl: 'https://billing.example.com/shot.png' });
+		expect(await rbac.systemCards(['billing', 'crm', 'nope'])).toEqual({
+			billing: {
+				id: 'billing',
+				name: 'Billing',
+				url: 'https://billing.example.com',
+				description: 'Invoices and payments.\nFor the finance team.',
+				screenshotUrl: 'https://billing.example.com/shot.png',
+				maintenance: false
+			},
+			crm: { id: 'crm', name: 'crm', url: null, description: null, screenshotUrl: null, maintenance: false }
+		});
+		const cleared = await rbac.configureSystem(root, 'billing', { description: '   ', screenshotUrl: null });
+		expect(cleared).toMatchObject({ description: null, screenshotUrl: null, url: 'https://billing.example.com' });
+		await rbac.deleteSystem(root, 'crm');
+		expect(Object.keys(await rbac.systemCards(['billing', 'crm']))).toEqual(['billing']);
+	});
+
+	it('refuse bad screenshots and long descriptions, and only roots set them (R13, P1)', async () => {
+		for (const bad of ['javascript:alert(1)', 'data:image/png;base64,AAAA', '/shot.png']) {
+			await expectError(rbac.setSystemScreenshot(root, 'billing', bad), 400);
+		}
+		await expectError(rbac.setSystemDescription(root, 'billing', 'x'.repeat(1001)), 400);
+		await rbac.setSystemDescription(root, 'billing', 'x'.repeat(1000));
+		await expectError(rbac.setSystemDescription(user, 'billing', 'hi'), 403);
+		await expectError(rbac.setSystemScreenshot(user, 'billing', 'https://x.com/a.png'), 403);
+		await expectError(rbac.setSystemDescription(root, 'nope', 'hi'), 404);
+	});
+});
+
+describe('own redemptions', () => {
+	it("give the redeemer their RedeemEvent and the voucher's system (V8)", async () => {
+		await rbac.configureSystem(root, 'billing', { url: 'https://billing.example.com', description: 'Invoices' });
+		await rbac.createVoucher(root, { systemId: 'billing', roles: ['viewer', 'editor'], code: 'OWN-SYSTEM' });
+		await expectError(rbac.ownRedemption(USER, 'OWN-SYSTEM'), 404);
+		await rbac.redeemVoucher(USER, 'own system', 'page');
+		const { redemption, systems } = await rbac.ownRedemption(USER, 'own-system');
+		expect(redemption).toMatchObject({ code: 'OWN-SYSTEM', email: USER, roles: ['editor', 'viewer'], via: 'page' });
+		expect(systems).toEqual([
+			{
+				id: 'billing',
+				name: 'Billing',
+				url: 'https://billing.example.com',
+				description: 'Invoices',
+				screenshotUrl: null,
+				maintenance: false,
+				roles: ['editor', 'viewer']
+			}
+		]);
+		// Only one's own: someone else, or an unknown code, gets 404.
+		await expectError(rbac.ownRedemption(OTHER, 'OWN-SYSTEM'), 404);
+		await expectError(rbac.ownRedemption(USER, 'NO-SUCH-CODE'), 404);
+	});
+
+	it('list, for a global voucher, every system that has one of its roles (V8)', async () => {
+		await rbac.addRole(root, 'crm', 'viewer');
+		await rbac.createSystem(root, { id: 'wiki', roles: ['editor'] });
+		await rbac.createVoucher(root, { systemId: null, roles: ['viewer', 'editor'], code: 'OWN-GLOBAL' });
+		await rbac.redeemVoucher(USER, 'OWN-GLOBAL');
+		const { systems } = await rbac.ownRedemption(USER, 'OWN-GLOBAL');
+		expect(systems.map((s) => [s.id, s.roles])).toEqual([
+			['billing', ['editor', 'viewer']],
+			['crm', ['viewer']],
+			['wiki', ['editor']]
+		]);
+	});
+});
+
 describe('vouchers', () => {
 	it('get a default code: the quarter and three animals (V2)', async () => {
 		const v = await rbac.createVoucher(root, { systemId: 'billing', roles: ['viewer'] });

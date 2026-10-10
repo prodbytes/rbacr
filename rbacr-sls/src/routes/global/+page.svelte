@@ -4,6 +4,7 @@
 	import { formatDate, formValues, utcInputValue, utcIso, vpiFetch, VpiError } from '#lib/vpi.js';
 	import { quarterOf, suggestVoucherCode } from '#lib/vouchers.js';
 	import VoucherRedemptions from '#lib/VoucherRedemptions.svelte';
+	import CopyRedeemLink from '#lib/CopyRedeemLink.svelte';
 	import type { PageProps } from './$types';
 
 	let { data }: PageProps = $props();
@@ -130,7 +131,10 @@
 		<tbody>
 			{#each data.vouchers as v (v.code)}
 				<tr>
-					<td><code>{v.code}</code></td>
+					<td>
+						<code>{v.code}</code>
+						{#if v.status === 'active' || v.status === 'not-started'}<br /><CopyRedeemLink code={v.code} />{/if}
+					</td>
 					<td>{v.roles.join(', ')}</td>
 					<td>{v.discountPercent}%</td>
 					<td><span class="badge">{v.status}</span></td>

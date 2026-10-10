@@ -4,6 +4,8 @@
 	import { formatDate, formValues, utcInputValue, utcIso, vpiFetch, VpiError } from '#lib/vpi.js';
 	import { quarterOf, suggestVoucherCode } from '#lib/vouchers.js';
 	import VoucherRedemptions from '#lib/VoucherRedemptions.svelte';
+	import CopyRedeemLink from '#lib/CopyRedeemLink.svelte';
+	import SystemCard from '#lib/SystemCard.svelte';
 	import RoleName from '#lib/RoleName.svelte';
 	import type { PageProps } from './$types';
 
@@ -57,6 +59,17 @@
 	async function setUrl(e: SubmitEvent) {
 		const { url } = formValues(e);
 		await call(base, 'PATCH', { url: url.trim() || null });
+	}
+	// The card's fields, previewed as they're typed (R13).
+	let description = $state('');
+	let screenshotUrl = $state('');
+	$effect.pre(() => {
+		description = data.system.description ?? '';
+		screenshotUrl = data.system.screenshotUrl ?? '';
+	});
+	async function setCard(e: SubmitEvent) {
+		e.preventDefault();
+		await call(base, 'PATCH', { description: description.trim() || null, screenshotUrl: screenshotUrl.trim() || null });
 	}
 	async function setSubscriberRole(e: SubmitEvent) {
 		const { subscriberRole } = formValues(e);
@@ -143,6 +156,31 @@
 {/if}
 
 {#if error}<p class="error">{error}</p>{/if}
+
+<h2>Card</h2>
+<p class="muted">What people see of this system on their roles page and after redeeming a voucher for it.</p>
+<div class="card-editor">
+	{#if data.root}
+		<form onsubmit={setCard}>
+			<label>
+				Description (plain text)
+				<textarea bind:value={description} rows="5" maxlength="1000" placeholder="What the system is for, in a sentence or two"
+				></textarea>
+			</label>
+			<label>
+				Screenshot URL (an image)
+				<input type="url" bind:value={screenshotUrl} placeholder="https://presence.example.com/screenshot.png" />
+			</label>
+			<button>Save card</button>
+		</form>
+	{/if}
+	<div class="preview">
+		<SystemCard
+			card={{ ...data.system, description: description.trim() || null, screenshotUrl: screenshotUrl.trim() || null }}
+			roles={data.system.roles.slice(0, 3)}
+		/>
+	</div>
+</div>
 
 <h2>Roles</h2>
 {#if data.system.roles.length}
@@ -300,7 +338,10 @@
 		<tbody>
 			{#each data.vouchers as v (v.code)}
 				<tr>
-					<td><code>{v.code}</code></td>
+					<td>
+						<code>{v.code}</code>
+						{#if v.status === 'active' || v.status === 'not-started'}<br /><CopyRedeemLink code={v.code} />{/if}
+					</td>
 					<td>
 						{#each v.roles as role, i (role)}{i ? ', ' : ''}<RoleName {role} url={data.system.url} />{/each}
 					</td>
@@ -329,3 +370,41 @@
 	<h2>Danger zone</h2>
 	<button class="danger" onclick={deleteSystem}>Delete system</button>
 {/if}
+
+<style>
+	.card-editor {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) minmax(220px, 300px);
+		gap: 1.25rem;
+		align-items: start;
+	}
+	.card-editor form {
+		display: flex;
+		flex-direction: column;
+		gap: 0.75rem;
+	}
+	.card-editor label {
+		display: flex;
+		flex-direction: column;
+		gap: 0.2rem;
+		font-size: 0.8rem;
+		color: var(--muted);
+	}
+	.card-editor button {
+		align-self: start;
+	}
+	textarea {
+		font: inherit;
+		color: var(--fg);
+		background: var(--card);
+		border: 1px solid var(--line);
+		border-radius: 5px;
+		padding: 0.4rem 0.6rem;
+		resize: vertical;
+	}
+	@media (max-width: 640px) {
+		.card-editor {
+			grid-template-columns: 1fr;
+		}
+	}
+</style>

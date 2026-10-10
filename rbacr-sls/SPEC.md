@@ -35,6 +35,14 @@ and the README in sync with the code.
 - **S4** For local development only, `/login/dev` signs in as any address
   without Google when `RBACR_DEV_LOGIN=1`. Production builds always return 404
   for it.
+- **S5** Sign-in can return to where it started: `/?next=<path>`,
+  `/login/google?next=<path>` and the dev login's `next` field carry a
+  path on rbacr, kept through the Google round trip in the OAuth cookie,
+  and the sign-in ends there instead of `/me` (a signed-in visitor to
+  `/?next=` goes there at once). Only a path on rbacr itself is followed:
+  anything else (another origin, `//host`, a backslash, a control
+  character, more than 512 characters) means `/me`, so `next` can't
+  redirect off the site.
 
 ## Roles
 
@@ -122,6 +130,18 @@ and the README in sync with the code.
   tell "nobody has roles right now" from "this user lacks the role". An
   unknown or deleted system gives 404. It shows nothing else of the system:
   its roles, grants, subscriber role and vouchers stay roots-only (P1).
+
+- **R13 System cards.** A system may have a `description` (plain text, at
+  most 1000 characters, trimmed; blank means none) and a `screenshotUrl`
+  (an image, with the same rules as R10's `url`), set or cleared with
+  `PATCH /api/systems/:id` `{ description, screenshotUrl }` (null clears).
+  The pages show a system as a **card**: its screenshot, name,
+  description, the roles the person holds there and a link to its URL,
+  on `/me` (each system the person holds roles in, so `/vpi/me` gives
+  their cards) and after redeeming a voucher (V8). The system page edits
+  the card with a live preview. Description and screenshot are only
+  shown, never interpreted: the description is text, not HTML. R12's
+  status leaves them out.
 
 ## Grant validity
 
@@ -220,6 +240,24 @@ and the README in sync with the code.
   /api/vouchers/:code/redemptions`, and on the pages by opening a voucher's
   uses. Redemptions recorded before V7 report only `email` and
   `redeemedAt`. Attempts that fail (402, 404, 409) record nothing.
+
+- **V8 Redeem links.** A voucher's link is `/redeem/<code>`; the voucher
+  lists on a system's page and on `/global` copy it to the clipboard for
+  vouchers that are `active` or `not-started`. Opening it signed out goes
+  to `/?next=/redeem/<code>`, which asks to sign in and comes back (S5).
+  Signed in, the page redeems the voucher from the browser through `POST
+  /vpi/me/redeem` (so a server render or prefetch never redeems), as typing
+  the code on `/me` does, then goes to `/redeemed/<code>`; redeeming on
+  `/me` goes there too. Failures show on the page (402 as in V4a; 404, and
+  409 for an inactive voucher), except that a voucher the person already
+  redeemed goes straight to `/redeemed/<code>`. That page says which roles
+  were granted and shows a card (R13) for every system they are in: the
+  voucher's system, or for a global voucher every system whose catalog
+  has one of its roles now. It loads the person's own redemption with
+  `GET /vpi/me/redemptions/:code`, `{ redemption, systems: [{ id, name,
+  url, description, screenshotUrl, maintenance, roles }] }`, 404 unless
+  they redeemed that voucher. Anyone who knows a code could already
+  redeem it (V2); a link only saves typing it.
 
 ## Notifications
 
@@ -488,11 +526,11 @@ ISO-8601 strings in UTC.
 | `DELETE /api/global-grants` | `{ role, grantee }` | 204 (roots; revokes it, L1) |
 | `DELETE /api/vouchers/:code` | — | the disabled voucher, with `disabledBy` |
 | `GET /api/vouchers/:code/redemptions` | — | `{ redemptions: [{ id, code, systemId, roles, discountPercent, voucherCreatedBy, email, redeemedAt, via, grants: [{ systemId, role, outcome, replaced }] }] }`, newest first (roots, V7) |
-| `GET /api/systems` | — | `{ systems: [{ id, name, roles, implies: { role: [role] }, subscriberRole, everyone: [role], url, maintenance }] }` (only manageable systems; `implies` lists direct implications) |
+| `GET /api/systems` | — | `{ systems: [{ id, name, roles, implies: { role: [role] }, subscriberRole, everyone: [role], url, maintenance, description, screenshotUrl }] }` (only manageable systems; `implies` lists direct implications) |
 | `POST /api/systems` | `{ id, name?, roles?: [string] }` | 201, the system with exactly the given roles (R4) |
-| `GET /api/systems/:id` | — | `{ id, name, roles, implies, subscriberRole, everyone, url, maintenance }` |
+| `GET /api/systems/:id` | — | `{ id, name, roles, implies, subscriberRole, everyone, url, maintenance, description, screenshotUrl }` |
 | `GET /api/systems/:id/status` | — | `{ id, name, url, maintenance }` (any token, R12) |
-| `PATCH /api/systems/:id` | `{ subscriberRole?: role or null, url?: URL or null, maintenance?: boolean }`, at least one | the system (roots, Q2, R10, R11) |
+| `PATCH /api/systems/:id` | `{ subscriberRole?: role or null, url?: URL or null, maintenance?: boolean, description?: text or null, screenshotUrl?: URL or null }`, at least one | the system (roots, Q2, R10, R11, R13) |
 | `DELETE /api/systems/:id` | — | 204 (marks it and its contents deleted, L1, L3) |
 | `POST /api/systems/:id/roles` | `{ role }` | the system |
 | `DELETE /api/systems/:id/roles/:role` | — | 204 (removes it, L1, L3) |
@@ -533,8 +571,9 @@ addresses stay out of URLs and access logs.
 Its endpoints are shaped for the pages and are not a public contract; the
 frontend (`src/lib/vpi.ts`) is its only client. The routes are
 `GET /vpi/session` (who is signed in; works anonymously), `GET /vpi/settings`
-(version, API address, account, and the root allow list for roots), `GET /vpi/me`,
-`POST /vpi/me/redeem` (402 with `payment` per V4a), `GET|POST /vpi/tokens`,
+(version, API address, account, and the root allow list for roots), `GET /vpi/me` (with the cards of the person's systems, R13),
+`POST /vpi/me/redeem` (402 with `payment` per V4a),
+`GET /vpi/me/redemptions/:code` (V8), `GET|POST /vpi/tokens`,
 `DELETE /vpi/tokens/:id`, `GET|POST /vpi/systems`,
 `GET|PATCH|DELETE /vpi/systems/:id`, `POST /vpi/systems/:id/roles`,
 `PUT|DELETE /vpi/systems/:id/roles/:role`, `POST|DELETE /vpi/systems/:id/grants`,
@@ -548,11 +587,13 @@ missing session gives 401.
 
 ### Pages
 
-`/` (sign in), `/me` (own roles, redeem a voucher, API tokens), `/settings`
+`/` (sign in, returning to `?next=`, S5), `/me` (own roles as system
+cards, R13; redeem a voucher; API tokens), `/redeem/:code` (a voucher's
+link, V8), `/redeemed/:code` (what redeeming it granted, V8), `/settings`
 (the running version, the API's address, the signed-in account; roots also
 see the root allow list), `/systems`
 (manageable systems; create one from its name alone, which also makes its
-id), `/systems/:id` (its URL; its roles, each marked for everyone or not
+id), `/systems/:id` (its URL; its card, R13; its roles, each marked for everyone or not
 and with the roles it implies, added and removed one at a time; grants;
 vouchers) `/global` (roots: global
 grants and vouchers) and `/notifications` (roots: open notifications, with
@@ -634,9 +675,9 @@ All settings come from environment variables prefixed `RBACR_`:
 
 | Suite | Command | Covers |
 |-------|---------|--------|
-| Unit and domain | `npx vitest --run` | Identity parsing, the R*, G*, P*, V*, N*, Q*, T*, L* and D* rules against DynamoDB Local (a Docker container started by the test setup, or `RBACR_TEST_DYNAMODB_ENDPOINT`), the A3 guard, sessions, Google OAuth exchange |
+| Unit and domain | `npx vitest --run` | Identity parsing, the R*, G*, P*, V*, N*, Q*, T*, L* and D* rules against DynamoDB Local (a Docker container started by the test setup, or `RBACR_TEST_DYNAMODB_ENDPOINT`), the A3 guard, the `next` check (S5), sessions, Google OAuth exchange |
 | Lambda smoke | `npm run test:lambda` | The production build invoked through `lambda.js` with function URL (v2) events: H1, H2, A1, A3 and the Stripe webhook's signature check (Q1), the version, redirects, 401s, static assets. `scripts/package-lambda.sh` reruns it against the deployable bundle. |
-| End-to-end | `npm run test:e2e` | `/api` with personal tokens, `/vpi` as the frontend (notifications included), the A1/A3 separation, and the pages, against a running dev server with DynamoDB Local, directly or through Floci over HTTPS |
+| End-to-end | `npm run test:e2e` | `/api` with personal tokens, `/vpi` as the frontend (notifications and redeem links included, V8, S5), the A1/A3 separation, and the pages, against a running dev server with DynamoDB Local, directly or through Floci over HTTPS |
 | Live | `scripts/deploy.sh` (last step) | The deployed site: version, sign-in page, 401 (also for an unknown token, which reads DynamoDB), 404 for `/login/dev`, 403 for the bare function URL |
 
 `npm test` runs the first two.

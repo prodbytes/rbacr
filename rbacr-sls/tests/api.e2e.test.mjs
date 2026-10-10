@@ -390,6 +390,68 @@ describe('rbacr API', { skip: !(await fetch(`${BASE}/health`).then((r) => r.ok, 
 		assert.match(await page.text(), new RegExp(`Disabled by ${ROOT}`));
 	});
 
+	it('redeems vouchers through a link, signing in first, and shows the systems it opened (V8, S5, R13)', async () => {
+		const card = await root('PATCH', `/api/systems/${SYSTEM}`, {
+			url: 'https://e2e.example.com',
+			description: 'The e2e system',
+			screenshotUrl: 'https://e2e.example.com/shot.png'
+		});
+		assert.equal(card.status, 200, JSON.stringify(card.body));
+		assert.equal(card.body.description, 'The e2e system');
+		assert.equal((await root('PATCH', `/api/systems/${SYSTEM}`, { screenshotUrl: 'javascript:alert(1)' })).status, 400);
+		const code = (await root('POST', `/api/systems/${SYSTEM}/vouchers`, { role: 'viewer' })).body.code;
+		const link = `/redeem/${encodeURIComponent(code)}`;
+
+		// Anonymous visitors are sent to sign in, and come back to the link.
+		const anon = await fetch(`${BASE}${link}`, { redirect: 'manual', headers: { accept: 'text/html' } });
+		assert.equal(anon.status, 303);
+		assert.equal(anon.headers.get('location'), `/?next=${encodeURIComponent(link)}`);
+		const signIn = (next) =>
+			fetch(`${BASE}/login/dev`, {
+				method: 'POST',
+				redirect: 'manual',
+				headers: { origin: BASE, accept: 'text/html', 'content-type': 'application/x-www-form-urlencoded' },
+				body: new URLSearchParams({ email: `link${Date.now()}@partner.test`, next })
+			});
+		for (const evil of ['//evil.example', 'https://evil.example', '/\\evil.example']) {
+			assert.equal((await signIn(evil)).headers.get('location'), '/me');
+		}
+		const back = await signIn(link);
+		assert.equal(back.status, 303);
+		assert.equal(back.headers.get('location'), link);
+		const cookie = back.headers.getSetCookie().find((c) => c.startsWith('rbacr_session=')).split(';')[0];
+		// Signed in, the link's page renders (it redeems from the browser).
+		assert.equal((await fetch(`${BASE}${link}`, { headers: { cookie, accept: 'text/html' } })).status, 200);
+
+		assert.equal((await vpi(cookie, 'GET', `/me/redemptions/${code}`)).status, 404);
+		assert.equal((await vpi(cookie, 'POST', '/me/redeem', { code })).status, 200);
+		const done = await vpi(cookie, 'GET', `/me/redemptions/${code}`);
+		assert.equal(done.status, 200, JSON.stringify(done.body));
+		assert.equal(done.body.redemption.code, code);
+		assert.equal(done.body.redemption.via, 'page');
+		assert.deepEqual(done.body.systems, [
+			{
+				id: SYSTEM,
+				name: card.body.name,
+				url: 'https://e2e.example.com',
+				description: 'The e2e system',
+				screenshotUrl: 'https://e2e.example.com/shot.png',
+				maintenance: false,
+				roles: ['viewer']
+			}
+		]);
+		const page = await fetch(`${BASE}/redeemed/${code}`, { headers: { cookie, accept: 'text/html' } });
+		assert.equal(page.status, 200);
+		const html = await page.text();
+		assert.match(html, /Roles granted/);
+		assert.match(html, /The e2e system/);
+		assert.match(html, /shot\.png/);
+		assert.equal((await vpi(cookie, 'GET', '/me/redemptions/NO-SUCH-CODE')).status, 404);
+
+		const cleared = await root('PATCH', `/api/systems/${SYSTEM}`, { url: null, description: null, screenshotUrl: null });
+		assert.deepEqual([cleared.body.url, cleared.body.description, cleared.body.screenshotUrl], [null, null, null]);
+	});
+
 	it('validates input with JSON errors', async () => {
 		const bad = await root('POST', `/api/systems/${SYSTEM}/grants`, { role: 'viewer', grantee: 'not an email' });
 		assert.equal(bad.status, 400);

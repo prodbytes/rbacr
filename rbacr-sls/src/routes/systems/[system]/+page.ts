@@ -48,6 +48,9 @@ export const load: PageLoad = ({ fetch, params }) =>
 			url: string | null;
 			/** No roles are given while on (SPEC R11). */
 			maintenance: boolean;
+			/** Shown on the system's card (SPEC R13). */
+			description: string | null;
+			screenshotUrl: string | null;
 		};
 		grants: Grant[];
 		vouchers: Voucher[];

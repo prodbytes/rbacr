@@ -19,6 +19,8 @@ export const EVERYONE = '*';
 
 /** Longest system URL accepted. */
 const MAX_URL_LENGTH = 2048;
+/** Longest system description (R13). */
+export const MAX_DESCRIPTION_LENGTH = 1000;
 
 /** The `grantedBy` of grants made by the paid-subscription sync (Q2). */
 export const SUBSCRIPTION_GRANTOR = 'stripe';
@@ -76,6 +78,27 @@ export interface System {
 	url: string | null;
 	/** In maintenance (R11), role queries give nobody any role here. */
 	maintenance: boolean;
+	/** What the system is for, as plain text, shown on its card (R13); null for none. */
+	description: string | null;
+	/** An image (http or https URL) of the system, shown on its card (R13); null for none. */
+	screenshotUrl: string | null;
+}
+
+/** A system as its card shows it to anyone holding roles there (R13). */
+export interface SystemCard {
+	id: string;
+	name: string;
+	url: string | null;
+	description: string | null;
+	screenshotUrl: string | null;
+	maintenance: boolean;
+}
+
+/** A person's own redemption of a voucher (V8): the RedeemEvent and the systems its roles open. */
+export interface OwnRedemption {
+	redemption: RedeemEvent;
+	/** Each system the voucher's roles are in, with those roles, sorted by id. */
+	systems: (SystemCard & { roles: string[] })[];
 }
 
 /** What any token may see of a system (R12): enough for its application to check it. */
@@ -84,6 +107,15 @@ export interface SystemStatus {
 	name: string;
 	url: string | null;
 	maintenance: boolean;
+}
+
+/** A system's settings, as PATCH gives them: absent fields stay, null clears (Q2, R10, R11, R13). */
+export interface SystemSettings {
+	subscriberRole?: string | null;
+	url?: string | null;
+	maintenance?: boolean;
+	description?: string | null;
+	screenshotUrl?: string | null;
 }
 
 /** Where a redemption came from: the external API or the pages (the VPI). */
@@ -275,7 +307,7 @@ export function validName(kind: string, raw: string): string {
 }
 
 /** An absolute http or https URL, as given; anything else (javascript:, data:, relative) is refused. */
-export function validUrl(raw: string): string {
+export function validUrl(raw: string, what = 'A system URL'): string {
 	const value = raw.trim();
 	let url: URL;
 	try {
@@ -283,8 +315,8 @@ export function validUrl(raw: string): string {
 	} catch {
 		throw badRequest(`Invalid URL "${raw}"`);
 	}
-	if (url.protocol !== 'https:' && url.protocol !== 'http:') throw badRequest('A system URL must start with https:// or http://');
-	if (value.length > MAX_URL_LENGTH) throw badRequest(`A system URL can have at most ${MAX_URL_LENGTH} characters`);
+	if (url.protocol !== 'https:' && url.protocol !== 'http:') throw badRequest(`${what} must start with https:// or http://`);
+	if (value.length > MAX_URL_LENGTH) throw badRequest(`${what} can have at most ${MAX_URL_LENGTH} characters`);
 	return value;
 }
 
@@ -300,7 +332,8 @@ export const MAX_VOUCHER_ROLES = 20;
  * Item layout in the table (src/lib/server/dynamo.ts). Dates are ISO strings;
  * an absent attribute means null.
  *
- *   system      PK SYS#<id>       SK META                      GSI1 SYSTEMS / <id>    (optional subscriberRole)
+ *   system      PK SYS#<id>       SK META                      GSI1 SYSTEMS / <id>
+ *               (optional subscriberRole, url, maintenance, description, screenshotUrl)
  *   role        PK SYS#<id>       SK ROLE#<name>               GSI1 ROLENAME#<name> / <id>
  *   implication PK SYS#<id>       SK IMPL#<role>#<implied>
  *   grant       PK SYS#<id>       SK GRANT#<role>#<grantee>    GSI1 GRANTEE#<grantee> / SYS#<id>#<role>
@@ -475,6 +508,15 @@ const toRedeemEvent = (it: Item, voucher: Voucher): RedeemEvent => ({
 				: null
 		};
 	})
+});
+
+const toSystemCard = (meta: Item): SystemCard => ({
+	id: meta.id as string,
+	name: meta.name as string,
+	url: (meta.url as string | undefined) ?? null,
+	description: (meta.description as string | undefined) ?? null,
+	screenshotUrl: (meta.screenshotUrl as string | undefined) ?? null,
+	maintenance: meta.maintenance === true
 });
 
 const toNotification = (it: Item): Notification => ({
@@ -736,6 +778,8 @@ export class Rbac {
 			everyone: roleItems.filter((it) => it.everyone === true).map((it) => it.name as string),
 			url: (meta.url as string | undefined) ?? null,
 			maintenance: meta.maintenance === true,
+			description: (meta.description as string | undefined) ?? null,
+			screenshotUrl: (meta.screenshotUrl as string | undefined) ?? null,
 			implVersion: (meta.implVersion as number) ?? 0
 		};
 	}
@@ -803,7 +847,7 @@ export class Rbac {
 			}))
 		]);
 		if (reasons) throw new RbacError(409, `System "${id}" already exists`);
-		return { id, name, roles: [...roles].sort(), implies: {}, subscriberRole: null, everyone: [], url: null, maintenance: false };
+		return { id, name, roles: [...roles].sort(), implies: {}, subscriberRole: null, everyone: [], url: null, maintenance: false, description: null, screenshotUrl: null };
 	}
 
 	/**
@@ -960,19 +1004,17 @@ export class Rbac {
 		}
 	}
 
-	/** Applies the system settings given (Q2, R10, R11); at least one is required. */
-	async configureSystem(
-		actor: Actor,
-		systemId: string,
-		settings: { subscriberRole?: string | null; url?: string | null; maintenance?: boolean }
-	): Promise<System> {
-		const { subscriberRole, url, maintenance } = settings;
-		if (subscriberRole === undefined && url === undefined && maintenance === undefined) {
-			throw badRequest('Give "subscriberRole", "url" (null clears either) or "maintenance"');
+	/** Applies the system settings given (Q2, R10, R11, R13); at least one is required. */
+	async configureSystem(actor: Actor, systemId: string, settings: SystemSettings): Promise<System> {
+		const { subscriberRole, url, maintenance, description, screenshotUrl } = settings;
+		if ([subscriberRole, url, maintenance, description, screenshotUrl].every((v) => v === undefined)) {
+			throw badRequest('Give "subscriberRole", "url", "description", "screenshotUrl" (null clears any of them) or "maintenance"');
 		}
 		let system: System | undefined;
 		if (subscriberRole !== undefined) system = await this.setSubscriberRole(actor, systemId, subscriberRole);
 		if (url !== undefined) system = await this.setSystemUrl(actor, systemId, url);
+		if (description !== undefined) system = await this.setSystemDescription(actor, systemId, description);
+		if (screenshotUrl !== undefined) system = await this.setSystemScreenshot(actor, systemId, screenshotUrl);
 		if (maintenance !== undefined) system = await this.setMaintenance(actor, systemId, maintenance);
 		return system!;
 	}
@@ -1072,16 +1114,37 @@ export class Rbac {
 	 */
 	async setSystemUrl(actor: Actor, systemId: string, rawUrl: string | null): Promise<System> {
 		requireRoot(actor, 'Only roots can configure systems');
-		const url = rawUrl === null ? null : validUrl(rawUrl);
+		return this.setSystemAttribute(actor, systemId, 'url', rawUrl === null ? null : validUrl(rawUrl));
+	}
+
+	/** Sets what a system is for, shown on its card as plain text (R13), or none (null or blank). */
+	async setSystemDescription(actor: Actor, systemId: string, raw: string | null): Promise<System> {
+		requireRoot(actor, 'Only roots can configure systems');
+		const description = raw?.trim() || null;
+		if (description && description.length > MAX_DESCRIPTION_LENGTH) {
+			throw badRequest(`A description can have at most ${MAX_DESCRIPTION_LENGTH} characters`);
+		}
+		return this.setSystemAttribute(actor, systemId, 'description', description);
+	}
+
+	/** Sets the image (an http or https URL) shown on a system's card (R13), or none (null). */
+	async setSystemScreenshot(actor: Actor, systemId: string, rawUrl: string | null): Promise<System> {
+		requireRoot(actor, 'Only roots can configure systems');
+		const url = rawUrl === null ? null : validUrl(rawUrl, 'A screenshot URL');
+		return this.setSystemAttribute(actor, systemId, 'screenshotUrl', url);
+	}
+
+	/** Sets (or, with null, removes) one attribute of a live system's META item. */
+	private async setSystemAttribute(actor: Actor, systemId: string, attr: string, value: string | null): Promise<System> {
 		try {
 			await this.table.doc.send(
 				new UpdateCommand({
 					TableName: this.table.name,
 					Key: { PK: sysPK(systemId), SK: 'META' },
-					UpdateExpression: url === null ? 'REMOVE #url' : 'SET #url = :url',
+					UpdateExpression: value === null ? 'REMOVE #attr' : 'SET #attr = :value',
 					ConditionExpression: LIVE_SYSTEM,
-					ExpressionAttributeNames: { '#url': 'url' },
-					...(url !== null && { ExpressionAttributeValues: { ':url': url } })
+					ExpressionAttributeNames: { '#attr': attr },
+					...(value !== null && { ExpressionAttributeValues: { ':value': value } })
 				})
 			);
 		} catch (err) {
@@ -1089,6 +1152,15 @@ export class Rbac {
 			throw err;
 		}
 		return this.getSystem(actor, systemId);
+	}
+
+	/**
+	 * The cards of the given systems that exist (R13), keyed by id. Anyone may
+	 * ask: the pages show the systems a person holds roles in.
+	 */
+	async systemCards(systemIds: string[]): Promise<Record<string, SystemCard>> {
+		const metas = await Promise.all([...new Set(systemIds)].map((id) => this.get({ PK: sysPK(id), SK: 'META' })));
+		return Object.fromEntries(metas.filter((m) => m && live(m)).map((m) => [m!.id as string, toSystemCard(m!)]));
 	}
 
 	/**
@@ -1475,6 +1547,38 @@ export class Rbac {
 		const voucher = toVoucher(item);
 		const events = (await queryPrefix(this.table, item.PK as string, 'REDEEMED#')).map((it) => toRedeemEvent(it, voucher));
 		return events.sort((a, b) => b.redeemedAt.getTime() - a.redeemedAt.getTime());
+	}
+
+	/**
+	 * `email`'s own redemption of a voucher (V8), for the page that follows
+	 * redeeming: the RedeemEvent and the systems its roles are in. A system
+	 * voucher's is its system; a global voucher's, every system whose catalog
+	 * has one of its roles now. 404 when the code is unknown or `email`
+	 * hasn't redeemed it.
+	 */
+	async ownRedemption(email: string, rawCode: string): Promise<OwnRedemption> {
+		const item = await this.voucherItem(rawCode);
+		const event = item && (await this.get({ PK: item.PK, SK: `REDEEMED#${email}` }));
+		if (!item || !event) throw notFound('You have not redeemed this voucher');
+		const voucher = toVoucher(item);
+		const redemption = toRedeemEvent(event, voucher);
+		const roles = redemption.roles.length ? redemption.roles : voucher.roles;
+		const rolesBySystem = new Map<string, string[]>();
+		if (redemption.systemId) {
+			rolesBySystem.set(redemption.systemId, [...roles]);
+		} else {
+			for (const role of roles) {
+				for (const it of await this.definingSystems(role)) {
+					const id = it.systemId as string;
+					rolesBySystem.set(id, [...(rolesBySystem.get(id) ?? []), role]);
+				}
+			}
+		}
+		const cards = await this.systemCards([...rolesBySystem.keys()]);
+		const systems = Object.values(cards)
+			.map((card) => ({ ...card, roles: rolesBySystem.get(card.id)!.sort() }))
+			.sort((a, b) => a.id.localeCompare(b.id));
+		return { redemption, systems };
 	}
 
 	/**
