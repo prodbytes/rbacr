@@ -44,6 +44,11 @@ answer.allowed;   // true
 answer.expiresAt; // when the grants giving the role end, e.g. the billing period; null: never
 answer.ttl;       // the same as a Duration from now: never cache the "yes" longer
 
+// Any token may read a system's status (SPEC R12): in maintenance (R11),
+// every check answers no, so show "down for maintenance" instead of "no access".
+final status = await rbacr.systemStatus('presence');
+if (status.maintenance) showMaintenance(status.name);
+
 final me = await rbacr.me();                        // the token owner's own roles
 final roles = await rbacr.rolesIn(email: user.email, systemId: 'presence');
 final grant = await rbacr.redeemVoucher('2026Q4-OTTER-FALCON-LEMUR'); // its first role
@@ -63,6 +68,8 @@ await admin.disableVoucher(voucher.code); // DELETE: disabled for good (disabled
 | `me()` | `GET /api/me` | `Me`: email, root, global roles, roles per system |
 | `check(email, systemId?, role)` | `POST /api/check` | `RoleCheck`: `allowed`, `expiresAt`, `ttl` |
 | `allows(email, systemId?, role)` | `POST /api/check` | `bool`, `false` on any error |
+| `systemStatus(systemId)` | `GET /api/systems/:id/status` | `SystemStatus`: id, name, url, `maintenance` (any token) |
+| `systems()` | `GET /api/systems` | a `SystemStatus` per system (roots; others get none) |
 | `rolesIn(email, systemId)` | `POST /api/roles` | the effective roles, sorted |
 | `allRoles(email)` | `POST /api/roles` | `AllRoles`: global roles and roles per system |
 | `redeemVoucher(code)` | `POST /api/vouchers/redeem` | the `Grant` of its first role |
@@ -82,7 +89,8 @@ The client authenticates with a personal API token (rbacr's `/me` page,
 SPEC T1-T5) and acts as its owner, so it sees what they may see (SPEC C2):
 
 - A **user's own token** may ask only about that user: `me()`, `check` and
-  `rolesIn` with their own address, and `redeemVoucher`. That is the token
+  `rolesIn` with their own address, and `redeemVoucher`; plus any system's
+  status (`systemStatus`). That is the token
   an app on a user's device can hold, kept in secure storage.
 - A **root's token** may ask about anyone. **Never ship one inside an
   app**: anyone can extract it from the binary. Keep it on your server
@@ -93,8 +101,8 @@ needs a root's token, so it belongs on your server. rbacr deletes nothing
 (SPEC L1): deleting a voucher disables it for good and records who did it
 (`disabledBy`). It stays listed for auditing, and grants already redeemed
 stay (V6). Removing its role or deleting its system disables it the same
-way (L3). The rest of root management (systems, grants) is left out of this
-client. Plain `http` URLs are refused, except for localhost during
+way (L3). The rest of root management (configuring systems, grants) is
+left out of this client; `systems()` only reads them. Plain `http` URLs are refused, except for localhost during
 development.
 
 ## Settings: `RBACR_URL` and `RBACR_TOKEN`

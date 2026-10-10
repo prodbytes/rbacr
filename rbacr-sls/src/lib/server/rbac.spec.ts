@@ -297,6 +297,22 @@ describe('maintenance mode', () => {
 		expect(await rbac.hasRole(root, ROOT, 'billing', 'editor')).toBe(true);
 	});
 
+	it('shows in the system status, which anyone may read (R12)', async () => {
+		await rbac.configureSystem(root, 'billing', { url: 'https://billing.example.com' });
+		expect(await rbac.systemStatus('billing')).toEqual({
+			id: 'billing',
+			name: 'Billing',
+			url: 'https://billing.example.com',
+			maintenance: false
+		});
+		await rbac.configureSystem(root, 'billing', { maintenance: true });
+		expect((await rbac.systemStatus('billing')).maintenance).toBe(true);
+		expect(await rbac.systemStatus('crm')).toEqual({ id: 'crm', name: 'crm', url: null, maintenance: false });
+		await expectError(rbac.systemStatus('nope'), 404);
+		await rbac.deleteSystem(root, 'crm');
+		await expectError(rbac.systemStatus('crm'), 404);
+	});
+
 	it('is set by roots only, on systems that exist (R11, P1)', async () => {
 		await expectError(rbac.setMaintenance(user, 'billing', true), 403);
 		await expectError(rbac.setMaintenance(root, 'nope', true), 404);

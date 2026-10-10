@@ -28,7 +28,8 @@ app on AWS Lambda. Run every command below from this folder
 - **Maintenance mode.** Switched on from a system's page, the API gives
   nobody any role in that system (empty lists, every check denied, roots
   included) while you fix its application. Grants are kept and count
-  again as soon as it's off.
+  again as soon as it's off. Any API token can read a system's status
+  (`GET /api/systems/:id/status`), so applications can tell.
 - **Grants have a validity**: an optional start and end (`startsAt`,
   `endsAt`). No start means immediately, no end means forever. Outside it a
   grant gives nothing, and shows as `not-started` or `expired`.
@@ -292,6 +293,16 @@ curl -H "Authorization: Bearer $RBACR_TOKEN" -H "content-type: application/json"
 Without `systemId`, `/api/roles` returns every system's roles and the
 person's global roles (root tokens only, except about yourself). A script
 acting as its owner can call `GET /api/me` for its own roles.
+
+**Check your system's status**, e.g. to show "down for maintenance"
+instead of "you don't have access". Any token may ask, not only a root's:
+
+```bash
+curl -H "Authorization: Bearer $RBACR_TOKEN" https://rbacr.nu01.com/api/systems/presence/status
+# {"id":"presence","name":"Presence","url":"https://presence.example.com","maintenance":false}
+```
+
+While `maintenance` is `true`, every role check in that system answers no.
 
 In TypeScript (server-side only; never ship the token to a browser):
 

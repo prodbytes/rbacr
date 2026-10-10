@@ -102,6 +102,26 @@ void main() {
     expect((await me.allRoles(email: user)).roles[system], ['premium']);
   });
 
+  test('shows any token a system status, maintenance included', () async {
+    final status = await me.systemStatus(system);
+    expect([status.id, status.maintenance], [system, false]);
+    expect((await root.systems()).map((s) => s.id), contains(system));
+    expect(await me.systems(), isEmpty);
+    await expectLater(
+      me.systemStatus('$system-ghost'),
+      throwsA(isA<RbacrException>().having((e) => e.isNotFound, 'isNotFound', isTrue)),
+    );
+
+    expect((await admin('PATCH', '/api/systems/$system', {'maintenance': true}, rootToken)).statusCode, 200);
+    try {
+      expect((await me.systemStatus(system)).maintenance, isTrue);
+      expect(await root.allows(email: rootEmail, systemId: system, role: 'free'), isFalse);
+    } finally {
+      await admin('PATCH', '/api/systems/$system', {'maintenance': false}, rootToken);
+    }
+    expect((await me.systemStatus(system)).maintenance, isFalse);
+  });
+
   test('keeps people out of other people roles, and reports unknown roles', () async {
     await expectLater(
       me.check(email: rootEmail, systemId: system, role: 'free'),
