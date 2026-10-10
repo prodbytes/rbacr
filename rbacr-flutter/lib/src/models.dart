@@ -148,6 +148,89 @@ class Grant {
   bool get isGlobal => systemId == null;
 }
 
+/// Whether a voucher can be redeemed now (SPEC V3).
+enum VoucherStatus {
+  active('active'),
+  disabled('disabled'),
+  notStarted('not-started'),
+  expired('expired'),
+  exhausted('exhausted');
+
+  const VoucherStatus(this.wire);
+
+  /// The value rbacr sends.
+  final String wire;
+
+  static VoucherStatus parse(String value) =>
+      values.firstWhere((s) => s.wire == value, orElse: () => throw FormatException('Unknown voucher status "$value"'));
+}
+
+/// A voucher, as the API returns it to roots (SPEC V1-V6).
+class Voucher {
+  const Voucher({
+    required this.code,
+    required this.systemId,
+    required this.role,
+    required this.discountPercent,
+    required this.startsAt,
+    required this.endsAt,
+    required this.maxUses,
+    required this.uses,
+    required this.status,
+    required this.createdBy,
+    required this.createdAt,
+    required this.disabledAt,
+    required this.disabledBy,
+  });
+
+  factory Voucher.fromJson(Map<String, Object?> json) => Voucher(
+    code: json['code'] as String,
+    systemId: json['systemId'] as String?,
+    role: json['role'] as String,
+    discountPercent: (json['discountPercent'] as num).toInt(),
+    startsAt: _date(json['startsAt']),
+    endsAt: _date(json['endsAt']),
+    maxUses: (json['maxUses'] as num?)?.toInt(),
+    uses: (json['uses'] as num).toInt(),
+    status: VoucherStatus.parse(json['status'] as String),
+    createdBy: json['createdBy'] as String,
+    createdAt: DateTime.parse(json['createdAt'] as String),
+    disabledAt: _date(json['disabledAt']),
+    disabledBy: json['disabledBy'] as String?,
+  );
+
+  /// Shown as `XXXX-XXXX-XXXX-XXXX` (V2).
+  final String code;
+
+  /// null for a global voucher: redeeming it makes a global grant.
+  final String? systemId;
+  final String role;
+
+  /// 100 grants the role on redemption; lower needs payment (V4a).
+  final int discountPercent;
+
+  /// null: redeemable immediately.
+  final DateTime? startsAt;
+
+  /// Exclusive; null: redeemable forever.
+  final DateTime? endsAt;
+
+  /// null: no limit.
+  final int? maxUses;
+  final int uses;
+  final VoucherStatus status;
+  final String createdBy;
+  final DateTime createdAt;
+
+  /// When it was disabled, for good (V6).
+  final DateTime? disabledAt;
+
+  /// Who disabled it: a root, directly or by removing its role or system (L3).
+  final String? disabledBy;
+
+  bool get isGlobal => systemId == null;
+}
+
 /// The terms of a voucher that needs payment (SPEC V4a), sent with a 402.
 class Payment {
   const Payment({required this.code, required this.systemId, required this.role, required this.discountPercent});

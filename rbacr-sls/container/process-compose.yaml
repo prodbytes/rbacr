@@ -1,0 +1,37 @@
+# rbacr for local app development (README "Local rbacr for your app"), as a
+# process-compose process. Copy the process into your app's
+# process-compose.yaml, and make your app's processes depend on it:
+#
+#   depends_on:
+#     rbacr:
+#       condition: process_healthy
+#
+# process-compose reads the .env next to it, the same file your app's rbacr
+# client reads: RBACR_TOKEN (the API token; generated and logged when unset)
+# and RBACR_PORT.
+version: "0.5"
+
+processes:
+  rbacr:
+    command: >-
+      docker run --rm --name rbacr-local
+      -p "127.0.0.1:${RBACR_PORT:-8686}:8686"
+      -e "RBACR_TOKEN=${RBACR_TOKEN:-}"
+      -e "RBACR_BOOTSTRAP_EMAIL=${RBACR_BOOTSTRAP_EMAIL:-dev@rbacr.local}"
+      -e "RBACR_ROOT_LIST=${RBACR_ROOT_LIST:-dev@rbacr.local}"
+      -v rbacr-data:/data
+      prodbytes/rbacr-local:latest
+    shutdown:
+      command: docker stop rbacr-local
+      timeout_seconds: 30
+    readiness_probe:
+      http_get:
+        host: 127.0.0.1
+        port: ${RBACR_PORT:-8686}
+        path: /health
+      initial_delay_seconds: 2
+      period_seconds: 2
+      failure_threshold: 30
+    availability:
+      restart: on_failure
+      backoff_seconds: 5

@@ -1,0 +1,25 @@
+# rbacr for local app development (README "Local rbacr for your app"). Copy
+# it into your app's project, or merge the service into your compose file:
+#
+#   docker compose up -d rbacr
+#
+# Reads the .env next to it, the same file your app's rbacr client reads:
+# RBACR_TOKEN (the API token; generated and logged when unset) and RBACR_PORT.
+name: rbacr-local
+
+services:
+  rbacr:
+    image: prodbytes/rbacr-local:latest
+    ports:
+      - "127.0.0.1:${RBACR_PORT:-8686}:8686"
+    environment:
+      RBACR_TOKEN: ${RBACR_TOKEN:-}
+      RBACR_BOOTSTRAP_EMAIL: ${RBACR_BOOTSTRAP_EMAIL:-dev@rbacr.local}
+      RBACR_ROOT_LIST: ${RBACR_ROOT_LIST:-dev@rbacr.local}
+    volumes:
+      - rbacr-data:/data
+
+volumes:
+  # Named as-is (no project prefix), so `docker run` and process-compose share it.
+  rbacr-data:
+    name: rbacr-data

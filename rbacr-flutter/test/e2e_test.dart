@@ -49,7 +49,7 @@ void main() {
   late RbacrClient root;
   late RbacrClient me;
 
-  /// Root-only setup through the raw API, which this client deliberately leaves out.
+  /// Root-only setup (systems, grants) through the raw API, which this client leaves out.
   Future<http.Response> admin(String method, String path, Object body, String token) async {
     final request = http.Request(method, Uri.parse('$base$path'))
       ..headers.addAll({'authorization': 'Bearer $token', 'content-type': 'application/json'})
@@ -118,19 +118,62 @@ void main() {
     );
   });
 
-  test('redeems vouchers, and reports those that need payment', () async {
-    final free = await admin('POST', '/api/systems/$system/vouchers', {'role': 'free'}, rootToken);
-    final code = (jsonDecode(free.body) as Map<String, Object?>)['code'] as String;
-    final grant = await me.redeemVoucher(code.toLowerCase().replaceAll('-', ' '));
-    expect([grant.systemId, grant.role, grant.status, grant.endsAt], [system, 'free', GrantStatus.active, null]);
+  test('manages vouchers: create, list, redeem, disable', () async {
+    final ends = DateTime.now().toUtc().add(const Duration(days: 7));
+    final free = await root.createVoucher(systemId: system, role: 'free', endsAt: ends, maxUses: 2);
+    expect(
+      [free.systemId, free.role, free.discountPercent, free.maxUses, free.uses, free.status],
+      [system, 'free', 100, 2, 0, VoucherStatus.active],
+    );
+    expect(free.endsAt!.millisecondsSinceEpoch, ends.millisecondsSinceEpoch);
+    expect(free.createdBy, rootEmail);
 
-    final paid = await admin('POST', '/api/systems/$system/vouchers', {
-      'role': 'premium',
-      'discountPercent': 25,
-    }, rootToken);
-    final paidCode = (jsonDecode(paid.body) as Map<String, Object?>)['code'] as String;
+    final grant = await me.redeemVoucher(free.code.toLowerCase().replaceAll('-', ' '));
+    expect(
+      [grant.systemId, grant.role, grant.status, grant.endsAt, grant.voucherCode],
+      [system, 'free', GrantStatus.active, null, free.code],
+    );
     await expectLater(
-      me.redeemVoucher(paidCode),
+      me.redeemVoucher(free.code),
+      throwsA(isA<RbacrException>().having((e) => e.isConflict, 'isConflict', isTrue)),
+    );
+
+    final listed = (await root.listVouchers(systemId: system)).singleWhere((v) => v.code == free.code);
+    expect(listed.uses, 1);
+
+    final disabled = await root.disableVoucher(free.code);
+    expect([disabled.status, disabled.disabledAt == null], [VoucherStatus.disabled, false]);
+    expect(disabled.disabledBy, rootEmail);
+    expect(
+      (await root.listVouchers(systemId: system)).singleWhere((v) => v.code == free.code).status,
+      VoucherStatus.disabled,
+    );
+    expect((await me.me()).hasRole(system, 'free'), isTrue, reason: 'redeemed grants outlive the voucher');
+
+    await expectLater(
+      me.createVoucher(systemId: system, role: 'free'),
+      throwsA(isA<RbacrException>().having((e) => e.isForbidden, 'isForbidden', isTrue)),
+    );
+    await expectLater(
+      root.disableVoucher('ZZZZ-ZZZZ-ZZZZ-ZZZZ'),
+      throwsA(isA<RbacrException>().having((e) => e.isNotFound, 'isNotFound', isTrue)),
+    );
+  });
+
+  test('manages global vouchers', () async {
+    final global = await root.createVoucher(role: 'dart-e2e-global', maxUses: 1);
+    expect(global.isGlobal, isTrue);
+    try {
+      expect((await root.listVouchers()).map((v) => v.code), contains(global.code));
+    } finally {
+      await root.disableVoucher(global.code);
+    }
+  });
+
+  test('reports vouchers that need payment', () async {
+    final paid = await root.createVoucher(systemId: system, role: 'premium', discountPercent: 25);
+    await expectLater(
+      me.redeemVoucher(paid.code),
       throwsA(isA<RbacrPaymentRequired>().having((e) => e.payment.discountPercent, 'discountPercent', 25)),
     );
   });

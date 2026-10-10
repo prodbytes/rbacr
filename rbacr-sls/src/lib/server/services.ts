@@ -1,4 +1,6 @@
 import {
+	RBACR_BOOTSTRAP_EMAIL,
+	RBACR_BOOTSTRAP_TOKEN,
 	RBACR_DYNAMODB_ENDPOINT,
 	RBACR_DYNAMODB_SESSIONS_TABLE,
 	RBACR_DYNAMODB_TABLE,
@@ -11,7 +13,7 @@ import {
 	RBACR_STRIPE_WEBHOOK_SECRET
 } from '$app/env/private';
 import { createTable, ensureTable, type Table } from './dynamo';
-import { Allowlist } from './identity';
+import { Allowlist, normalizeEmail } from './identity';
 import { Rbac } from './rbac';
 import { Sessions } from './session';
 import { ApiTokens } from './tokens';
@@ -33,17 +35,27 @@ export function getServices(): Promise<Services> {
 		const sessionsTable = createTable(RBACR_DYNAMODB_SESSIONS_TABLE ?? `${RBACR_DYNAMODB_TABLE}-sessions`, RBACR_DYNAMODB_ENDPOINT);
 		// Locally (DynamoDB Local) the app creates its tables; in AWS infra/tables.yaml does.
 		if (RBACR_DYNAMODB_ENDPOINT) await Promise.all([ensureTable(table), ensureTable(sessionsTable, 'sessions')]);
+		const tokens = new ApiTokens(table);
+		if (RBACR_BOOTSTRAP_TOKEN) await bootstrapToken(tokens, RBACR_BOOTSTRAP_TOKEN);
 		return {
 			table,
 			rbac: new Rbac(table, Allowlist.parse(RBACR_ROOT_LIST)),
 			sessions: new Sessions(sessionsTable, RBACR_SESSION_RETENTION_DAYS),
-			tokens: new ApiTokens(table)
+			tokens
 		};
 	})().catch((err) => {
 		services = undefined; // retry on the next request instead of caching the failure
 		throw err;
 	});
 	return services;
+}
+
+/** T7: a fixed token for local development, never in AWS (no DynamoDB endpoint override there). */
+async function bootstrapToken(tokens: ApiTokens, token: string): Promise<void> {
+	if (!RBACR_DYNAMODB_ENDPOINT) throw new Error('RBACR_BOOTSTRAP_TOKEN is only allowed with RBACR_DYNAMODB_ENDPOINT (DynamoDB Local)');
+	const email = normalizeEmail(RBACR_BOOTSTRAP_EMAIL ?? '');
+	if (!email) throw new Error('RBACR_BOOTSTRAP_TOKEN needs RBACR_BOOTSTRAP_EMAIL, a valid e-mail address');
+	await tokens.bootstrap(email, token);
 }
 
 export function googleCredentials(): { clientId: string; clientSecret: string } | null {

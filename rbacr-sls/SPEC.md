@@ -314,6 +314,17 @@ Stripe Connect. That account sends webhooks, so rbacr syncs from Stripe:
   included. Anything else gives 403. An unknown system, or a role missing
   from its catalog, gives 404. Without a `systemId`, `/api/check` asks about
   a global role (such as `root`).
+- **T7** Local development only: with `RBACR_BOOTSTRAP_TOKEN` and
+  `RBACR_BOOTSTRAP_EMAIL` set, the app makes that token a live token of that
+  address, named `bootstrap`, never expiring, the first time it reaches
+  DynamoDB. It is chosen by the operator instead of generated (T2), so it
+  must be `rbacr_` followed by at least 32 base64url characters, or the app
+  doesn't start. It is idempotent: a token already stored, revoked included,
+  is left as it is. It is refused unless `RBACR_DYNAMODB_ENDPOINT` is set
+  (DynamoDB Local), so it can't exist in AWS. The dev server image
+  (`prodbytes/rbacr-local`, README "Local rbacr for your app") uses it so
+  apps call `/api` without signing in, taking `RBACR_TOKEN` (C7) when
+  `RBACR_BOOTSTRAP_TOKEN` is unset, and else generating one.
 
 ## Client integration
 
@@ -350,6 +361,11 @@ How applications use rbacr. The README has a walkthrough with examples.
   at once (T3). Clients that cache answers should cache them briefly (a "yes"
   never beyond its `ttl`, C3a) and never cache errors, and should deny
   access when rbacr can't answer.
+- **C7** rbacr's client libraries take their base URL from `RBACR_URL`
+  (default `https://rbacr.nu01.com`) and their token from `RBACR_TOKEN`
+  when the caller passes none. The local dev server (T7) takes the same
+  `RBACR_TOKEN` as its bootstrap token, so one `.env` configures both. A
+  client accepts plain `http` only for localhost.
 
 ## HTTP interface
 
@@ -400,7 +416,8 @@ addresses stay out of URLs and access logs.
   configured, else `missing`.
 - **HC2** The status is 200 when every required check is `ok`, else 503.
   `google` is required, except under `vite dev`, which has the dev login
-  (S4). DynamoDB is deliberately not checked: it is a managed regional
+  (S4), and on DynamoDB Local (`RBACR_DYNAMODB_ENDPOINT`), where apps use a
+  bootstrap token (T7). DynamoDB is deliberately not checked: it is a managed regional
   service, and probing it on every poll would only add cost. The deploy
   smoke test exercises it instead (an unknown API token gets 401, not
   500).
@@ -442,7 +459,12 @@ to `/`. The pages need JavaScript.
   the Lambda function URL directly is refused.
 - **H2** In production builds, form submissions (`POST`/`PUT`/`PATCH`/`DELETE`
   with a form or plain-text body, or with no content type) whose `Origin` is
-  not the app's own get 403 (SvelteKit's CSRF check).
+  missing or not the app's own (the request's origin or
+  `RBACR_PUBLIC_ORIGIN`) get 403, except under `/api`, which takes bearer
+  tokens only (A1) and so can't be forged from a browser: API clients send
+  no `Origin`, and a body-less `DELETE` must reach the token check. rbacr
+  applies this itself (src/lib/server/csrf.ts); SvelteKit's own check, which
+  can't exempt a path, is off.
 
 ## Configuration
 
@@ -454,6 +476,7 @@ All settings come from environment variables prefixed `RBACR_`:
 | `RBACR_DYNAMODB_SESSIONS_TABLE` | no | The sessions table (S3); default `<RBACR_DYNAMODB_TABLE>-sessions` |
 | `RBACR_SESSION_RETENTION_DAYS` | no | Whole days (1 or more) a session record is kept after it expires, then purged by TTL (S3); default 365. An invalid value stops the app from starting. In AWS it is the app stack's `SessionRetentionDays` parameter. |
 | `RBACR_DYNAMODB_ENDPOINT` | no | DynamoDB Local's URL for development (e.g. `http://127.0.0.1:8642`); the app creates its table there. Unset in AWS. |
+| `RBACR_BOOTSTRAP_TOKEN`, `RBACR_BOOTSTRAP_EMAIL` | no | A fixed API token and its owner, for local development only (T7). An invalid token stops the app from starting. |
 | `RBACR_ROOT_LIST` | no (no roots if empty; in AWS the default is `@nu01.com`) | Root addresses and domains (R1, R1a) |
 | `RBACR_GOOGLE_CLIENT_ID`, `RBACR_GOOGLE_CLIENT_SECRET` | for Google sign-in | OAuth web client. Without them `/login/google` returns 503. |
 | `RBACR_PUBLIC_ORIGIN` | no | Origin for the Google redirect URI (`<origin>/login/google/callback`); default: the request's origin |
@@ -474,6 +497,9 @@ All settings come from environment variables prefixed `RBACR_`:
   on DynamoDB Local in development ([compose.yaml](compose.yaml)) and in the
   unit tests. The item layout is documented in
   [src/lib/server/rbac.ts](src/lib/server/rbac.ts); it needs no migrations.
+- Locally, the [Containerfile](Containerfile) runs the same adapter-node
+  build (not `vite dev`) on DynamoDB Local in one container, with a
+  bootstrap token (T7), so apps develop against the production code paths.
 - **D1** Writes that must not race are single DynamoDB transactions with
   conditions: a grant, voucher or implication checks that its role still
   exists; redeeming counts the use (within `maxUses`), records the

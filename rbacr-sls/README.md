@@ -83,6 +83,7 @@ Devbox scripts: `devbox run dev | test | check | build | certs | release-rc | re
 | `RBACR_DYNAMODB_SESSIONS_TABLE` | no | The table holding sign-in sessions (default `<RBACR_DYNAMODB_TABLE>-sessions`; in AWS `rbacr-sessions`, `rbacr-rc-sessions`) |
 | `RBACR_SESSION_RETENTION_DAYS` | no | Days a session record is kept after it expires before DynamoDB's TTL purges it (default 365). In AWS, set it for `scripts/deploy.sh` (the stack's `SessionRetentionDays`). |
 | `RBACR_DYNAMODB_ENDPOINT` | no | DynamoDB Local's URL in development (process-compose sets `http://127.0.0.1:8642`); the app creates the tables there |
+| `RBACR_BOOTSTRAP_TOKEN` / `RBACR_BOOTSTRAP_EMAIL` | no | Local only (needs `RBACR_DYNAMODB_ENDPOINT`): a fixed API token (`rbacr_` + 32 or more base64url characters) made live for that address, see [Local rbacr for your app](#local-rbacr-for-your-app) |
 | `RBACR_ROOT_LIST` | no | Comma-separated root addresses and/or domains, e.g. `ana@example.com, @example.org`: the only way to be a root. An invalid entry stops the app from starting. In AWS it defaults to `@nu01.com`. |
 | `RBACR_GOOGLE_CLIENT_ID` / `RBACR_GOOGLE_CLIENT_SECRET` | for sign-in | Google OAuth web client |
 | `RBACR_PUBLIC_ORIGIN` | no | The origin users browse, used for the Google redirect URI (default: the request's origin) |
@@ -90,6 +91,131 @@ Devbox scripts: `devbox run dev | test | check | build | certs | release-rc | re
 | `RBACR_VERSION` | no | The release version, reported by `/health` (default `dev`) |
 | `RBACR_DEV_LOGIN` | no | `1` enables `/login/dev` under `vite dev` |
 | `RBACR_STRIPE_WEBHOOK_SECRET` / `RBACR_STRIPE_API_KEY` | for the Substack sync | Stripe webhook signing secret (`whsec_…`) and restricted key (`rk_…`), see [Substack integration](#substack-integration) |
+
+## Local rbacr for your app
+
+To develop an application against rbacr without touching the production
+service, run the **rbacr dev server**: the image
+[`prodbytes/rbacr-local`](https://hub.docker.com/r/prodbytes/rbacr-local)
+(linux/amd64 and linux/arm64). It runs the production server (the same
+build Lambda runs, not `vite dev`) on DynamoDB Local, in one container with
+no shell, as a non-root user. It serves the same `/api` as production on
+**http://localhost:8686**, so clients only change their URL and token. It
+is for development only and is never deployed.
+
+### 1. One `.env` for rbacr and your app
+
+Put the two client settings in your app project's `.env`. The dev server
+reads the same file, so the token your app sends is the token rbacr
+accepts:
+
+```bash
+# .env in your app's project (comments on their own lines: docker --env-file keeps inline ones)
+RBACR_URL=http://localhost:8686
+# generate one: node -e "console.log('rbacr_'+require('crypto').randomBytes(32).toString('base64url'))"
+RBACR_TOKEN=rbacr_…
+```
+
+Without `RBACR_TOKEN`, the dev server generates a token on first start,
+keeps it in its volume and prints it on every start
+(`rbacr: API token of dev@rbacr.local: rbacr_…`). Copy it into `.env`.
+
+### 2. Start the dev server
+
+Pick one. Data and the token live in the `rbacr-data` volume, which all
+three share, and survive restarts. The port is published on 127.0.0.1 only.
+
+**docker run** (or `podman run`):
+
+```bash
+docker run -d --name rbacr-local -p 127.0.0.1:8686:8686 \
+  --env-file .env -v rbacr-data:/data prodbytes/rbacr-local
+docker logs rbacr-local
+```
+
+**Docker Compose**: copy [container/compose.yaml](container/compose.yaml)
+next to your `.env`, or merge its `rbacr` service and `rbacr-data` volume
+into your compose file. Compose reads `.env` itself. The service reports
+healthy once rbacr answers.
+
+```bash
+docker compose up -d rbacr
+```
+
+**process-compose** (and `devbox services up`): copy the `rbacr` process
+from [container/process-compose.yaml](container/process-compose.yaml) into
+your `process-compose.yaml`, and make your app wait for it:
+
+```yaml
+processes:
+  my-app:
+    depends_on:
+      rbacr:
+        condition: process_healthy
+```
+
+### 3. Set up your system
+
+Signing in to the UI needs Google credentials, so set up with the root
+token over `/api` instead (any call from
+[Using rbacr from your application](#using-rbacr-from-your-application)
+works):
+
+```bash
+set -a; . ./.env; set +a
+curl -X POST "$RBACR_URL/api/systems" -H "authorization: Bearer $RBACR_TOKEN" \
+  -H 'content-type: application/json' -d '{"id":"presence","roles":["free","premium"]}'
+curl -X POST "$RBACR_URL/api/systems/presence/grants" -H "authorization: Bearer $RBACR_TOKEN" \
+  -H 'content-type: application/json' -d '{"role":"premium","grantee":"ana@example.com"}'
+```
+
+### 4. Point your clients at it
+
+rbacr's client libraries read `RBACR_URL` and `RBACR_TOKEN` by default,
+falling back to production when `RBACR_URL` is unset. With
+[rbacr-flutter](../rbacr-flutter/README.md#against-a-local-rbacr),
+`RbacrClient()` with no arguments uses them: from `--dart-define-from-file=.env`
+in Flutter apps, or from the environment in Dart servers and tests.
+
+### Variables
+
+Client settings (your app, the compose files and the curl calls above):
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `RBACR_URL` | `https://rbacr.nu01.com` | rbacr's base URL; `http://localhost:8686` for the dev server. Plain `http` is accepted only for localhost. |
+| `RBACR_TOKEN` | — | The API token clients send. The dev server makes it a live root token for `RBACR_BOOTSTRAP_EMAIL` (SPEC T7). |
+| `RBACR_PORT` | `8686` | Host port the compose files publish rbacr on (change `RBACR_URL` to match) |
+
+Dev server settings (pass with `-e`, `--env-file` or the compose files):
+
+| Variable | Default in the image | Purpose |
+|----------|----------------------|---------|
+| `RBACR_TOKEN` / `RBACR_BOOTSTRAP_TOKEN` | generated, kept in `/data` | The bootstrap token (`rbacr_` + 32 or more base64url characters). `RBACR_BOOTSTRAP_TOKEN` wins when both are set. An invalid one stops the server. |
+| `RBACR_BOOTSTRAP_EMAIL` | `dev@rbacr.local` | Owner of the bootstrap token |
+| `RBACR_ROOT_LIST` | `dev@rbacr.local` | Roots (addresses and/or domains). Keep the token's owner in it for a root token. |
+| `PORT` | `8686` | Port inside the container |
+| `RBACR_DYNAMODB_TABLE` | `rbacr` | Table name in DynamoDB Local (the sessions table is `<name>-sessions`) |
+| `RBACR_VERSION` | `local` | Version reported by `/health` |
+| `RBACR_GOOGLE_CLIENT_ID` / `RBACR_GOOGLE_CLIENT_SECRET`, `RBACR_PUBLIC_ORIGIN`, `RBACR_SESSION_RETENTION_DAYS`, `RBACR_STRIPE_*` | unset | As in [Configuration](#configuration), for the UI's sign-in or the Substack sync |
+
+`RBACR_DYNAMODB_ENDPOINT` is set by the container (its own DynamoDB Local
+on port 8000, not published). `RBACR_DEV_LOGIN` has no effect: it is a
+production build.
+
+### Build or publish the image
+
+```bash
+docker build -t prodbytes/rbacr-local -f Containerfile .   # from rbacr-sls/
+scripts/push-local-image.sh                                 # amd64 + arm64 to Docker Hub as :latest and :X.Y.Z; needs docker login
+```
+
+The [Containerfile](Containerfile) builds the app with `npm ci` and
+`npm run build`, then copies only the build, the runtime dependencies,
+DynamoDB Local and a Java runtime trimmed with `jlink` onto
+`gcr.io/distroless/nodejs24-debian12:nonroot`.
+[container/start.mjs](container/start.mjs) starts DynamoDB Local, sets up
+the bootstrap token, then starts the server.
 
 ## Using rbacr from your application
 
@@ -333,9 +459,10 @@ src/routes/vpi/**               VPI (session, frontend only)
 src/routes/webhooks/stripe/     Stripe webhook (signature, not token or session)
 src/routes/{me,systems,global}/**  UI pages (load and change data through /vpi)
 lambda.js                       Lambda entrypoint (serverless-http + adapter-node)
+Containerfile, container/       the dev server image for app development (adapter-node on DynamoDB Local), its compose files
 infra/                          CloudFormation: zone, deploy roles, artifacts, app
 floci/                          local CloudFront (HTTPS) on Floci
-scripts/                        release, deploy, packaging, local certs, health check
+scripts/                        release, deploy, packaging, dev server image, local certs, health check
 ../.github/workflows/           Release, Deploy RC, Deploy (at the repository root)
 tests/                          Lambda smoke test and end-to-end suite
 ```

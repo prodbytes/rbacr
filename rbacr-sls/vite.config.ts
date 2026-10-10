@@ -58,6 +58,9 @@ export default defineConfig({
 					filename.split(/[/\\]/).includes('node_modules') ? undefined : true
 			},
 			adapter: adapter(),
+			// SvelteKit's CSRF check is off ('*') because it also refused /api
+			// clients; hooks.server.ts applies it to everything else (SPEC H2).
+			csrf: { trustedOrigins: ['*'] },
 			outDir
 		})
 	],

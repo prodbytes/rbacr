@@ -14,6 +14,8 @@ export const TOKEN_PREFIX = 'rbacr_';
 const NAME_MAX = 100;
 const MAX_ACTIVE_TOKENS = 25;
 const MAX_DAYS = 3650;
+/** A bootstrap token (T7): the prefix and at least 32 base64url characters. */
+export const BOOTSTRAP_TOKEN_RE = /^rbacr_[A-Za-z0-9_-]{32,}$/;
 
 export interface ApiToken {
 	id: string;
@@ -89,6 +91,38 @@ export class ApiTokens {
 			new PutCommand({ TableName: this.table.name, Item: item, ConditionExpression: 'attribute_not_exists(PK)' })
 		);
 		return { token, apiToken: toToken(item) };
+	}
+
+	/**
+	 * Makes `token`, chosen by the operator, a live token of `email` that never
+	 * expires (T7). Idempotent: a token already stored, even revoked, is left as
+	 * it is. Only for DynamoDB Local (services.ts), so apps developed against a
+	 * local rbacr can use a fixed token without signing in.
+	 */
+	async bootstrap(email: string, token: string): Promise<void> {
+		if (!BOOTSTRAP_TOKEN_RE.test(token)) throw new Error('The bootstrap token must be rbacr_ followed by at least 32 base64url characters');
+		const now = this.now();
+		const id = crypto.randomUUID();
+		try {
+			await this.table.doc.send(
+				new PutCommand({
+					TableName: this.table.name,
+					Item: {
+						...tokenKey(await hashToken(token)),
+						GSI1PK: `TOKENS#${email}`,
+						GSI1SK: `${now.toISOString()}#${id}`,
+						id,
+						prefix: token.slice(0, 12),
+						name: 'bootstrap',
+						email,
+						createdAt: now.toISOString()
+					},
+					ConditionExpression: 'attribute_not_exists(PK)'
+				})
+			);
+		} catch (err) {
+			if ((err as Error).name !== 'ConditionalCheckFailedException') throw err;
+		}
 	}
 
 	/** The person's tokens, newest first; revoked and expired ones stay listed. */
