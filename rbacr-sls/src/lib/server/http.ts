@@ -1,5 +1,5 @@
 import { json, type RequestEvent } from '@sveltejs/kit';
-import { RbacError, type Actor, type GrantWithImplied, type Validity, type Voucher, type VoucherInput } from './rbac';
+import { RbacError, type Actor, type GrantWithImplied, type RedeemEvent, type Validity, type Voucher, type VoucherInput } from './rbac';
 import { getServices, type Services } from './services';
 import type { ApiToken } from './tokens';
 
@@ -148,6 +148,21 @@ export const voucherJson = (v: Voucher, status: string) => ({
 	endsAt: v.endsAt?.toISOString() ?? null,
 	createdAt: v.createdAt.toISOString(),
 	disabledAt: v.disabledAt?.toISOString() ?? null
+});
+
+/** A RedeemEvent (V7) with ISO dates. */
+export const redeemEventJson = (e: RedeemEvent) => ({
+	...e,
+	redeemedAt: e.redeemedAt.toISOString(),
+	grants: e.grants.map((g) => ({
+		...g,
+		replaced: g.replaced && {
+			...g.replaced,
+			grantedAt: g.replaced.grantedAt.toISOString(),
+			startsAt: g.replaced.startsAt?.toISOString() ?? null,
+			endsAt: g.replaced.endsAt?.toISOString() ?? null
+		}
+	}))
 });
 
 export const tokenJson = (t: ApiToken) => ({

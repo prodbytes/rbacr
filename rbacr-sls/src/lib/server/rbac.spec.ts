@@ -240,6 +240,68 @@ describe('role implications are registered data', () => {
 	});
 });
 
+describe('redeem events', () => {
+	it('record every redemption with all its details (V7)', async () => {
+		await rbac.createVoucher(root, { systemId: 'billing', roles: ['viewer', 'editor'], code: 'EVENT-TEST' });
+		// editor already held forever: kept; viewer held until a date: replaced.
+		await rbac.grant(root, 'billing', 'editor', USER);
+		await rbac.grant(root, 'billing', 'viewer', USER, { endsAt: new Date('2026-06-01T00:00:00Z') });
+		await rbac.redeemVoucher(USER, 'event test', 'page');
+		await rbac.redeemVoucher(OTHER, 'EVENT-TEST');
+
+		const [other, mine] = await rbac.listRedemptions(root, 'event-test');
+		expect(mine).toMatchObject({
+			code: 'EVENT-TEST',
+			systemId: 'billing',
+			roles: ['editor', 'viewer'],
+			discountPercent: 100,
+			voucherCreatedBy: ROOT,
+			email: USER,
+			redeemedAt: clock,
+			via: 'page'
+		});
+		expect(mine.id).toMatch(/^[0-9a-f-]{36}$/);
+		expect(mine.grants).toEqual([
+			{ systemId: 'billing', role: 'editor', outcome: 'kept', replaced: null },
+			{
+				systemId: 'billing',
+				role: 'viewer',
+				outcome: 'replaced',
+				replaced: { grantedBy: ROOT, grantedAt: clock, startsAt: null, endsAt: new Date('2026-06-01T00:00:00Z'), voucherCode: null }
+			}
+		]);
+		expect(other.via).toBe('api');
+		expect(other.grants.map((g) => g.outcome)).toEqual(['granted', 'granted']);
+	});
+
+	it('are roots-only, 404 for unknown vouchers, and read old records too (V7)', async () => {
+		const v = await rbac.createVoucher(root, { systemId: null, roles: ['viewer'] });
+		await expectError(rbac.listRedemptions(user, v.code), 403);
+		await expectError(rbac.listRedemptions(root, 'NO-SUCH-CODE'), 404);
+		// A redemption recorded before V7: who and when only.
+		await table.doc.send(
+			new PutCommand({
+				TableName: table.name,
+				Item: { PK: `VOUCHER#${v.code.replaceAll('-', '')}`, SK: 'REDEEMED#old@x.com', email: 'old@x.com', redeemedAt: '2025-01-01T00:00:00.000Z' }
+			})
+		);
+		expect(await rbac.listRedemptions(root, v.code)).toEqual([
+			{
+				id: null,
+				code: v.code,
+				systemId: null,
+				roles: [],
+				discountPercent: null,
+				voucherCreatedBy: null,
+				email: 'old@x.com',
+				redeemedAt: new Date('2025-01-01T00:00:00Z'),
+				via: null,
+				grants: []
+			}
+		]);
+	});
+});
+
 describe('roles for everyone', () => {
 	it('are held by every identity, with what they imply, until turned off (R9)', async () => {
 		await rbac.setImplications(root, 'billing', 'editor', ['viewer']);

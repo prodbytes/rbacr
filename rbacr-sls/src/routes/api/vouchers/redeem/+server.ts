@@ -5,6 +5,6 @@ import type { RequestHandler } from './$types';
 export const POST: RequestHandler = (event) =>
 	api(event, async ({ rbac, actor }) => {
 		const body = await readJson(event.request);
-		const grants = (await rbac.redeemVoucher(actor.email, str(body.code, 'code'))).map(grantJson);
+		const grants = (await rbac.redeemVoucher(actor.email, str(body.code, 'code'), 'api')).map(grantJson);
 		return { ...grants[0], grants };
 	});

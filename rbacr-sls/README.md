@@ -47,7 +47,9 @@ app on AWS Lambda. Run every command below from this folder
   voucher has a **discount**: a 100% voucher grants its roles immediately,
   while a lower discount will require payment (not built yet; it answers 402
   Payment Required). The start date, end date and usage count are all
-  optional.
+  optional. Every redemption is kept as a **RedeemEvent** (who, when, from
+  the API or the page, and what it did to each role); open a voucher's
+  uses on its page to see them, or `GET /api/vouchers/:code/redemptions`.
 - **Everyone** can sign in, see their own roles at `/me` and redeem vouchers.
   `/settings` shows the running version and the API's address; roots also
   see the root allow list there.

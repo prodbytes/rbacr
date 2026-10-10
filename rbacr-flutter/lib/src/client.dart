@@ -179,6 +179,15 @@ class RbacrClient {
   Future<Voucher> disableVoucher(String code) async =>
       Voucher.fromJson(await _send('DELETE', '/api/vouchers/${Uri.encodeComponent(code)}'));
 
+  /// A voucher's redemptions, each with all its details (V7), newest first;
+  /// roots only.
+  Future<List<RedeemEvent>> listRedemptions(String code) async {
+    final json = await _send('GET', '/api/vouchers/${Uri.encodeComponent(code)}/redemptions');
+    return List.unmodifiable(
+      (json['redemptions'] as List<Object?>).map((e) => RedeemEvent.fromJson(e as Map<String, Object?>)),
+    );
+  }
+
   static String _vouchersPath(String? systemId) =>
       systemId == null ? '/api/vouchers' : '/api/systems/${Uri.encodeComponent(systemId)}/vouchers';
 

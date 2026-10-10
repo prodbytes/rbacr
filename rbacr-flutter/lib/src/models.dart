@@ -290,6 +290,75 @@ class Payment {
   final int discountPercent;
 }
 
+/// What redeeming a voucher did to one of its roles (SPEC V7).
+class RedeemedGrant {
+  const RedeemedGrant({required this.systemId, required this.role, required this.outcome, required this.replaced});
+
+  factory RedeemedGrant.fromJson(Map<String, Object?> json) => RedeemedGrant(
+    systemId: json['systemId'] as String?,
+    role: json['role'] as String,
+    outcome: json['outcome'] as String,
+    replaced: json['replaced'] as Map<String, Object?>?,
+  );
+
+  final String? systemId;
+  final String role;
+
+  /// `granted` (no live grant before), `kept` (one already gave the role now
+  /// and forever) or `replaced` (the earlier grant, in [replaced], gave way).
+  final String outcome;
+
+  /// The replaced grant as it was: grantedBy, grantedAt, startsAt, endsAt, voucherCode.
+  final Map<String, Object?>? replaced;
+}
+
+/// A voucher redemption with all its details (SPEC V7). Redemptions recorded
+/// before V7 have only [email] and [redeemedAt]; the rest is null or empty.
+class RedeemEvent {
+  const RedeemEvent({
+    required this.id,
+    required this.code,
+    required this.systemId,
+    required this.roles,
+    required this.discountPercent,
+    required this.voucherCreatedBy,
+    required this.email,
+    required this.redeemedAt,
+    required this.via,
+    required this.grants,
+  });
+
+  factory RedeemEvent.fromJson(Map<String, Object?> json) => RedeemEvent(
+    id: json['id'] as String?,
+    code: json['code'] as String,
+    systemId: json['systemId'] as String?,
+    roles: _strings(json['roles']),
+    discountPercent: (json['discountPercent'] as num?)?.toInt(),
+    voucherCreatedBy: json['voucherCreatedBy'] as String?,
+    email: json['email'] as String,
+    redeemedAt: DateTime.parse(json['redeemedAt'] as String),
+    via: json['via'] as String?,
+    grants: List.unmodifiable(
+      (json['grants'] as List<Object?>).map((g) => RedeemedGrant.fromJson(g as Map<String, Object?>)),
+    ),
+  );
+
+  final String? id;
+  final String code;
+  final String? systemId;
+  final List<String> roles;
+  final int? discountPercent;
+  final String? voucherCreatedBy;
+
+  /// Who redeemed it.
+  final String email;
+  final DateTime redeemedAt;
+
+  /// `api` or `page`: through the external API or rbacr's own pages.
+  final String? via;
+  final List<RedeemedGrant> grants;
+}
+
 /// A voucher's `roles`, or its single `role` from servers that predate several.
 List<String> _rolesOf(Map<String, Object?> json) =>
     json['roles'] == null ? List.unmodifiable([json['role'] as String]) : _strings(json['roles']);

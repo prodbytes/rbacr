@@ -205,6 +205,19 @@ and the README in sync with the code.
   an inactive voucher fails with 409 and the reason. An unknown code gives 404.
 - **V6** Disabling is permanent and records who did it (`disabledBy`, L1).
   Disabled vouchers stay listed for auditing, with their redemptions.
+- **V7 RedeemEvents.** Every redemption is kept, for good, as a
+  RedeemEvent written in the same transaction as its grants, so it records
+  exactly what happened: an `id`; the voucher's `code`, `systemId`
+  (`null` for global), `roles`, `discountPercent` and `voucherCreatedBy` at
+  the time; who redeemed it (`email`), when (`redeemedAt`) and how (`via`:
+  `api` or `page`); and for each role (`grants`) the `outcome`: `granted`
+  (no live grant before), `kept` (one already gave the role now and
+  forever, G3) or `replaced`, with the replaced grant as it was
+  (`grantedBy`, `grantedAt`, `startsAt`, `endsAt`, `voucherCode`). Roots
+  list a voucher's events, newest first, with `GET
+  /api/vouchers/:code/redemptions`, and on the pages by opening a voucher's
+  uses. Redemptions recorded before V7 report only `email` and
+  `redeemedAt`. Attempts that fail (402, 404, 409) record nothing.
 
 ## Logical deletion
 
@@ -224,7 +237,7 @@ Nothing in rbacr is physically deleted, so every change can be audited.
   | Sign out | the session | `revokedAt`, `revokedBy` |
 
   `…By` is the acting root's (or the token or session owner's) address, or
-  `stripe` for the subscription sync (Q3). Redemptions are never deleted.
+  `stripe` for the subscription sync (Q3). Redemptions (RedeemEvents, V7) are never deleted.
   Expired tokens stay too; the main table has no TTL. The one exception is
   sessions: DynamoDB purges each one the retention period after it
   expires (S3).
@@ -437,6 +450,7 @@ ISO-8601 strings in UTC.
 | `POST /api/global-grants` | `{ role, grantee, startsAt?, endsAt? }` | 201, the global grant, with `impliedRolesBySystem` (roots, G1, G2) |
 | `DELETE /api/global-grants` | `{ role, grantee }` | 204 (roots; revokes it, L1) |
 | `DELETE /api/vouchers/:code` | — | the disabled voucher, with `disabledBy` |
+| `GET /api/vouchers/:code/redemptions` | — | `{ redemptions: [{ id, code, systemId, roles, discountPercent, voucherCreatedBy, email, redeemedAt, via, grants: [{ systemId, role, outcome, replaced }] }] }`, newest first (roots, V7) |
 | `GET /api/systems` | — | `{ systems: [{ id, name, roles, implies: { role: [role] }, subscriberRole, everyone: [role], url, maintenance }] }` (only manageable systems; `implies` lists direct implications) |
 | `POST /api/systems` | `{ id, name?, roles?: [string] }` | 201, the system with exactly the given roles (R4) |
 | `GET /api/systems/:id` | — | `{ id, name, roles, implies, subscriberRole, everyone, url, maintenance }` |

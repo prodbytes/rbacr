@@ -292,6 +292,55 @@ void main() {
       expect(() => fake((_) => reply(voucher())).createVoucher(roles: ['a'], role: 'b'), throwsArgumentError);
     });
 
+    test('lists a voucher\'s redemptions with their details', () async {
+      final seen = <http.Request>[];
+      final events = await fake(
+        (_) => reply({
+          'redemptions': [
+            {
+              'id': 'e1',
+              'code': 'SPRING-SALE',
+              'systemId': 'presence',
+              'roles': ['premium'],
+              'discountPercent': 100,
+              'voucherCreatedBy': 'r@x.com',
+              'email': 'ana@x.com',
+              'redeemedAt': '2026-10-10T08:00:00.000Z',
+              'via': 'page',
+              'grants': [
+                {
+                  'systemId': 'presence',
+                  'role': 'premium',
+                  'outcome': 'replaced',
+                  'replaced': {'grantedBy': 'stripe'},
+                },
+              ],
+            },
+            {
+              'id': null,
+              'code': 'SPRING-SALE',
+              'systemId': 'presence',
+              'roles': <String>[],
+              'discountPercent': null,
+              'voucherCreatedBy': null,
+              'email': 'old@x.com',
+              'redeemedAt': '2025-01-01T00:00:00.000Z',
+              'via': null,
+              'grants': <Object>[],
+            },
+          ],
+        }),
+        seen: seen,
+      ).listRedemptions('SPRING SALE');
+      expect(seen.single.url.path, '/api/vouchers/SPRING%20SALE/redemptions');
+      expect(
+        [events.first.email, events.first.via, events.first.grants.single.outcome],
+        ['ana@x.com', 'page', 'replaced'],
+      );
+      expect(events.first.grants.single.replaced?['grantedBy'], 'stripe');
+      expect([events.last.id, events.last.via, events.last.grants], [null, null, isEmpty]);
+    });
+
     test('redeeming returns the first grant, or all of them', () async {
       Map<String, Object?> grant(String role) => {
         'systemId': 'presence',

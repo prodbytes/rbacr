@@ -3,6 +3,7 @@
 	import { invalidateAll } from '$app/navigation';
 	import { formatDate, formValues, utcInputValue, utcIso, vpiFetch, VpiError } from '#lib/vpi.js';
 	import { quarterOf, suggestVoucherCode } from '#lib/vouchers.js';
+	import VoucherRedemptions from '#lib/VoucherRedemptions.svelte';
 	import type { PageProps } from './$types';
 
 	let { data }: PageProps = $props();
@@ -133,7 +134,7 @@
 					<td>{v.roles.join(', ')}</td>
 					<td>{v.discountPercent}%</td>
 					<td><span class="badge">{v.status}</span></td>
-					<td>{v.uses}{v.maxUses !== null ? ` / ${v.maxUses}` : ''}</td>
+					<td><VoucherRedemptions code={v.code} uses={v.uses} maxUses={v.maxUses} /></td>
 					<td class="muted">{formatDate(v.startsAt)}</td>
 					<td class="muted">{formatDate(v.endsAt)}</td>
 					<td class="muted">{v.createdBy}</td>
