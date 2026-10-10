@@ -72,8 +72,8 @@ is the UTC time of tagging (`YYYYMMDDHHMM`, see
 
 | Command | Tag | Workflows |
 |---|---|---|
-| `bash scripts/release-rc.sh` | `X.Y.Z-RC` (any commit that is pushed) | [Release](../.github/workflows/release.yml) publishes a prerelease with the Lambda zip. [Deploy RC](../.github/workflows/deploy-rc.yml) deploys https://rc.rbacr.nu01.com |
-| `bash scripts/release-ga.sh` | `X.Y.Z-GA` (commits on `main` only) | Release publishes the latest release. [Deploy](../.github/workflows/deploy.yml) deploys https://rbacr.nu01.com |
+| `bash scripts/release-rc.sh` | `X.Y.Z-RC` (any commit that is pushed) | [Release](../../.github/workflows/release.yml) publishes a prerelease with the Lambda zip. [Deploy RC](../../.github/workflows/deploy-rc.yml) deploys https://rc.rbacr.nu01.com |
+| `bash scripts/release-ga.sh` | `X.Y.Z-GA` (commits on `main` only) | Release publishes the latest release. [Deploy](../../.github/workflows/deploy.yml) deploys https://rbacr.nu01.com |
 
 `DRY_RUN=1` prints the tag without pushing it. Both scripts refuse
 uncommitted or unpushed work, and tags that already exist. Pull requests that
@@ -133,9 +133,9 @@ the environment are read from the git-ignored `.env.$STAGE` (`.env.prod`,
 
 3. **Repository settings.** Variables are public identifiers; secrets are
    not. Each tenant has its own settings, named `RBACR_<TENANT>_<NAME>`:
-   `GA` (production, read by [deploy.yml](../.github/workflows/deploy.yml)),
+   `GA` (production, read by [deploy.yml](../../.github/workflows/deploy.yml)),
    `RC` (release candidate, read by
-   [deploy-rc.yml](../.github/workflows/deploy-rc.yml)) and `LOCAL`
+   [deploy-rc.yml](../../.github/workflows/deploy-rc.yml)) and `LOCAL`
    (Codespaces secrets, written to `.env` by
    [scripts/local-env.sh](../scripts/local-env.sh) when a codespace is
    created). The workflows pass `RBACR_<TENANT>_<NAME>` to the app as

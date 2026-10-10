@@ -91,5 +91,5 @@ Thumbs.db
 vite.config.ts.timestamp-*
 
 # --- Local HTTPS (mkcert, see scripts/local-certs.sh) ---
-floci/certs/
+rbacr-sls/floci/certs/
 .lambda/

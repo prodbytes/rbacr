@@ -27,7 +27,7 @@
       ]
     }
   },
-  "postCreateCommand": "bash -lc 'devbox install && bash scripts/local-env.sh'",
+  "postCreateCommand": "bash -lc 'cd rbacr-sls && devbox install && bash scripts/local-env.sh'",
   "forwardPorts": [
     5173,
     8444
