@@ -27,7 +27,7 @@ and the README in sync with the code.
 - **S3** A successful sign-in creates a server-side session that lasts 30 days.
   The browser holds a random token in the `rbacr_session` cookie (`HttpOnly`,
   `SameSite=Lax`, `Secure` outside dev). The database stores only the token's
-  SHA-256 hash. Signing out (`POST /logout`) deletes the session.
+  SHA-256 hash. Signing out (`POST /logout`) revokes the session (L1).
 - **S4** For local development only, `/login/dev` signs in as any address
   without Google when `RBACR_DEV_LOGIN=1`. Production builds always return 404
   for it.
@@ -73,7 +73,8 @@ and the README in sync with the code.
 - **R7** Only roots register implications, per role, replacing that role's
   previous list. A role cannot imply itself and implications can't form a
   cycle (400). Implied roles must be in the catalog (404). Removing a role
-  removes its implications in both directions. A system's `implies` lists
+  removes its implications in both directions (L3). Replacing a role's list
+  marks the implications it drops as removed (L1). A system's `implies` lists
   each role's registered direct implications.
 - **R8** Every grant in an API response (granting, listing grants, redeeming
   a voucher, global grants) includes `impliedRoles`: the roles its role
@@ -89,7 +90,7 @@ and the README in sync with the code.
   the end (400). A grant gives its role (R3, R6, C3) only while
   `startsAt ≤ now < endsAt`; its `status` is `active`, `not-started` or
   `expired` accordingly. Grants outside their validity stay listed until
-  revoked.
+  revoked (L2).
 - **G2** A grantee holds a role in a system (or globally) through at most
   one grant. A root granting it again with the same validity changes
   nothing (the original grant is kept); with another validity, the new
@@ -115,9 +116,9 @@ and the README in sync with the code.
 - **P1** Only roots manage: everything but the first three rows is refused
   to anyone else with 403. Holding a role (any name) never grants
   management.
-- **P2** Removing a role also removes its grants, implications and vouchers,
-  and clears it as its system's subscriber role.
-  Deleting a system removes everything in it.
+- **P2** Removing a role also revokes its grants, removes its implications,
+  disables its vouchers and clears it as its system's subscriber role.
+  Deleting a system does that for every role in it (L3).
 - **P3** Grants and vouchers stay valid if the root who created them later
   leaves the root list.
 
@@ -150,7 +151,51 @@ and the README in sync with the code.
   a confirmed payment completes the redemption as in V4.
 - **V5** Each identity can redeem a given voucher only once (409). Redeeming
   an inactive voucher fails with 409 and the reason. An unknown code gives 404.
-- **V6** Disabling is permanent. Disabled vouchers stay listed for auditing.
+- **V6** Disabling is permanent and records who did it (`disabledBy`, L1).
+  Disabled vouchers stay listed for auditing, with their redemptions.
+
+## Logical deletion
+
+Nothing in rbacr is physically deleted, so every change can be audited.
+
+- **L1** Deleting anything marks the record in place with when and by whom,
+  and the record stays:
+
+  | Action | Record | Marked with |
+  |--------|--------|-------------|
+  | Revoke a grant (system or global) | the grant | `revokedAt`, `revokedBy` |
+  | Remove a role | the role | `removedAt`, `removedBy` |
+  | Drop an implication (R7) | the implication | `removedAt`, `removedBy` |
+  | Delete a system | the system | `deletedAt`, `deletedBy` |
+  | Disable a voucher | the voucher | `disabledAt`, `disabledBy` |
+  | Revoke an API token | the token | `revokedAt`, `revokedBy` |
+  | Sign out | the session | `revokedAt`, `revokedBy` |
+
+  `…By` is the acting root's (or the token or session owner's) address, or
+  `stripe` for the subscription sync (Q3). Redemptions are never deleted.
+- **L2** A record is deleted once its deletion date is set; rbacr then
+  treats it as gone. A revoked grant gives no role and isn't listed; a
+  removed role or implication, or a deleted system, isn't in the catalog
+  or listings and can't be granted, configured or referenced (404);
+  deleting it again gives 404; a revoked token or session no longer
+  authenticates. Disabled vouchers and revoked tokens still appear in
+  their own listings with their status (V6, T5), since those are their
+  audit views.
+- **L3** Removing a role or deleting a system marks its dependents with
+  the same actor and time: the role's grants are revoked, its
+  implications (both directions) removed and its vouchers disabled.
+  Deleting a system does that for every role, then marks the system.
+  Global grants belong to no system and are not touched.
+- **L4** A deleted name or key can be used again: granting a revoked grant
+  again, redeeming a voucher over it, re-adding a removed role or
+  implication, or re-creating a deleted system. The new record starts
+  fresh (a re-created system has no grants or implications; its earlier
+  vouchers stay listed, disabled, V6). Before it is
+  written, the deleted record is copied to a history record (sort key
+  `HIST#<original sort key>#<deletion date>`), so a deletion is never
+  overwritten.
+- **L5** Only deletions are kept this way. Replacing a grant with another
+  validity (G2, G3, Q2a) updates it in place.
 
 ## Substack integration
 
@@ -191,8 +236,8 @@ Stripe Connect. That account sends webhooks, so rbacr syncs from Stripe:
   period, so if no renewal comes, the role ends with the period that was
   paid for, even if the cancellation event is missed.
 - **Q3** When the customer is no longer subscribed (canceled, unpaid,
-  incomplete, paused, or deleted), rbacr removes those grants, but only if
-  their `grantedBy` is `stripe`: grants a root made, or that came from a
+  incomplete, paused, or deleted), rbacr revokes those grants (L1, with
+  `revokedBy: stripe`), but only if their `grantedBy` is `stripe`: grants a root made, or that came from a
   voucher, stay. The same happens to the customer's `stripe` grants that
   no system's configuration asks for any more (the role changed, or was
   set to none), at their next event. The webhook answers
@@ -256,7 +301,7 @@ Stripe Connect. That account sends webhooks, so rbacr syncs from Stripe:
   request (root status included). Changing someone's roles changes what their
   tokens can do.
 - **T5** People list and revoke only their own tokens (anyone else's gives
-  404). Revoking is permanent; revoked tokens stay listed. Tokens are managed
+  404). Revoking is permanent (L1); revoked tokens stay listed. Tokens are managed
   only through `/vpi`, so a token can't mint more tokens.
 - **T6** Role queries: `/api/check` and `/api/roles` answer with R1-R6.
   Anyone may ask about themselves. Roots may ask about anyone, global roles
@@ -318,20 +363,20 @@ ISO-8601 strings in UTC.
 | `POST /api/vouchers` | `{ role, discountPercent?, startsAt?, endsAt?, maxUses? }` | 201, a global voucher (roots) |
 | `GET /api/global-grants` | — | `{ grants: [{ systemId: null, role, grantee, grantedBy, grantedAt, startsAt, endsAt, status, voucherCode, impliedRoles: [], impliedRolesBySystem }] }` (roots, R8, G1) |
 | `POST /api/global-grants` | `{ role, grantee, startsAt?, endsAt? }` | 201, the global grant, with `impliedRolesBySystem` (roots, G1, G2) |
-| `DELETE /api/global-grants` | `{ role, grantee }` | 204 (roots) |
-| `DELETE /api/vouchers/:code` | — | the disabled voucher |
+| `DELETE /api/global-grants` | `{ role, grantee }` | 204 (roots; revokes it, L1) |
+| `DELETE /api/vouchers/:code` | — | the disabled voucher, with `disabledBy` |
 | `GET /api/systems` | — | `{ systems: [{ id, name, roles, implies: { role: [role] }, subscriberRole }] }` (only manageable systems; `implies` lists direct implications) |
 | `POST /api/systems` | `{ id, name?, roles?: [string] }` | 201, the system with exactly the given roles (R4) |
 | `GET /api/systems/:id` | — | `{ id, name, roles, implies, subscriberRole }` |
 | `PATCH /api/systems/:id` | `{ subscriberRole: role or null }` | the system (roots, Q2) |
-| `DELETE /api/systems/:id` | — | 204 |
+| `DELETE /api/systems/:id` | — | 204 (marks it and its contents deleted, L1, L3) |
 | `POST /api/systems/:id/roles` | `{ role }` | the system |
-| `DELETE /api/systems/:id/roles/:role` | — | 204 |
+| `DELETE /api/systems/:id/roles/:role` | — | 204 (removes it, L1, L3) |
 | `PUT /api/systems/:id/roles/:role` | `{ implies: [role] }` | the system, with the role's implied roles replaced (roots, R7) |
 | `GET /api/systems/:id/grants` | — | `{ grants: [{ systemId, role, grantee, grantedBy, grantedAt, startsAt, endsAt, status, voucherCode, impliedRoles }] }` (R8, G1) |
 | `POST /api/systems/:id/grants` | `{ role, grantee, startsAt?, endsAt? }` | 201, the grant with `impliedRoles` (G1; re-granting with the same validity is idempotent, G2) |
-| `DELETE /api/systems/:id/grants` | `{ role, grantee }` | 204 |
-| `GET /api/systems/:id/vouchers` | — | `{ vouchers: [{ code, systemId, role, discountPercent, startsAt, endsAt, maxUses, uses, status, createdBy, createdAt, disabledAt }] }` |
+| `DELETE /api/systems/:id/grants` | `{ role, grantee }` | 204 (revokes it, L1) |
+| `GET /api/systems/:id/vouchers` | — | `{ vouchers: [{ code, systemId, role, discountPercent, startsAt, endsAt, maxUses, uses, status, createdBy, createdAt, disabledAt, disabledBy }] }` |
 | `POST /api/systems/:id/vouchers` | `{ role, discountPercent?, startsAt?, endsAt?, maxUses? }` | 201, the voucher |
 | `POST /api/check` | `{ email, systemId?, role }` | `{ email, systemId, role, allowed, expiresAt, ttl }` (T6, C3a) |
 | `POST /api/roles` | `{ email, systemId? }` | `{ email, systemId, roles: [role] }`, or without `systemId`, `{ email, globalRoles, roles: { systemId: [role] } }` (T6) |
@@ -425,10 +470,11 @@ All settings come from environment variables prefixed `RBACR_`:
   exists; redeeming counts the use (within `maxUses`), records the
   redemption (once per identity) and grants, all or nothing; concurrent
   implication edits are serialized by a version on the system.
-- **D2** Deleting a role or a system removes its dependent items (grants,
-  implications, vouchers and redemptions) in batches after the role or
-  system's own record, so nothing new can attach meanwhile. It is not
-  atomic: a failed deletion can be retried.
+- **D2** Removing a role marks the role first, so nothing new can attach
+  meanwhile (grants, implications and vouchers check that their role is
+  not removed), then marks its dependents (L3). Deleting a system marks its
+  dependents first and the system last, so a failed deletion leaves it
+  listed and can be retried. Neither is atomic.
 - **D3** Lookups across partitions (an identity's roles, a person's tokens,
   a system's vouchers) use a secondary index, which is eventually
   consistent: a change can take up to about a second to show there.
@@ -437,7 +483,7 @@ All settings come from environment variables prefixed `RBACR_`:
 
 | Suite | Command | Covers |
 |-------|---------|--------|
-| Unit and domain | `npx vitest --run` | Identity parsing, the R*, G*, P*, V*, Q*, T* and D* rules against DynamoDB Local (a Docker container started by the test setup, or `RBACR_TEST_DYNAMODB_ENDPOINT`), the A3 guard, sessions, Google OAuth exchange |
+| Unit and domain | `npx vitest --run` | Identity parsing, the R*, G*, P*, V*, Q*, T*, L* and D* rules against DynamoDB Local (a Docker container started by the test setup, or `RBACR_TEST_DYNAMODB_ENDPOINT`), the A3 guard, sessions, Google OAuth exchange |
 | Lambda smoke | `npm run test:lambda` | The production build invoked through `lambda.js` with function URL (v2) events: H1, H2, A1, A3 and the Stripe webhook's signature check (Q1), the version, redirects, 401s, static assets. `scripts/package-lambda.sh` reruns it against the deployable bundle. |
 | End-to-end | `npm run test:e2e` | `/api` with personal tokens, `/vpi` as the frontend, the A1/A3 separation, and the pages, against a running dev server with DynamoDB Local, directly or through Floci over HTTPS |
 | Live | `scripts/deploy.sh` (last step) | The deployed site: version, sign-in page, 401 (also for an unknown token, which reads DynamoDB), 404 for `/login/dev`, 403 for the bare function URL |

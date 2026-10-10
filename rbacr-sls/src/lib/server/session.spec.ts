@@ -25,13 +25,20 @@ describe('Sessions', () => {
 		expect(items[0].ttl).toBe(Math.ceil(expiresAt.getTime() / 1000));
 	});
 
-	it('rejects unknown, deleted and expired tokens', async () => {
+	it('rejects unknown, signed-out and expired tokens, keeping their sessions (L1)', async () => {
 		expect(await sessions.validate('nope')).toBeNull();
 		const a = await sessions.create('a@example.com');
-		await sessions.delete(a.token);
+		clock = new Date(clock.getTime() + 1000);
+		await sessions.revoke(a.token);
 		expect(await sessions.validate(a.token)).toBeNull();
 		const b = await sessions.create('b@example.com');
 		clock = new Date(clock.getTime() + SESSION_TTL_MS);
 		expect(await sessions.validate(b.token)).toBeNull();
+		const items = await scanAll(table);
+		expect(items).toHaveLength(2);
+		expect(items.find((it) => it.email === 'a@example.com')).toMatchObject({
+			revokedAt: '2026-01-01T00:00:01.000Z',
+			revokedBy: 'a@example.com'
+		});
 	});
 });

@@ -1,4 +1,4 @@
-import { DeleteCommand, GetCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { TTL_ATTRIBUTE, type Table } from './dynamo';
 
 export const SESSION_COOKIE = 'rbacr_session';
@@ -14,7 +14,7 @@ export async function hashToken(token: string): Promise<string> {
 	return Buffer.from(digest).toString('hex');
 }
 
-/** A session item: PK `SESSION#<sha256>`; DynamoDB's TTL removes it some time after expiry. */
+/** A session item: PK `SESSION#<sha256>`. Signed-out sessions stay, marked (L1); DynamoDB's TTL removes it some time after expiry. */
 const sessionKey = (hash: string) => ({ PK: `SESSION#${hash}`, SK: 'META' });
 
 export class Sessions {
@@ -42,23 +42,29 @@ export class Sessions {
 		return { token, expiresAt };
 	}
 
-	/** Returns the session's e-mail, or null when the token is unknown or expired. */
+	/** Returns the session's e-mail, or null when the token is unknown, signed out or expired. */
 	async validate(token: string): Promise<string | null> {
 		const { Item } = await this.table.doc.send(
 			new GetCommand({ TableName: this.table.name, Key: sessionKey(await hashToken(token)) })
 		);
-		if (!Item) return null;
-		// TTL deletion lags, so expiry is always checked here.
-		if (new Date(Item.expiresAt as string) <= this.now()) {
-			await this.delete(token);
-			return null;
-		}
+		if (!Item || Item.revokedAt || new Date(Item.expiresAt as string) <= this.now()) return null;
 		return Item.email as string;
 	}
 
-	async delete(token: string): Promise<void> {
-		await this.table.doc.send(
-			new DeleteCommand({ TableName: this.table.name, Key: sessionKey(await hashToken(token)) })
-		);
+	/** Signs a session out (S3): marks it revoked, by its owner, instead of deleting it (L1). */
+	async revoke(token: string): Promise<void> {
+		try {
+			await this.table.doc.send(
+				new UpdateCommand({
+					TableName: this.table.name,
+					Key: sessionKey(await hashToken(token)),
+					UpdateExpression: 'SET revokedAt = if_not_exists(revokedAt, :now), revokedBy = if_not_exists(revokedBy, email)',
+					ConditionExpression: 'attribute_exists(PK)',
+					ExpressionAttributeValues: { ':now': this.now().toISOString() }
+				})
+			);
+		} catch (err) {
+			if ((err as Error).name !== 'ConditionalCheckFailedException') throw err;
+		}
 	}
 }

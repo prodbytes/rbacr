@@ -96,7 +96,7 @@ export class ApiTokens {
 		return (await this.items(email)).map(toToken);
 	}
 
-	/** Revokes one of the person's own tokens for good. */
+	/** Revokes one of the person's own tokens for good; the token stays, marked (L1). */
 	async revoke(email: string, id: string): Promise<ApiToken> {
 		const found = (await this.items(email)).find((it) => it.id === id);
 		if (!found) throw new RbacError(404, 'Token not found');
@@ -104,8 +104,8 @@ export class ApiTokens {
 			new UpdateCommand({
 				TableName: this.table.name,
 				Key: { PK: found.PK, SK: found.SK },
-				UpdateExpression: 'SET revokedAt = if_not_exists(revokedAt, :now)',
-				ExpressionAttributeValues: { ':now': this.now().toISOString() },
+				UpdateExpression: 'SET revokedAt = if_not_exists(revokedAt, :now), revokedBy = if_not_exists(revokedBy, :by)',
+				ExpressionAttributeValues: { ':now': this.now().toISOString(), ':by': email },
 				ReturnValues: 'ALL_NEW'
 			})
 		);

@@ -565,6 +565,118 @@ describe('how long a role check holds (C3a)', () => {
 	});
 });
 
+describe('logical deletion (L1-L4)', () => {
+	const later = () => (clock = new Date(clock.getTime() + 1000));
+	const item = async (sk: string) => (await scanAll(table)).find((it) => it.SK === sk);
+	const history = async (prefix: string) => (await scanAll(table)).filter((it) => String(it.SK).startsWith(`HIST#${prefix}`));
+
+	it('deletes nothing: every record stays, marked with who deleted it and when (L1)', async () => {
+		await rbac.setImplications(root, 'billing', 'editor', ['viewer']);
+		await rbac.grant(root, 'billing', 'editor', USER);
+		await rbac.grantGlobal(root, 'viewer', OTHER);
+		const v = await rbac.createVoucher(root, { systemId: 'billing', role: 'editor' });
+		await rbac.redeemVoucher('r@x.com', v.code);
+		const before = (await scanAll(table)).length;
+		later();
+		await rbac.revokeGlobal(root, 'viewer', OTHER);
+		await rbac.removeRole(root, 'billing', 'editor');
+		await rbac.deleteSystem(root, 'billing');
+		await rbac.deleteSystem(root, 'crm');
+		expect((await scanAll(table)).length).toBe(before);
+		const by = { at: clock.toISOString(), by: ROOT };
+		expect(await item(`GRANT#editor#${USER}`)).toMatchObject({ revokedAt: by.at, revokedBy: by.by });
+		expect(await item(`GRANT#viewer#${OTHER}`)).toMatchObject({ revokedAt: by.at, revokedBy: by.by });
+		expect(await item('ROLE#editor')).toMatchObject({ removedAt: by.at, removedBy: by.by });
+		expect(await item('IMPL#editor#viewer')).toMatchObject({ removedAt: by.at, removedBy: by.by });
+		expect((await scanAll(table)).find((it) => it.PK === 'SYS#billing' && it.SK === 'META')).toMatchObject({
+			deletedAt: by.at,
+			deletedBy: by.by
+		});
+		expect(await item(`REDEEMED#r@x.com`)).toBeDefined();
+	});
+
+	it('hides what is deleted: no roles, not listed, not found (L2)', async () => {
+		await rbac.grant(root, 'billing', 'viewer', USER);
+		await rbac.revoke(root, 'billing', 'viewer', USER);
+		expect(await rbac.rolesOf(USER)).toEqual({});
+		expect(await rbac.listGrants(root, 'billing')).toEqual([]);
+		await expectError(rbac.revoke(root, 'billing', 'viewer', USER), 404);
+		await rbac.addRole(root, 'billing', 'gold');
+		await rbac.removeRole(root, 'billing', 'gold');
+		await expectError(rbac.removeRole(root, 'billing', 'gold'), 404);
+		await expectError(rbac.grant(root, 'billing', 'gold', USER), 404);
+		await expectError(rbac.hasRole(root, USER, 'billing', 'gold'), 404);
+		await rbac.deleteSystem(root, 'crm');
+		expect((await rbac.listSystems(root)).map((s) => s.id)).toEqual(['billing']);
+		await expectError(rbac.getSystem(root, 'crm'), 404);
+		await expectError(rbac.deleteSystem(root, 'crm'), 404);
+		await expectError(rbac.addRole(root, 'crm', 'x'), 404);
+	});
+
+	it('cascades: removing a role revokes its grants and disables its vouchers, by the same root (L3)', async () => {
+		await rbac.grant(root, 'billing', 'editor', USER);
+		await rbac.grantGlobal(root, 'editor', OTHER);
+		const v = await rbac.createVoucher(root, { systemId: 'billing', role: 'editor' });
+		later();
+		await rbac.removeRole(root, 'billing', 'editor');
+		const [disabled] = await rbac.listVouchers(root, 'billing');
+		expect(disabled).toMatchObject({ code: v.code, disabledAt: clock, disabledBy: ROOT });
+		// The global grant isn't the role's: it gives the role wherever it is defined.
+		expect(await rbac.globalRolesOf(OTHER)).toEqual(['editor']);
+		expect(await rbac.rolesOf(OTHER)).toEqual({});
+	});
+
+	it('keeps a deletion on record when its key is used again (L4)', async () => {
+		await rbac.grant(root, 'billing', 'viewer', USER);
+		later();
+		await rbac.revoke(root, 'billing', 'viewer', USER);
+		later();
+		const again = await rbac.grant(root, 'billing', 'viewer', USER);
+		expect(again).toMatchObject({ grantedAt: clock, status: 'active' });
+		expect(await rbac.listGrants(root, 'billing')).toHaveLength(1);
+		expect(await history(`GRANT#viewer#${USER}#`)).toEqual([expect.objectContaining({ revokedBy: ROOT, grantee: USER })]);
+		// Redeeming a voucher over a revoked grant archives it too.
+		await rbac.revoke(root, 'billing', 'viewer', USER);
+		later();
+		const v = await rbac.createVoucher(root, { systemId: 'billing', role: 'viewer' });
+		await rbac.redeemVoucher(USER, v.code);
+		expect(await history(`GRANT#viewer#${USER}#`)).toHaveLength(2);
+	});
+
+	it('lets removed roles, implications and deleted systems come back empty (L4)', async () => {
+		await rbac.setImplications(root, 'billing', 'editor', ['viewer']);
+		await rbac.setImplications(root, 'billing', 'editor', []);
+		await rbac.setImplications(root, 'billing', 'editor', ['viewer']);
+		expect((await rbac.getSystem(root, 'billing')).implies).toEqual({ editor: ['viewer'] });
+		expect(await history('IMPL#editor#viewer#')).toHaveLength(1);
+		await rbac.grant(root, 'billing', 'editor', USER);
+		later();
+		await rbac.removeRole(root, 'billing', 'editor');
+		await rbac.addRole(root, 'billing', 'editor');
+		expect((await rbac.getSystem(root, 'billing')).implies).toEqual({});
+		expect(await rbac.rolesOf(USER)).toEqual({});
+		later();
+		await rbac.deleteSystem(root, 'billing');
+		await rbac.createSystem(root, { id: 'billing', name: 'Billing 2', roles: ['editor'] });
+		expect(await rbac.getSystem(root, 'billing')).toMatchObject({ name: 'Billing 2', roles: ['editor'], implies: {} });
+		expect(await rbac.listGrants(root, 'billing')).toEqual([]);
+		expect(await history('META#')).toEqual([expect.objectContaining({ name: 'Billing', deletedBy: ROOT })]);
+		expect(await history('ROLE#editor#')).toHaveLength(2);
+		await expectError(rbac.createSystem(root, { id: 'billing' }), 409);
+	});
+
+	it('records the subscription sync as who revoked its grants (L5)', async () => {
+		await rbac.setSubscriberRole(root, 'billing', 'viewer');
+		await rbac.syncSubscriber(USER, { startsAt: null, endsAt: new Date('2026-02-01T00:00:00Z') });
+		await rbac.syncSubscriber(USER, null);
+		expect(await item(`GRANT#viewer#${USER}`)).toMatchObject({ revokedBy: 'stripe', revokedAt: clock.toISOString() });
+		await rbac.deleteSystem(root, 'billing');
+		await rbac.createSystem(root, { id: 'billing', roles: ['viewer'] });
+		// A deleted system's subscriber role no longer counts.
+		expect(await rbac.syncSubscriber(USER, { startsAt: null, endsAt: new Date('2026-02-01T00:00:00Z') })).toEqual([]);
+	});
+});
+
 describe('role queries (the external API)', () => {
 	beforeEach(async () => {
 		await rbac.grant(root, 'billing', 'viewer', USER);

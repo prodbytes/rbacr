@@ -23,6 +23,10 @@ app on AWS Lambda. Run every command below from this folder
 - **Grants have a validity**: an optional start and end (`startsAt`,
   `endsAt`). No start means immediately, no end means forever. Outside it a
   grant gives nothing, and shows as `not-started` or `expired`.
+- **Nothing is ever deleted.** Revoking a grant, removing a role, deleting a
+  system, disabling a voucher, revoking a token or signing out marks the
+  record with who did it and when (e.g. `revokedBy`, `revokedAt`), and
+  rbacr hides it from then on, so every change can be audited.
 - **Vouchers** are codes like `7JH2-UQF5-XA7B-VMQT` that grant a role when
   redeemed, either in one system or **globally**. A global voucher gives the
   role in every system that defines it, and only roots can create global
@@ -223,7 +227,7 @@ Q1-Q5):
    holds each system's subscriber role for the subscription's current
    billing period: the grant starts and ends with
    it, and each renewal moves it to the next period. Otherwise rbacr
-   removes the grants. They show `grantedBy: stripe`, and grants you
+   revokes the grants (`revokedBy: stripe`). They show `grantedBy: stripe`, and grants you
    made by hand or through a voucher are never changed or removed (unless
    they have expired). Changing a system's subscriber role moves each
    subscriber over at their next subscription event.

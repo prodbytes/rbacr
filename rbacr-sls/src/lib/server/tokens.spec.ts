@@ -61,6 +61,8 @@ describe('personal API tokens', () => {
 		expect((await tokens.revoke(ANA, apiToken.id)).revokedAt).toEqual(clock);
 		expect(await tokens.authenticate(token)).toBeNull();
 		await expectError(tokens.revoke(ANA, 'missing'), 404);
+		// The token stays, marked (L1).
+		expect((await scanAll(table)).find((it) => it.id === apiToken.id)).toMatchObject({ revokedBy: ANA });
 	});
 
 	it('stop working when expired', async () => {

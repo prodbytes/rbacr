@@ -7,7 +7,6 @@ import {
 	type CreateTableCommandInput
 } from '@aws-sdk/client-dynamodb';
 import {
-	BatchWriteCommand,
 	DynamoDBDocumentClient,
 	QueryCommand,
 	type QueryCommandInput
@@ -125,20 +124,6 @@ export function queryIndex(table: Table, gsi1pk: string, opts: { newestFirst?: b
 		ExpressionAttributeValues: { ':pk': gsi1pk },
 		ScanIndexForward: !opts.newestFirst
 	});
-}
-
-/** Deletes items by key, 25 at a time, retrying what DynamoDB leaves unprocessed. */
-export async function deleteAll(table: Table, items: Item[]): Promise<void> {
-	for (let i = 0; i < items.length; i += 25) {
-		let requests: { DeleteRequest: { Key: Item } }[] | undefined = items
-			.slice(i, i + 25)
-			.map((it) => ({ DeleteRequest: { Key: { PK: it.PK, SK: it.SK } } }));
-		for (let attempt = 0; requests?.length; attempt++) {
-			if (attempt) await new Promise((r) => setTimeout(r, Math.min(1000, 50 * 2 ** attempt)));
-			const res = await table.doc.send(new BatchWriteCommand({ RequestItems: { [table.name]: requests } }));
-			requests = res.UnprocessedItems?.[table.name] as typeof requests;
-		}
-	}
 }
 
 /** The cancellation reason codes of a failed TransactWrite, in request order ('None' for items that passed). */
