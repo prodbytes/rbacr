@@ -1,5 +1,5 @@
-import { GetCommand, PutCommand, TransactWriteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
-import { cancellationReasons, queryAll, queryIndex, queryPrefix, type Item, type Table } from './dynamo';
+import { GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { GSI1, cancellationReasons, queryAll, queryIndex, queryPrefix, type Item, type Table } from './dynamo';
 import { Allowlist, granteesFor, normalizeEmail, parseGrantee } from './identity';
 import { MAX_CODE_LENGTH, MIN_CODE_LENGTH, compactVoucherCode, normalizeVoucherCode, suggestVoucherCode } from '../vouchers';
 
@@ -183,6 +183,30 @@ export interface Notification {
 	status: NotificationStatus;
 }
 
+/**
+ * A redeem attempt that failed (V9), kept for good like a RedeemEvent: who
+ * tried which code, when, how, and why it failed.
+ */
+export interface RedeemFailure {
+	id: string;
+	/** The voucher's code; for an unknown code, what was typed, normalized (V2) and cut to 64 characters. */
+	code: string;
+	/** Whether the code named a voucher (false: 404). */
+	known: boolean;
+	/** The voucher's system, or null for a global or unknown voucher. */
+	systemId: string | null;
+	email: string;
+	attemptedAt: Date;
+	via: RedeemVia;
+	/** The status the attempt was answered with: 402, 404 or 409. */
+	status: number;
+	/** The error message the attempt was answered with. */
+	reason: string;
+}
+
+/** Most failed attempts listed across all vouchers, newest first (V9). */
+export const MAX_REDEEM_FAILURES_LISTED = 100;
+
 /** A role check (C3, C3a): whether the role is held, and until when at most (null: no end). */
 export interface RoleCheck {
 	allowed: boolean;
@@ -343,6 +367,8 @@ export const MAX_VOUCHER_ROLES = 20;
  *   redemption  PK VOUCHER#<key>  SK REDEEMED#<email>       (the RedeemEvent, V7)
  *               (<key> is the code's letters and digits, V2; vouchers made before
  *               custom codes are keyed by their XXXX-XXXX-XXXX-XXXX code)
+ *   failed redemption PK VOUCHER#<key>, or REDEEMFAILS for an unknown code
+ *               SK FAILED#<when>#<id>    GSI1 REDEEMFAILS / <when>#<id>   (V9)
  *   notification PK NOTIFS        SK NOTIF#<id>                (N1; dismissed ones carry dismissedAt / dismissedBy)
  *   history     PK as the item   SK HIST#<its SK>#<when it was deleted>  (L4)
  *
@@ -359,6 +385,7 @@ const sysPK = (id: string) => `SYS#${id}`;
 const GLOBAL_PK = 'GLOBAL';
 const GLOBAL_VOUCHERS = '*';
 const NOTIFS_PK = 'NOTIFS';
+const REDEEM_FAILURES = 'REDEEMFAILS';
 const notifKey = (id: string) => ({ PK: NOTIFS_PK, SK: `NOTIF#${id}` });
 const roleKey = (systemId: string, role: string) => ({ PK: sysPK(systemId), SK: `ROLE#${role}` });
 const grantKey = (systemId: string | null, role: string, grantee: string) => ({
@@ -517,6 +544,18 @@ const toSystemCard = (meta: Item): SystemCard => ({
 	description: (meta.description as string | undefined) ?? null,
 	screenshotUrl: (meta.screenshotUrl as string | undefined) ?? null,
 	maintenance: meta.maintenance === true
+});
+
+const toRedeemFailure = (it: Item): RedeemFailure => ({
+	id: it.id as string,
+	code: it.code as string,
+	known: it.known === true,
+	systemId: (it.systemId as string | undefined) ?? null,
+	email: it.email as string,
+	attemptedAt: new Date(it.attemptedAt as string),
+	via: it.via as RedeemVia,
+	status: it.status as number,
+	reason: it.reason as string
 });
 
 const toNotification = (it: Item): Notification => ({
@@ -1589,9 +1628,75 @@ export class Rbac {
 	 * now and never end; each replaces an existing grant of its role unless
 	 * that one already gives it now and forever (G3). A voucher with less
 	 * than 100% discount needs payment, which isn't available yet: it fails
-	 * with 402 and the voucher's terms, recording nothing.
+	 * with 402 and the voucher's terms, granting nothing. Every failed
+	 * attempt (402, 404, 409) is kept as a RedeemFailure (V9).
 	 */
 	async redeemVoucher(email: string, rawCode: string, via: RedeemVia = 'api'): Promise<GrantWithImplied[]> {
+		try {
+			return await this.redeem(email, rawCode, via);
+		} catch (err) {
+			if (err instanceof RbacError) {
+				// Logged without the address, like the Stripe sync (Q4); the record has it.
+				console.warn(`Redeem failed (${err.status}, via ${via}): ${err.message}`);
+				await this.recordRedeemFailure(email, rawCode, via, err).catch((e) => console.error('Could not record a failed redemption', e));
+			}
+			throw err;
+		}
+	}
+
+	/**
+	 * Keeps a failed redeem attempt (V9): with its voucher when the code names
+	 * one, else apart, and in an index of all failures by time.
+	 */
+	private async recordRedeemFailure(email: string, rawCode: string, via: RedeemVia, err: RbacError): Promise<void> {
+		const at = this.now().toISOString();
+		const id = crypto.randomUUID();
+		const voucher = await this.voucherItem(rawCode);
+		await this.put({
+			PK: voucher ? voucher.PK : REDEEM_FAILURES,
+			SK: `FAILED#${at}#${id}`,
+			GSI1PK: REDEEM_FAILURES,
+			GSI1SK: `${at}#${id}`,
+			type: 'RedeemFailure',
+			id,
+			code: voucher ? voucher.code : normalizeVoucherCode(rawCode).slice(0, 64),
+			known: Boolean(voucher),
+			systemId: voucher?.systemId,
+			email,
+			attemptedAt: at,
+			via,
+			status: err.status,
+			reason: err.message
+		});
+	}
+
+	/**
+	 * Failed redeem attempts (V9), newest first; roots only. With a code,
+	 * that voucher's (404 if there is none); without, the latest
+	 * MAX_REDEEM_FAILURES_LISTED of every voucher, unknown codes included.
+	 */
+	async listRedeemFailures(actor: Actor, rawCode?: string): Promise<RedeemFailure[]> {
+		requireRoot(actor, 'Only roots can see failed redemptions');
+		const newestFirst = (a: RedeemFailure, b: RedeemFailure) => b.attemptedAt.getTime() - a.attemptedAt.getTime();
+		if (rawCode !== undefined) {
+			const voucher = await this.voucherItem(rawCode);
+			if (!voucher) throw notFound('Voucher not found');
+			return (await queryPrefix(this.table, voucher.PK as string, 'FAILED#')).map(toRedeemFailure).sort(newestFirst);
+		}
+		const { Items } = await this.table.doc.send(
+			new QueryCommand({
+				TableName: this.table.name,
+				IndexName: GSI1,
+				KeyConditionExpression: 'GSI1PK = :pk',
+				ExpressionAttributeValues: { ':pk': REDEEM_FAILURES },
+				ScanIndexForward: false,
+				Limit: MAX_REDEEM_FAILURES_LISTED
+			})
+		);
+		return (Items ?? []).map(toRedeemFailure);
+	}
+
+	private async redeem(email: string, rawCode: string, via: RedeemVia): Promise<GrantWithImplied[]> {
 		const now = this.now();
 		const reasonsByStatus: Record<Exclude<VoucherStatus, 'active'>, string> = {
 			disabled: 'This voucher has been disabled',

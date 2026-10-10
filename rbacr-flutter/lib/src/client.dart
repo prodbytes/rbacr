@@ -188,6 +188,19 @@ class RbacrClient {
     );
   }
 
+  /// Failed redeem attempts (V9), newest first; roots only. With [code],
+  /// that voucher's (404 if there is none); without, the latest 100 of every
+  /// voucher, unknown codes included.
+  Future<List<RedeemFailure>> listRedeemFailures({String? code}) async {
+    final json = await _send(
+      'GET',
+      code == null ? '/api/redeem-failures' : '/api/vouchers/${Uri.encodeComponent(code)}/failures',
+    );
+    return List.unmodifiable(
+      (json['failures'] as List<Object?>).map((f) => RedeemFailure.fromJson(f as Map<String, Object?>)),
+    );
+  }
+
   static String _vouchersPath(String? systemId) =>
       systemId == null ? '/api/vouchers' : '/api/systems/${Uri.encodeComponent(systemId)}/vouchers';
 

@@ -1,5 +1,5 @@
 import { json, type RequestEvent } from '@sveltejs/kit';
-import { RbacError, type Actor, type GrantWithImplied, type Notification, type OwnRedemption, type RedeemEvent, type SystemSettings, type Validity, type Voucher, type VoucherInput } from './rbac';
+import { RbacError, type Actor, type GrantWithImplied, type Notification, type OwnRedemption, type RedeemEvent, type RedeemFailure, type SystemSettings, type Validity, type Voucher, type VoucherInput } from './rbac';
 import { getServices, type Services } from './services';
 import type { ApiToken } from './tokens';
 
@@ -149,6 +149,9 @@ export const voucherJson = (v: Voucher, status: string) => ({
 
 /** A person's own redemption (V8): its RedeemEvent with ISO dates, and the systems its roles open. */
 export const ownRedemptionJson = ({ redemption, systems }: OwnRedemption) => ({ redemption: redeemEventJson(redemption), systems });
+
+/** A failed redeem attempt (V9) with ISO dates. */
+export const redeemFailureJson = (f: RedeemFailure) => ({ ...f, attemptedAt: f.attemptedAt.toISOString() });
 
 /** A RedeemEvent (V7) with ISO dates. */
 export const redeemEventJson = (e: RedeemEvent) => ({

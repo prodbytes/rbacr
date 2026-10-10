@@ -205,6 +205,10 @@ void main() {
       expect(grants.map((g) => g.role), ['free', 'premium']);
       final event = (await root.listRedemptions(voucher.code)).single;
       expect([event.email, event.via, event.roles], [user, 'api', voucher.roles]);
+      // Trying again fails, and the failure is kept (V9).
+      await expectLater(me.redeemVoucherGrants(code), throwsA(anything));
+      final failure = (await root.listRedeemFailures(code: voucher.code)).single;
+      expect([failure.email, failure.known, failure.status], [user, true, 409]);
     } finally {
       await root.disableVoucher(voucher.code);
     }

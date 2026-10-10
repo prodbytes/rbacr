@@ -1114,3 +1114,45 @@ describe('notifications (N1-N4)', () => {
 		expect(await rbac.openNotificationCount(user)).toBe(0);
 	});
 });
+
+describe('failed redemptions (V9)', () => {
+	it('are kept with their voucher, with who, when, how and why', async () => {
+		const v = await rbac.createVoucher(root, { systemId: 'billing', roles: ['viewer'], maxUses: 2 });
+		await rbac.redeemVoucher(USER, v.code);
+		await expectError(rbac.redeemVoucher(USER, v.code, 'page'), 409, /already redeemed/);
+		await rbac.redeemVoucher('third@partner.com', v.code);
+		clock = new Date(clock.getTime() + 1000);
+		await expectError(rbac.redeemVoucher(OTHER, v.code), 409, /no uses left/);
+		const failures = await rbac.listRedeemFailures(root, v.code.toLowerCase());
+		expect(failures).toEqual([
+			expect.objectContaining({ code: v.code, known: true, systemId: 'billing', email: OTHER, via: 'api', status: 409, reason: 'This voucher has no uses left', attemptedAt: clock }),
+			expect.objectContaining({ code: v.code, email: USER, via: 'page', status: 409, reason: 'You have already redeemed this voucher' })
+		]);
+		// Successful redemptions aren't failures, and failures grant nothing.
+		expect(await rbac.listRedemptions(root, v.code)).toHaveLength(2);
+		expect((await rbac.rolesOf(OTHER)).billing ?? []).toEqual([]);
+	});
+
+	it('include unknown codes, inactive and paid vouchers, newest first across all', async () => {
+		const paid = await rbac.createVoucher(root, { systemId: null, roles: ['viewer'], discountPercent: 50 });
+		await expectError(rbac.redeemVoucher(USER, paid.code), 402);
+		clock = new Date(clock.getTime() + 1000);
+		const off = await rbac.createVoucher(root, { systemId: 'billing', roles: ['viewer'] });
+		await rbac.disableVoucher(root, off.code);
+		await expectError(rbac.redeemVoucher(USER, off.code), 409, /disabled/);
+		clock = new Date(clock.getTime() + 1000);
+		await expectError(rbac.redeemVoucher(USER, ' no such  code! '), 404);
+		const all = await rbac.listRedeemFailures(root);
+		expect(all.map((f) => [f.code, f.known, f.systemId, f.status])).toEqual([
+			['NO-SUCH-CODE', false, null, 404],
+			[off.code, true, 'billing', 409],
+			[paid.code, true, null, 402]
+		]);
+		await expectError(rbac.listRedeemFailures(root, 'NO-SUCH-CODE'), 404);
+	});
+
+	it('are for roots only', async () => {
+		await expectError(rbac.listRedeemFailures(user), 403);
+		await expectError(rbac.listRedeemFailures(user, 'ANY-CODE'), 403);
+	});
+});

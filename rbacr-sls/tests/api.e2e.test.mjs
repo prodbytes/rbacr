@@ -496,6 +496,27 @@ describe('rbacr API', { skip: !(await fetch(`${BASE}/health`).then((r) => r.ok, 
 		assert.equal((await vpi(cookie, 'DELETE', '/notifications/voucher-expiring%3ANOPE')).status, 404);
 	});
 
+	it('keeps failed redeem attempts for roots (V9)', async () => {
+		const unknown = `NOPE-${Date.now()}`;
+		assert.equal((await user('POST', '/api/vouchers/redeem', { code: unknown })).status, 404);
+		const v = (await root('POST', `/api/systems/${SYSTEM}/vouchers`, { roles: ['viewer'] })).body;
+		assert.equal((await vpi(creds[3].cookie, 'POST', '/me/redeem', { code: v.code })).status, 200);
+		assert.equal((await vpi(creds[3].cookie, 'POST', '/me/redeem', { code: v.code })).status, 409);
+		const failures = (await root('GET', `/api/vouchers/${v.code}/failures`)).body.failures;
+		assert.deepEqual(
+			failures.map((f) => [f.email, f.known, f.systemId, f.via, f.status]),
+			[[OTHER, true, SYSTEM, 'page', 409]]
+		);
+		const latest = (await root('GET', '/api/redeem-failures')).body.failures;
+		assert.ok(latest.some((f) => f.code === unknown && !f.known && f.email === USER && f.status === 404), JSON.stringify(latest.slice(0, 3)));
+		const panel = (await vpi(creds[0].cookie, 'GET', `/vouchers/${v.code}/redemptions`)).body;
+		assert.equal(panel.redemptions.length, 1);
+		assert.equal(panel.failures.length, 1);
+		assert.equal((await user('GET', '/api/redeem-failures')).status, 403);
+		assert.equal((await user('GET', `/api/vouchers/${v.code}/failures`)).status, 403);
+		assert.equal((await vpi(creds[2].cookie, 'GET', '/redeem-failures')).status, 403);
+	});
+
 	it('lets roots delete systems', async () => {
 		assert.equal((await root('DELETE', `/api/systems/${SYSTEM}`)).status, 204);
 		assert.equal((await user('GET', '/api/me')).body.roles[SYSTEM], undefined);

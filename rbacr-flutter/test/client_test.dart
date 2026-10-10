@@ -341,6 +341,36 @@ void main() {
       expect([events.last.id, events.last.via, events.last.grants], [null, null, isEmpty]);
     });
 
+    test('lists failed redeem attempts, for a voucher or all of them', () async {
+      final seen = <http.Request>[];
+      Map<String, Object?> failure(bool known) => {
+        'id': 'f1',
+        'code': known ? 'SPRING-SALE' : 'NOPE',
+        'known': known,
+        'systemId': known ? 'presence' : null,
+        'email': 'ana@x.com',
+        'attemptedAt': '2026-10-10T08:00:00.000Z',
+        'via': 'api',
+        'status': known ? 409 : 404,
+        'reason': known ? 'This voucher has expired' : 'Voucher not found',
+      };
+      final client = fake(
+        (req) => reply({
+          'failures': [failure(req.url.path.contains('/vouchers/'))],
+        }),
+        seen: seen,
+      );
+      final mine = (await client.listRedeemFailures(code: 'SPRING SALE')).single;
+      final all = (await client.listRedeemFailures()).single;
+      expect(seen.map((r) => r.url.path), ['/api/vouchers/SPRING%20SALE/failures', '/api/redeem-failures']);
+      expect(
+        [mine.known, mine.systemId, mine.status, mine.reason],
+        [true, 'presence', 409, 'This voucher has expired'],
+      );
+      expect([all.known, all.code, all.systemId, all.status], [false, 'NOPE', null, 404]);
+      expect(all.attemptedAt, DateTime.utc(2026, 10, 10, 8));
+    });
+
     test('redeeming returns the first grant, or all of them', () async {
       Map<String, Object?> grant(String role) => {
         'systemId': 'presence',
