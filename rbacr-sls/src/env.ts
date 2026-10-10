@@ -1,4 +1,6 @@
 import { defineEnvVars } from '@sveltejs/kit/env';
+import { parseCorsOrigins } from './lib/server/cors';
+import { parseAudiences } from './lib/server/idtokens';
 import { Allowlist } from './lib/server/identity';
 import { DEFAULT_SESSION_RETENTION_DAYS } from './lib/server/session';
 import { BOOTSTRAP_TOKEN_RE } from './lib/server/tokens';
@@ -55,6 +57,18 @@ export const variables = defineEnvVars({
 	},
 	RBACR_GOOGLE_CLIENT_ID: { description: 'Google OAuth client id', schema: optional },
 	RBACR_GOOGLE_CLIENT_SECRET: { description: 'Google OAuth client secret', schema: optional },
+	RBACR_GOOGLE_AUDIENCES: {
+		description:
+			"Comma-separated Google OAuth client ids whose users' ID tokens /api accepts on its self-service routes (SPEC I1-I5), e.g. an app's web, Android and iOS clients. Empty: ID tokens are refused.",
+		// parsed here so an invalid entry stops the app from starting
+		schema: (value) => parseAudiences(value).join(',')
+	},
+	RBACR_CORS_ORIGINS: {
+		description:
+			'Comma-separated web origins (e.g. https://app.example.com) allowed to call /api from the browser (SPEC H3, H4). Empty: no CORS.',
+		// parsed here so an invalid entry stops the app from starting
+		schema: (value) => parseCorsOrigins(value).join(',')
+	},
 	RBACR_PUBLIC_ORIGIN: {
 		description:
 			'The origin users browse, e.g. https://rbacr.nu01.com. Builds the Google redirect URI; defaults to the request origin.',

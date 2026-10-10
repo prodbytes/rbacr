@@ -17,10 +17,43 @@ process.env.RBACR_ORIGIN_SECRET = 'test-origin-secret';
 process.env.RBACR_VERSION = '1.2.3-RC';
 process.env.RBACR_STRIPE_WEBHOOK_SECRET = 'whsec_test';
 process.env.RBACR_STRIPE_API_KEY = 'rk_test_unused';
+process.env.RBACR_GOOGLE_AUDIENCES = 'app-web.apps.googleusercontent.com,app-android.apps.googleusercontent.com';
+process.env.RBACR_CORS_ORIGINS = 'https://app.example.com,http://localhost:8080';
+const APP_ORIGIN = 'https://app.example.com';
 // The Lambda sees the function URL's Host; CloudFront sends the site's host in
 // x-rbacr-host (an origin custom header), which adapter-node reads.
 process.env.HOST_HEADER = 'x-rbacr-host';
 const FROM_CLOUDFRONT = { 'x-rbacr-origin-secret': 'test-origin-secret', 'x-rbacr-host': 'rbacr.example.com' };
+
+// Google's ID token keys (SPEC I2), served by a stubbed fetch: a key made here signs the test's ID tokens.
+const GOOGLE_JWKS_URL = 'https://www.googleapis.com/oauth2/v3/certs';
+const googleKey = await crypto.subtle.generateKey(
+	{ name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' },
+	true,
+	['sign', 'verify']
+);
+const { kty, n, e } = await crypto.subtle.exportKey('jwk', googleKey.publicKey);
+const realFetch = globalThis.fetch;
+globalThis.fetch = async (input, init) =>
+	String(input) === GOOGLE_JWKS_URL
+		? Response.json({ keys: [{ kty, n, e, kid: 'test-kid', alg: 'RS256', use: 'sig' }] }, { headers: { 'cache-control': 'max-age=3600' } })
+		: realFetch(input, init);
+
+const b64 = (value) => Buffer.from(JSON.stringify(value)).toString('base64url');
+async function idToken(claims) {
+	const now = Math.floor(Date.now() / 1000);
+	const input = `${b64({ alg: 'RS256', kid: 'test-kid', typ: 'JWT' })}.${b64({
+		iss: 'https://accounts.google.com',
+		aud: 'app-web.apps.googleusercontent.com',
+		email: 'boss@example.com', // a root (RBACR_ROOT_LIST above)
+		email_verified: true,
+		iat: now,
+		exp: now + 3600,
+		...claims
+	})}`;
+	const signature = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', googleKey.privateKey, new TextEncoder().encode(input));
+	return `${input}.${Buffer.from(signature).toString('base64url')}`;
+}
 
 let handler;
 before(async () => {
@@ -92,6 +125,69 @@ describe('lambda handler', () => {
 			const res = await invoke(path);
 			assert.equal(res.statusCode, 401, path);
 			assert.equal(res.headers['cache-control'], 'no-store');
+		}
+	});
+
+	it('adds CORS headers for listed origins on /api, errors included (H3)', async () => {
+		const res = await invoke('/api/me', { headers: { origin: APP_ORIGIN } });
+		assert.equal(res.statusCode, 401);
+		assert.equal(res.headers['access-control-allow-origin'], APP_ORIGIN);
+		assert.match(res.headers.vary, /Origin/);
+		assert.equal(res.headers['access-control-allow-credentials'], undefined);
+		for (const origin of ['https://evil.example', 'https://app.example.com.evil.example', undefined]) {
+			const other = await invoke('/api/me', { headers: origin ? { origin } : {} });
+			assert.equal(other.statusCode, 401);
+			assert.equal(other.headers['access-control-allow-origin'], undefined, origin);
+		}
+	});
+
+	it('answers preflights for the self-service routes and listed origins only (H4)', async () => {
+		const ask = (path, method, origin = APP_ORIGIN) =>
+			invoke(path, {
+				method: 'OPTIONS',
+				headers: { origin, 'access-control-request-method': method, 'access-control-request-headers': 'authorization,content-type' }
+			});
+		for (const [path, method] of [['/api/me', 'GET'], ['/api/check', 'POST'], ['/api/roles', 'POST'], ['/api/systems/presence/status', 'GET'], ['/api/vouchers/redeem', 'POST']]) {
+			const res = await ask(path, method);
+			assert.equal(res.statusCode, 204, path);
+			assert.equal(res.headers['access-control-allow-origin'], APP_ORIGIN);
+			assert.equal(res.headers['access-control-allow-methods'], 'GET, POST');
+			assert.equal(res.headers['access-control-allow-headers'], 'Authorization, Content-Type');
+			assert.equal(res.headers['access-control-max-age'], '600');
+		}
+		for (const res of [await ask('/api/systems', 'POST'), await ask('/api/me', 'DELETE'), await ask('/api/me', 'GET', 'https://evil.example')]) {
+			assert.equal(res.statusCode, 403);
+			assert.equal(res.headers['access-control-allow-origin'], undefined);
+		}
+	});
+
+	it('keeps /vpi and other paths free of CORS (A3)', async () => {
+		const vpi = await invoke('/vpi/session', { headers: { origin: APP_ORIGIN, 'x-rbacr-vpi': '1', 'sec-fetch-site': 'cross-site' } });
+		assert.equal(vpi.statusCode, 403);
+		assert.equal(vpi.headers['access-control-allow-origin'], undefined);
+		const preflight = await invoke('/vpi/session', { method: 'OPTIONS', headers: { origin: APP_ORIGIN, 'access-control-request-method': 'GET' } });
+		assert.equal(preflight.statusCode, 403);
+		assert.equal(preflight.headers['access-control-allow-origin'], undefined);
+		const health = await invoke('/health', { headers: { origin: APP_ORIGIN } });
+		assert.equal(health.headers['access-control-allow-origin'], undefined);
+	});
+
+	it("keeps an app's Google ID token to the self-service routes, a root's included (I4, I5)", async () => {
+		const token = await idToken();
+		for (const [method, path] of [['POST', '/api/systems'], ['GET', '/api/systems'], ['GET', '/api/global-grants'], ['DELETE', '/api/vouchers/ABCD'], ['GET', '/api/nope']]) {
+			const res = await invoke(path, { method, headers: { authorization: `Bearer ${token}`, origin: APP_ORIGIN, 'content-type': 'application/json' }, body: '{}' });
+			assert.equal(res.statusCode, 403, `${method} ${path}`);
+			assert.match(JSON.parse(res.body).error, /self-service/);
+			assert.equal(res.headers['access-control-allow-origin'], APP_ORIGIN);
+		}
+	});
+
+	it('refuses ID tokens Google did not issue to a trusted client (I2)', async () => {
+		const forged = (await idToken()).replace(/\.[^.]+$/, '.' + Buffer.from('forged').toString('base64url'));
+		for (const token of [forged, await idToken({ aud: 'other-app.apps.googleusercontent.com' }), await idToken({ email_verified: false }), await idToken({ exp: 1 })]) {
+			const res = await invoke('/api/systems', { headers: { authorization: `Bearer ${token}` } });
+			assert.equal(res.statusCode, 401);
+			assert.equal(res.headers['www-authenticate'], 'Bearer');
 		}
 	});
 

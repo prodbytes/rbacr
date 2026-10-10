@@ -2,9 +2,13 @@ import { timingSafeEqual } from 'node:crypto';
 import type { Handle } from '@sveltejs/kit/hooks';
 import { dev } from '$app/env';
 import { RBACR_ORIGIN_SECRET, RBACR_PUBLIC_ORIGIN } from '$app/env/private';
+import { addCorsHeaders, allowedOrigin, isPreflight, preflight } from '#lib/server/cors.js';
 import { isCrossSiteForm } from '#lib/server/csrf.js';
-import { getServices } from '#lib/server/services.js';
+import { looksLikeJwt } from '#lib/server/idtokens.js';
+import { appMayCall } from '#lib/server/rbac.js';
+import { corsOrigins, getServices, googleIdTokens } from '#lib/server/services.js';
 import { SESSION_COOKIE } from '#lib/server/session.js';
+import { TOKEN_PREFIX } from '#lib/server/tokens.js';
 import { rejectNonFrontend } from '#lib/server/vpiguard.js';
 
 const ORIGIN_SECRET_HEADER = 'x-rbacr-origin-secret';
@@ -35,19 +39,54 @@ export const handle: Handle = async ({ event, resolve }) => {
 		}
 	}
 	event.locals.email = null;
+	event.locals.app = false;
 	const api = path === '/api' || path.startsWith('/api/');
+	// H3: CORS on /api for the listed web origins only; /vpi never gets it (A3).
+	const cors = api ? corsOrigins() : [];
+	const origin = cors.length ? allowedOrigin(event.request, cors) : null;
+	const withCors = (response: Response) => {
+		if (cors.length) addCorsHeaders(response.headers, origin);
+		return response;
+	};
 	if (api) {
-		// The external API takes personal API tokens only, never the session, and
-		// refuses everything else before routing, unknown paths included.
+		// H4: preflights are answered for the self-service routes (I4) only.
+		if (cors.length && isPreflight(event.request)) return preflight(event.request, origin, (method) => appMayCall(method, path));
+		// The external API takes personal API tokens (T3) and, when configured,
+		// apps' Google ID tokens (I1-I3), never the session; it refuses
+		// everything else before routing, unknown paths included.
 		const [scheme, bearer] = (event.request.headers.get('authorization') ?? '').trim().split(/\s+/);
 		if (scheme?.toLowerCase() === 'bearer' && bearer) {
-			const { tokens } = await getServices();
-			event.locals.email = await tokens.authenticate(bearer);
+			const idTokens = bearer.startsWith(TOKEN_PREFIX) ? null : googleIdTokens();
+			if (idTokens && looksLikeJwt(bearer)) {
+				try {
+					event.locals.email = await idTokens.verify(bearer);
+				} catch (err) {
+					console.error("Can't check Google ID tokens:", (err as Error).message);
+					return withCors(
+						Response.json({ error: "rbacr can't check Google ID tokens right now" }, { status: 503, headers: { 'cache-control': 'no-store' } })
+					);
+				}
+				event.locals.app = event.locals.email !== null;
+			} else {
+				const { tokens } = await getServices();
+				event.locals.email = await tokens.authenticate(bearer);
+			}
 		}
 		if (!event.locals.email) {
-			return Response.json(
-				{ error: 'A valid API token is required' },
-				{ status: 401, headers: { 'www-authenticate': 'Bearer', 'cache-control': 'no-store' } }
+			return withCors(
+				Response.json(
+					{ error: 'A valid API token is required' },
+					{ status: 401, headers: { 'www-authenticate': 'Bearer', 'cache-control': 'no-store' } }
+				)
+			);
+		}
+		// I4, I5: an ID token reaches the self-service routes only, whoever it names.
+		if (event.locals.app && !appMayCall(event.request.method, path)) {
+			return withCors(
+				Response.json(
+					{ error: "A Google ID token only reaches rbacr's self-service routes; use a personal API token" },
+					{ status: 403, headers: { 'cache-control': 'no-store' } }
+				)
 			);
 		}
 	}
@@ -62,5 +101,5 @@ export const handle: Handle = async ({ event, resolve }) => {
 	response.headers.set('referrer-policy', 'same-origin');
 	response.headers.set('x-frame-options', 'DENY');
 	if (vpi || api) response.headers.set('cache-control', 'no-store');
-	return response;
+	return api ? withCors(response) : response;
 };

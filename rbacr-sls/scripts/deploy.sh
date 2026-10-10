@@ -33,6 +33,12 @@
 #   RBACR_GOOGLE_CLIENT_ID, RBACR_GOOGLE_CLIENT_SECRET
 #                 required on the first deploy of a stage; afterwards, unset
 #                 ones keep their deployed values
+#   RBACR_GOOGLE_AUDIENCES  comma-separated Google OAuth client ids whose
+#                 users' ID tokens /api accepts (SPEC I1-I5); empty or unset
+#                 turns them off. Passed on every deploy, like the root list.
+#   RBACR_CORS_ORIGINS  comma-separated web origins allowed to call /api from
+#                 the browser (SPEC H3, H4); empty or unset: no CORS. Passed
+#                 on every deploy.
 #   RBACR_STRIPE_WEBHOOK_SECRET, RBACR_STRIPE_API_KEY
 #                 optional (the paid-subscription sync); unset ones keep
 #                 their deployed values
@@ -107,11 +113,20 @@ if [[ ! "${RBACR_ROOT_LIST:-}" =~ ^[A-Za-z0-9._%+@,\ -]*$ ]]; then
   echo "error: RBACR_ROOT_LIST must be comma-separated addresses or domains" >&2
   exit 1
 fi
+if [[ ! "${RBACR_GOOGLE_AUDIENCES:-}" =~ ^[A-Za-z0-9._,\ -]*$ ]]; then
+  echo "error: RBACR_GOOGLE_AUDIENCES must be comma-separated Google OAuth client ids" >&2
+  exit 1
+fi
+if [[ ! "${RBACR_CORS_ORIGINS:-}" =~ ^[A-Za-z0-9.:/,\ -]*$ ]]; then
+  echo "error: RBACR_CORS_ORIGINS must be comma-separated origins like https://app.example.com" >&2
+  exit 1
+fi
 
 # The parameters: settings that are set override; unset secrets keep their
 # deployed values, but a stage's first deploy needs all of them.
 params=("DomainName=$DOMAIN" "HostedZoneId=$HOSTED_ZONE_ID" "Version=$RELEASE"
-  "RootList=${RBACR_ROOT_LIST:-}")
+  "RootList=${RBACR_ROOT_LIST:-}"
+  "GoogleAudiences=${RBACR_GOOGLE_AUDIENCES:-}" "CorsOrigins=${RBACR_CORS_ORIGINS:-}")
 first_deploy=true; stack_exists "$STACK" && first_deploy=false
 for pair in GoogleClientId:RBACR_GOOGLE_CLIENT_ID GoogleClientSecret:RBACR_GOOGLE_CLIENT_SECRET; do
   param="${pair%%:*}" name="${pair#*:}"
@@ -138,6 +153,8 @@ fi
 # Addresses are people's: logged only as a count.
 roots=0; [[ -n "${RBACR_ROOT_LIST:-}" ]] && roots=$(tr ',' '\n' <<<"$RBACR_ROOT_LIST" | grep -c .)
 echo "    root allow list: $roots entr(ies)"
+echo "    Google ID token audiences: ${RBACR_GOOGLE_AUDIENCES:-none}"
+echo "    CORS origins: ${RBACR_CORS_ORIGINS:-none}"
 
 # 1. Build and package
 zip=dist/rbacr-lambda.zip

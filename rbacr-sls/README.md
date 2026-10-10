@@ -75,6 +75,11 @@ app on AWS Lambda. Run every command below from this folder
 - **API tokens** let scripts and other applications call rbacr as a person.
   Anyone creates their own on `/me`. A token can do what its owner can do;
   for example, a root's token can ask whether anyone holds a role.
+- **Apps can call rbacr as their users.** An app that signs its users in
+  with Google can send the user's Google ID token instead of an API token,
+  straight from the app (web, Android, iOS), for the user's own roles, a
+  system's status and redeeming vouchers, and nothing else, not even for
+  a root. See [Apps calling rbacr as their users](#apps-calling-rbacr-as-their-users).
 
 [SPEC.md](SPEC.md) has the full rules, permission matrix and API reference.
 
@@ -120,6 +125,8 @@ Devbox scripts: `devbox run dev | test | check | build | certs | release-rc | re
 | `RBACR_BOOTSTRAP_TOKEN` / `RBACR_BOOTSTRAP_EMAIL` | no | Local only (needs `RBACR_DYNAMODB_ENDPOINT`): a fixed API token (`rbacr_` + 32 or more base64url characters) made live for that address, see [Local rbacr for your app](#local-rbacr-for-your-app) |
 | `RBACR_ROOT_LIST` | no | Comma-separated root addresses and/or domains, e.g. `ana@example.com, @example.org`: the only way to be a root. An invalid entry stops the app from starting. In AWS it defaults to `@nu01.com`. |
 | `RBACR_GOOGLE_CLIENT_ID` / `RBACR_GOOGLE_CLIENT_SECRET` | for sign-in | Google OAuth web client |
+| `RBACR_GOOGLE_AUDIENCES` | no | Comma-separated Google OAuth client ids whose users' ID tokens `/api` accepts on its self-service routes; empty turns it off. See [Apps calling rbacr as their users](#apps-calling-rbacr-as-their-users). In AWS, the `RBACR_GA_GOOGLE_AUDIENCES` / `RBACR_RC_GOOGLE_AUDIENCES` repository variables. |
+| `RBACR_CORS_ORIGINS` | no | Comma-separated web origins (exact, e.g. `https://app.example.com`) allowed to call `/api` from the browser; empty: no CORS. In AWS, `RBACR_GA_CORS_ORIGINS` / `RBACR_RC_CORS_ORIGINS`. |
 | `RBACR_PUBLIC_ORIGIN` | no | The origin users browse, used for the Google redirect URI (default: the request's origin) |
 | `RBACR_ORIGIN_SECRET` | no | When set, every request must carry it in `x-rbacr-origin-secret`. In AWS, CloudFront adds it, so the Lambda URL can't be called directly. |
 | `RBACR_VERSION` | no | The release version, reported by `/health` (default `dev`) |
@@ -231,7 +238,7 @@ Dev server settings (pass with `-e`, `--env-file` or the compose files):
 | `PORT` | `8686` | Port inside the container |
 | `RBACR_DYNAMODB_TABLE` | `rbacr` | Table name in DynamoDB Local (the sessions table is `<name>-sessions`) |
 | `RBACR_VERSION` | `local` | Version reported by `/health` |
-| `RBACR_GOOGLE_CLIENT_ID` / `RBACR_GOOGLE_CLIENT_SECRET`, `RBACR_PUBLIC_ORIGIN`, `RBACR_SESSION_RETENTION_DAYS`, `RBACR_STRIPE_*` | unset | As in [Configuration](#configuration), for the UI's sign-in or the Substack sync |
+| `RBACR_GOOGLE_CLIENT_ID` / `RBACR_GOOGLE_CLIENT_SECRET`, `RBACR_GOOGLE_AUDIENCES`, `RBACR_CORS_ORIGINS`, `RBACR_PUBLIC_ORIGIN`, `RBACR_SESSION_RETENTION_DAYS`, `RBACR_STRIPE_*` | unset | As in [Configuration](#configuration), for the UI's sign-in or the Substack sync |
 
 `RBACR_DYNAMODB_ENDPOINT` is set by the container (its own DynamoDB Local
 on port 8000, not published). `RBACR_DEV_LOGIN` has no effect: it is a
@@ -367,12 +374,57 @@ export async function hasRole(email: string, systemId: string, role: string): Pr
   beyond the token owner's reach, 404 unknown system or role. Fail closed:
   deny access when rbacr can't answer.
 
+### Apps calling rbacr as their users
+
+An app that signs its users in with Google (e.g. Flutter on the web,
+Android and iOS) can call rbacr **as the signed-in user**, straight from
+the app, with the Google ID token it already has: no API token to create,
+store or ship. It sends `Authorization: Bearer <ID token>` to these
+self-service routes only (SPEC I4):
+
+| Route | For |
+|-------|-----|
+| `GET /api/me` | the user's own roles |
+| `POST /api/roles`, `POST /api/check` | the user's own address only |
+| `GET /api/systems/:id/status` | maintenance (R12) |
+| `POST /api/vouchers/redeem` | redeeming a voucher for the user |
+
+Every other `/api` route answers 403 to an ID token, even when the user is
+a root: managing rbacr always takes a personal API token. rbacr checks the
+token's Google signature, issuer, expiry and verified e-mail, and that it
+was issued to one of the app's OAuth clients (SPEC I2).
+[rbacr-flutter](../rbacr-flutter/README.md#your-users-google-id-token)
+takes the ID token from its `tokenProvider`.
+
+To let an app do this, a root adds to the stage's settings (the
+`RBACR_GA_*` / `RBACR_RC_*` repository variables, then a deploy; locally,
+`.env`):
+
+1. **Its Google OAuth client ids** to `RBACR_GOOGLE_AUDIENCES`,
+   comma-separated. On Android and iOS, Google Sign-In issues the ID token
+   to the **web** client id the app passes as `serverClientId`, so list the
+   web client id, plus the Android and iOS client ids if the app ever gets
+   tokens issued to them. List only your own apps' clients: any listed
+   client's users can act as themselves on every system's self-service
+   routes (SPEC I6).
+2. **Its web origins** to `RBACR_CORS_ORIGINS`, comma-separated and exact
+   (scheme, host and port), when it runs in a browser (Flutter web), e.g.
+   `https://presence.nu01.com,https://rc.presence.nu01.com,http://localhost:8080`.
+   Listed origins get CORS headers on `/api` (errors included) and their
+   preflights answered for the routes above; other origins get none
+   (SPEC H3, H4). Native apps don't need it.
+
+```bash
+gh variable set RBACR_RC_GOOGLE_AUDIENCES --body "<web client id>,<android client id>,<ios client id>"
+gh variable set RBACR_RC_CORS_ORIGINS --body "https://rc.presence.nu01.com,http://localhost:8080"
+```
+
 ### The two interfaces
 
 | | `/api`: the API (external) | `/vpi`: the VPI (view programming interface, frontend only) |
 |---|---|---|
 | For | scripts and other applications | rbacr's own pages |
-| Auth | personal API token, `Authorization: Bearer rbacr_…` | the browser session cookie |
+| Auth | personal API token, `Authorization: Bearer rbacr_…`; an app's Google ID token on the self-service routes | the browser session cookie |
 | Contract | stable, documented in [SPEC.md](SPEC.md#api-the-external-api-personal-api-token-a1) | shaped for the pages, may change |
 
 Every `/api` request, unknown paths included, needs a valid personal API

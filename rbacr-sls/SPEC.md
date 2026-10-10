@@ -18,6 +18,7 @@ and the README in sync with the code.
 | Voucher | A code that grants a role to whoever redeems it: in one system, or globally (a global grant). |
 | Subscriber | A paying subscriber of the newsletter (Substack) whose payments run on the publisher's Stripe account. |
 | API token | A person's secret token for the external API (`/api`). It acts as that person, with their current roles. |
+| ID token | A Google-signed token (JWT) an application gets when its user signs in with Google. Sent to `/api` by that application, it acts as the user on the self-service routes only (I1-I6). |
 | Notification | A warning for the roots (rbacr's admins), raised by a verification rule (N1-N4). |
 
 ## Identity and sign-in
@@ -168,22 +169,23 @@ and the README in sync with the code.
 
 ## Permissions
 
-| Action | Root | Anyone signed in |
-|--------|:----:|:----------------:|
-| See own roles, redeem a voucher | ✓ | ✓ |
-| Create, list or revoke **own API tokens** | ✓ | ✓ |
-| Ask about **own** roles (`/api/me`, `/api/check`, `/api/roles`) | ✓ | ✓ |
-| See a system's status: name, URL, maintenance (R12) | ✓ | ✓ |
-| Ask about **another** identity's roles, global roles included | ✓ | — |
-| List or see systems, their grants and vouchers | ✓ | — |
-| Create, configure or delete systems; add or remove roles; register implications | ✓ | — |
-| Grant or revoke roles, to addresses, domains or globally | ✓ | — |
-| Create, list or disable vouchers (per system or global) | ✓ | — |
-| See the root allow list (`/settings`) | ✓ | — |
-| See, check or dismiss notifications (N1-N4) | ✓ | — |
+| Action | Root | Anyone signed in | Through an app's ID token (I4, I5) |
+|--------|:----:|:----------------:|:----------------:|
+| See own roles, redeem a voucher | ✓ | ✓ | ✓ |
+| Create, list or revoke **own API tokens** | ✓ | ✓ | — |
+| Ask about **own** roles (`/api/me`, `/api/check`, `/api/roles`) | ✓ | ✓ | ✓ |
+| See a system's status: name, URL, maintenance (R12) | ✓ | ✓ | ✓ |
+| Ask about **another** identity's roles, global roles included | ✓ | — | — |
+| List or see systems, their grants and vouchers | ✓ | — | — |
+| Create, configure or delete systems; add or remove roles; register implications | ✓ | — | — |
+| Grant or revoke roles, to addresses, domains or globally | ✓ | — | — |
+| Create, list or disable vouchers (per system or global) | ✓ | — | — |
+| See the root allow list (`/settings`) | ✓ | — | — |
+| See, check or dismiss notifications (N1-N4) | ✓ | — | — |
 
 - **P1** Only roots manage: everything but the first four rows is refused
-  to anyone else with 403. Holding a role (any name) never grants
+  to anyone else with 403, and to everyone, roots included, calling through
+  an application's ID token (I5). Holding a role (any name) never grants
   management.
 - **P2** Removing a role also revokes its grants, removes its implications,
   disables its vouchers and clears it as its system's subscriber role.
@@ -422,7 +424,8 @@ Stripe Connect. That account sends webhooks, so rbacr syncs from Stripe:
 ## Two APIs
 
 - **A1** `/api` is the **external API** (API), for scripts and other
-  applications. It authenticates only with a personal API token (T3). Every
+  applications. It authenticates with a personal API token (T3) or, on its
+  self-service routes only, an application's Google ID token (I1-I6). Every
   request under `/api`, unknown paths included, is refused with 401 before
   routing unless it carries a valid token, so no `/api` endpoint is public.
   The session cookie is ignored there, even when the browser sends it.
@@ -441,7 +444,7 @@ Stripe Connect. That account sends webhooks, so rbacr syncs from Stripe:
     it must match.
 
   The custom header forces a CORS preflight from any other origin, and rbacr
-  never answers preflights. Browser scripts can't forge `Sec-Fetch-Site`, and
+  never answers preflights to `/vpi` (only some of `/api`'s, H4). Browser scripts can't forge `Sec-Fetch-Site`, and
   the session cookie is `HttpOnly`. `/vpi` responses are `Cache-Control:
   no-store`.
 - **A4** Limit: a non-browser client that copies a user's session cookie and
@@ -487,14 +490,59 @@ Stripe Connect. That account sends webhooks, so rbacr syncs from Stripe:
   apps call `/api` without signing in, taking `RBACR_TOKEN` (C7) when
   `RBACR_BOOTSTRAP_TOKEN` is unset, and else generating one.
 
+## Application ID tokens
+
+Applications whose users sign in with Google can call a few `/api` routes
+straight from the app (Flutter on the web, Android or iOS), as the user,
+with the Google ID token the app already has, instead of a personal API
+token.
+
+- **I1** `RBACR_GOOGLE_AUDIENCES` lists the Google OAuth client ids whose
+  ID tokens rbacr accepts (comma-separated). Empty or unset turns ID tokens
+  off: such a bearer value is then just an invalid token (401). An invalid
+  entry stops the app from starting.
+- **I2** An `Authorization: Bearer` value that isn't an `rbacr_` token and
+  has a JWT's shape is accepted as an ID token only when all of these hold:
+  it is signed with RS256 (no other algorithm, no `crit` header) by a key
+  of Google's JWKS (`https://www.googleapis.com/oauth2/v3/certs`, found by
+  its `kid`); `iss` is `accounts.google.com` or
+  `https://accounts.google.com`; `aud` is a single client id on the I1 list;
+  `exp` is in the future and `iat`/`nbf`, when present, not in the future,
+  each with 60 seconds of clock skew; `email_verified` is true; and `email`
+  is a valid address. Anything else is a 401 like an invalid token (T3).
+  Tokens are never logged or stored.
+- **I3** The identity is the token's `email`, lower-cased, exactly as if
+  the user had signed in to rbacr (S1). Google's keys are cached per
+  process for their `Cache-Control: max-age` (at most a day, an hour
+  without one); an unknown `kid` fetches them again, at most once a minute.
+  When the keys can't be fetched and none are cached, the request gets 503.
+- **I4 Self-service only.** An ID token reaches exactly these routes:
+  `GET /api/me`, `POST /api/roles` and `POST /api/check` about the user's
+  own address (T6), `GET /api/systems/:id/status` (R12) and
+  `POST /api/vouchers/redeem` (which grants to the user's own address,
+  V4). Every other `/api` request with an ID token, unknown paths included,
+  gets 403 before routing, whatever the user's roles.
+- **I5** An ID token never carries root powers, even for an address on the
+  root list: management stays with personal tokens, and
+  `/api/roles`/`/api/check` about anyone else get 403. The user still holds
+  their roles: `GET /api/me` reports `root: true` and every role for a
+  root, and role checks about themselves answer as R2 says.
+- **I6** Any application whose client id is listed can use its users' ID
+  tokens on any system's self-service routes, as those users. List only
+  your own applications' clients. On Android and iOS, Google Sign-In issues
+  the ID token to the **web** client id the app passes as `serverClientId`,
+  so that id must be listed.
+
 ## Client integration
 
 How applications use rbacr. The README has a walkthrough with examples.
 
-- **C1** rbacr does not authenticate an application's users. The application
+- **C1** rbacr does not sign in an application's users. The application
   signs them in itself and asks rbacr about the verified e-mail address,
   server-side, with a personal API token (T1-T5). rbacr trusts the address
-  it is given.
+  it is given. Alternatively, an application that signs its users in with
+  Google asks about the signed-in user only, from the app itself, with the
+  user's ID token (I1-I6).
 - **C2** A token sees what its owner may see (T6): a root's token, anyone's
   roles everywhere plus global roles; anyone else's, only their own.
   Applications that ask about their users need a root-owned token, so they
@@ -530,18 +578,19 @@ How applications use rbacr. The README has a walkthrough with examples.
 
 ## HTTP interface
 
-### `/api`: the external API (personal API token, A1)
+### `/api`: the external API (personal API token, A1; ID tokens on the self-service routes, I4)
 
 Errors are returned as
 `{ "error": "message" }` with status 400 (invalid input), 401 (no valid token),
 403 (forbidden), 404 (not found) or 409 (conflict, inactive or already
-redeemed voucher), or 402 (the voucher needs payment, V4a). Dates are
+redeemed voucher), or 402 (the voucher needs payment, V4a), or 503 (Google's
+ID token keys unreachable, I3). Dates are
 ISO-8601 strings in UTC.
 
 | Method & path | Body | Response |
 |---------------|------|----------|
-| `GET /api/me` | — | `{ email, root, globalRoles: ["root"] or [], roles: { systemId: [role] } }` |
-| `POST /api/vouchers/redeem` | `{ code }` | the grant of the voucher's first role with `impliedRoles` (`systemId: null` and `impliedRolesBySystem` when global), plus `grants`: one per role (V4); or 402 (V4a) |
+| `GET /api/me` | — | `{ email, root, globalRoles: ["root"] or [], roles: { systemId: [role] } }` (ID tokens too, I4, I5) |
+| `POST /api/vouchers/redeem` (ID tokens too, I4) | `{ code }` | the grant of the voucher's first role with `impliedRoles` (`systemId: null` and `impliedRolesBySystem` when global), plus `grants`: one per role (V4); or 402 (V4a) |
 | `GET /api/vouchers` | — | `{ vouchers: [...] }`, the global vouchers (roots) |
 | `POST /api/vouchers` | `{ roles (or role), code?, discountPercent?, startsAt?, endsAt?, maxUses? }` | 201, a global voucher (roots) |
 | `GET /api/global-grants` | — | `{ grants: [{ systemId: null, role, grantee, grantedBy, grantedAt, startsAt, endsAt, status, voucherCode, impliedRoles: [], impliedRolesBySystem }] }` (roots, R8, G1) |
@@ -554,7 +603,7 @@ ISO-8601 strings in UTC.
 | `GET /api/systems` | — | `{ systems: [{ id, name, roles, implies: { role: [role] }, subscriberRole, everyone: [role], url, maintenance, description, screenshotUrl }] }` (only manageable systems; `implies` lists direct implications) |
 | `POST /api/systems` | `{ id, name?, roles?: [string] }` | 201, the system with exactly the given roles (R4) |
 | `GET /api/systems/:id` | — | `{ id, name, roles, implies, subscriberRole, everyone, url, maintenance, description, screenshotUrl }` |
-| `GET /api/systems/:id/status` | — | `{ id, name, url, maintenance }` (any token, R12) |
+| `GET /api/systems/:id/status` | — | `{ id, name, url, maintenance }` (any token, ID tokens included, R12, I4) |
 | `PATCH /api/systems/:id` | `{ subscriberRole?: role or null, url?: URL or null, maintenance?: boolean, description?: text or null, screenshotUrl?: URL or null }`, at least one | the system (roots, Q2, R10, R11, R13) |
 | `DELETE /api/systems/:id` | — | 204 (marks it and its contents deleted, L1, L3) |
 | `POST /api/systems/:id/roles` | `{ role }` | the system |
@@ -565,8 +614,8 @@ ISO-8601 strings in UTC.
 | `DELETE /api/systems/:id/grants` | `{ role, grantee }` | 204 (revokes it, L1) |
 | `GET /api/systems/:id/vouchers` | — | `{ vouchers: [{ code, systemId, roles, role, discountPercent, startsAt, endsAt, maxUses, uses, status, createdBy, createdAt, disabledAt, disabledBy }] }` |
 | `POST /api/systems/:id/vouchers` | `{ roles (or role), code?, discountPercent?, startsAt?, endsAt?, maxUses? }` | 201, the voucher |
-| `POST /api/check` | `{ email, systemId?, role }` | `{ email, systemId, role, allowed, expiresAt, ttl }` (T6, C3a) |
-| `POST /api/roles` | `{ email, systemId? }` | `{ email, systemId, roles: [role] }`, or without `systemId`, `{ email, globalRoles, roles: { systemId: [role] } }` (T6) |
+| `POST /api/check` | `{ email, systemId?, role }` | `{ email, systemId, role, allowed, expiresAt, ttl }` (T6, C3a; ID tokens about themselves, I4) |
+| `POST /api/roles` | `{ email, systemId? }` | `{ email, systemId, roles: [role] }`, or without `systemId`, `{ email, globalRoles, roles: { systemId: [role] } }` (T6; ID tokens about themselves, I4) |
 
 `/api/check` and `/api/roles` are `POST` with a JSON body, so e-mail
 addresses stay out of URLs and access logs.
@@ -649,6 +698,25 @@ to `/`. The pages need JavaScript.
   no `Origin`, and a body-less `DELETE` must reach the token check. rbacr
   applies this itself (src/lib/server/csrf.ts); SvelteKit's own check, which
   can't exempt a path, is off.
+- **H3 CORS.** `RBACR_CORS_ORIGINS` lists web origins (comma-separated,
+  exact: scheme, host and port, no path or wildcard) allowed to call `/api`
+  from the browser. Empty or unset: no CORS headers anywhere, as before.
+  When set, every `/api` response, errors (401, 403, 503) included, carries
+  `Vary: Origin`, and a request whose `Origin` is listed also gets
+  `Access-Control-Allow-Origin: <that origin>` and
+  `Access-Control-Expose-Headers: WWW-Authenticate`. Never
+  `Access-Control-Allow-Credentials`: `/api` takes no cookies (A1). Other
+  origins get no CORS headers, so browsers keep blocking them. `/vpi` and
+  everything outside `/api` never get CORS headers (A3). An invalid entry
+  stops the app from starting.
+- **H4 Preflights.** With `RBACR_CORS_ORIGINS` set, an `OPTIONS` to `/api`
+  with `Access-Control-Request-Method` is answered before authentication:
+  204 with `Access-Control-Allow-Origin`, `Access-Control-Allow-Methods:
+  GET, POST`, `Access-Control-Allow-Headers: Authorization, Content-Type`
+  and `Access-Control-Max-Age: 600` when the origin is listed and the
+  requested method and path are a self-service route (I4); otherwise 403
+  without CORS headers. Responses are `Cache-Control: no-store`; in AWS,
+  CloudFront caches nothing and forwards `Origin` and `OPTIONS` to the app.
 
 ## Configuration
 
@@ -663,6 +731,8 @@ All settings come from environment variables prefixed `RBACR_`:
 | `RBACR_BOOTSTRAP_TOKEN`, `RBACR_BOOTSTRAP_EMAIL` | no | A fixed API token and its owner, for local development only (T7). An invalid token stops the app from starting. |
 | `RBACR_ROOT_LIST` | no (no roots if empty; in AWS the default is `@nu01.com`) | Root addresses and domains (R1, R1a) |
 | `RBACR_GOOGLE_CLIENT_ID`, `RBACR_GOOGLE_CLIENT_SECRET` | for Google sign-in | OAuth web client. Without them `/login/google` returns 503. |
+| `RBACR_GOOGLE_AUDIENCES` | no (ID tokens off if empty) | Comma-separated Google OAuth client ids whose users' ID tokens `/api` accepts on its self-service routes (I1-I6). In AWS, the app stack's `GoogleAudiences` parameter. |
+| `RBACR_CORS_ORIGINS` | no (no CORS if empty) | Comma-separated web origins allowed to call `/api` from the browser (H3, H4). In AWS, the app stack's `CorsOrigins` parameter. |
 | `RBACR_PUBLIC_ORIGIN` | no | Origin for the Google redirect URI (`<origin>/login/google/callback`); default: the request's origin |
 | `RBACR_ORIGIN_SECRET` | no | Required value of the `x-rbacr-origin-secret` header (H1) |
 | `RBACR_VERSION` | no | Version reported by `/health` (default `dev`) |
@@ -702,9 +772,9 @@ All settings come from environment variables prefixed `RBACR_`:
 
 | Suite | Command | Covers |
 |-------|---------|--------|
-| Unit and domain | `npx vitest --run` | Identity parsing, the R*, G*, P*, V*, N*, Q*, T*, L* and D* rules against DynamoDB Local (a Docker container started by the test setup, or `RBACR_TEST_DYNAMODB_ENDPOINT`), the A3 guard, the `next` check (S5), sessions, Google OAuth exchange |
-| Lambda smoke | `npm run test:lambda` | The production build invoked through `lambda.js` with function URL (v2) events: H1, H2, A1, A3 and the Stripe webhook's signature check (Q1), the version, redirects, 401s, static assets. `scripts/package-lambda.sh` reruns it against the deployable bundle. |
-| End-to-end | `npm run test:e2e` | `/api` with personal tokens, `/vpi` as the frontend (notifications and redeem links included, V8, S5), the A1/A3 separation, and the pages, against a running dev server with DynamoDB Local, directly or through Floci over HTTPS |
+| Unit and domain | `npx vitest --run` | Identity parsing, the R*, G*, P*, V*, N*, Q*, T*, L* and D* rules against DynamoDB Local (a Docker container started by the test setup, or `RBACR_TEST_DYNAMODB_ENDPOINT`), the A3 guard, the `next` check (S5), sessions, Google OAuth exchange, ID token verification (I1-I3, against locally made RSA keys and a stubbed JWKS), the self-service scope (I4, I5), CORS (H3, H4) |
+| Lambda smoke | `npm run test:lambda` | The production build invoked through `lambda.js` with function URL (v2) events: H1, H2, H3, H4, A1, A3, I2, I4, I5 (ID tokens signed by a key served from a stubbed JWKS) and the Stripe webhook's signature check (Q1), the version, redirects, 401s, static assets. `scripts/package-lambda.sh` reruns it against the deployable bundle. |
+| End-to-end | `npm run test:e2e` | `/api` with personal tokens (and CORS, H3, H4, with `RBACR_E2E_CORS_ORIGIN`), `/vpi` as the frontend (notifications and redeem links included, V8, S5), the A1/A3 separation, and the pages, against a running dev server with DynamoDB Local, directly or through Floci over HTTPS |
 | Live | `scripts/deploy.sh` (last step) | The deployed site: version, sign-in page, 401 (also for an unknown token, which reads DynamoDB), 404 for `/login/dev`, 403 for the bare function URL |
 
 `npm test` runs the first two.
