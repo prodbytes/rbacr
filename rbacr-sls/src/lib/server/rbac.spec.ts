@@ -273,6 +273,36 @@ describe('roles for everyone', () => {
 	});
 });
 
+describe('maintenance mode', () => {
+	it('gives nobody any role in the system, roots included, until turned off (R11)', async () => {
+		await rbac.grant(root, 'billing', 'viewer', USER);
+		await rbac.grantGlobal(root, 'editor', OTHER);
+		expect((await rbac.getSystem(root, 'billing')).maintenance).toBe(false);
+
+		const on = await rbac.configureSystem(root, 'billing', { maintenance: true });
+		expect(on.maintenance).toBe(true);
+		expect(await rbac.rolesOf(USER)).toEqual({ billing: [] });
+		expect(await rbac.rolesIn(root, OTHER, 'billing')).toEqual([]);
+		expect(await rbac.rolesOf(ROOT)).toMatchObject({ billing: [] });
+		for (const email of [USER, OTHER, ROOT]) {
+			expect(await rbac.checkRole(root, email, 'billing', 'viewer')).toEqual({ allowed: false, expiresAt: null });
+		}
+		// Unknown roles are still 404; grants and global roles are kept.
+		await expectError(rbac.checkRole(root, USER, 'billing', 'nope'), 404);
+		expect((await rbac.listGrants(root, 'billing')).map((g) => g.grantee)).toEqual([USER]);
+		expect(await rbac.globalRolesOf(OTHER)).toEqual(['editor']);
+
+		await rbac.configureSystem(root, 'billing', { maintenance: false });
+		expect(await rbac.rolesOf(USER)).toEqual({ billing: ['viewer'] });
+		expect(await rbac.hasRole(root, ROOT, 'billing', 'editor')).toBe(true);
+	});
+
+	it('is set by roots only, on systems that exist (R11, P1)', async () => {
+		await expectError(rbac.setMaintenance(user, 'billing', true), 403);
+		await expectError(rbac.setMaintenance(root, 'nope', true), 404);
+	});
+});
+
 describe('system URLs', () => {
 	it('are http or https, cleared with null, and readable by anyone (R10)', async () => {
 		const set = await rbac.configureSystem(root, 'billing', { url: ' https://billing.example.com/app ' });

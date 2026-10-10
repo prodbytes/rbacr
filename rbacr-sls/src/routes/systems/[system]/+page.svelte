@@ -46,6 +46,13 @@
 	/** Every identity holds `role` here, or stops holding it through this (R9). */
 	const setEveryone = (role: string, everyone: boolean) =>
 		call(`${base}/roles/${encodeURIComponent(role)}`, 'PUT', { everyone });
+	/** In maintenance, role queries give nobody any role in this system (R11). */
+	async function setMaintenance(on: boolean) {
+		const what = on
+			? `Put ${data.system.id} in maintenance? Its application will see no roles for anyone, roots included, until you turn it off.`
+			: `Take ${data.system.id} out of maintenance? Its roles will be given again.`;
+		if (confirm(what)) await call(base, 'PATCH', { maintenance: on });
+	}
 	async function setUrl(e: SubmitEvent) {
 		const { url } = formValues(e);
 		await call(base, 'PATCH', { url: url.trim() || null });
@@ -105,7 +112,26 @@
 		No URL: role names aren't linked to the system.
 	{/if}
 </p>
+{#if data.system.maintenance}
+	<p class="error">
+		<strong>Maintenance mode is on:</strong> the API gives nobody any role in this system (empty lists, every check
+		denied), roots included. Grants are kept and count again when it's turned off.
+	</p>
+{/if}
 {#if data.root}
+	<label class="row">
+		<input
+			type="checkbox"
+			checked={data.system.maintenance}
+			onchange={(e) => {
+				const on = e.currentTarget.checked;
+				// The page redraws from the server's answer; a cancelled confirm reverts the box.
+				e.currentTarget.checked = data.system.maintenance;
+				setMaintenance(on);
+			}}
+		/>
+		Maintenance mode (no roles are given while it's on)
+	</label>
 	<form class="row" onsubmit={setUrl}>
 		<label>
 			System URL (opens in a new tab)

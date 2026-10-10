@@ -74,6 +74,8 @@ export interface System {
 	everyone: string[];
 	/** Where the system's users go (http or https), which pages link role names to; null for none. */
 	url: string | null;
+	/** In maintenance (R11), role queries give nobody any role here. */
+	maintenance: boolean;
 }
 
 /** A role check (C3, C3a): whether the role is held, and until when at most (null: no end). */
@@ -497,7 +499,7 @@ export class Rbac {
 	async rolesOf(email: string): Promise<RoleMap> {
 		if (!this.isRoot(email)) return this.grantedRoles(email);
 		const systems = await this.allSystems();
-		return Object.fromEntries(systems.map((s) => [s.id, s.roles]));
+		return Object.fromEntries(systems.map((s) => [s.id, s.maintenance ? [] : s.roles]));
 	}
 
 	private async grantedRoles(email: string): Promise<RoleMap> {
@@ -533,6 +535,11 @@ export class Rbac {
 		for (const systemId of [...held.keys()].sort()) {
 			const system = await this.loadSystem(systemId);
 			if (!system) continue;
+			// In maintenance the system gives no roles (R11); its grants stay as they are.
+			if (system.maintenance) {
+				out.set(systemId, new Map());
+				continue;
+			}
 			const edges = new Map(Object.entries(system.implies));
 			const ends = new Map<string, Date | null>();
 			for (const [granted, end] of held.get(systemId)!) {
@@ -606,6 +613,7 @@ export class Rbac {
 			subscriberRole: (meta.subscriberRole as string | undefined) ?? null,
 			everyone: roleItems.filter((it) => it.everyone === true).map((it) => it.name as string),
 			url: (meta.url as string | undefined) ?? null,
+			maintenance: meta.maintenance === true,
 			implVersion: (meta.implVersion as number) ?? 0
 		};
 	}
@@ -657,7 +665,7 @@ export class Rbac {
 			}))
 		]);
 		if (reasons) throw new RbacError(409, `System "${id}" already exists`);
-		return { id, name, roles: [...roles].sort(), implies: {}, subscriberRole: null, everyone: [], url: null };
+		return { id, name, roles: [...roles].sort(), implies: {}, subscriberRole: null, everyone: [], url: null, maintenance: false };
 	}
 
 	/**
@@ -814,19 +822,46 @@ export class Rbac {
 		}
 	}
 
-	/** Applies the system settings given (Q2, R10); at least one is required. */
+	/** Applies the system settings given (Q2, R10, R11); at least one is required. */
 	async configureSystem(
 		actor: Actor,
 		systemId: string,
-		settings: { subscriberRole?: string | null; url?: string | null }
+		settings: { subscriberRole?: string | null; url?: string | null; maintenance?: boolean }
 	): Promise<System> {
-		if (settings.subscriberRole === undefined && settings.url === undefined) {
-			throw badRequest('Give "subscriberRole" or "url" (null clears either)');
+		const { subscriberRole, url, maintenance } = settings;
+		if (subscriberRole === undefined && url === undefined && maintenance === undefined) {
+			throw badRequest('Give "subscriberRole", "url" (null clears either) or "maintenance"');
 		}
 		let system: System | undefined;
-		if (settings.subscriberRole !== undefined) system = await this.setSubscriberRole(actor, systemId, settings.subscriberRole);
-		if (settings.url !== undefined) system = await this.setSystemUrl(actor, systemId, settings.url);
+		if (subscriberRole !== undefined) system = await this.setSubscriberRole(actor, systemId, subscriberRole);
+		if (url !== undefined) system = await this.setSystemUrl(actor, systemId, url);
+		if (maintenance !== undefined) system = await this.setMaintenance(actor, systemId, maintenance);
 		return system!;
+	}
+
+	/**
+	 * Puts a system in maintenance or takes it out (R11). In maintenance role
+	 * queries answer no roles for it, so its application can be fixed while
+	 * nobody is let in; grants, implications and vouchers are untouched and
+	 * give their roles again once it is off.
+	 */
+	async setMaintenance(actor: Actor, systemId: string, maintenance: boolean): Promise<System> {
+		requireRoot(actor, 'Only roots can configure systems');
+		try {
+			await this.table.doc.send(
+				new UpdateCommand({
+					TableName: this.table.name,
+					Key: { PK: sysPK(systemId), SK: 'META' },
+					UpdateExpression: maintenance ? 'SET maintenance = :yes' : 'REMOVE maintenance',
+					ConditionExpression: LIVE_SYSTEM,
+					...(maintenance && { ExpressionAttributeValues: { ':yes': true } })
+				})
+			);
+		} catch (err) {
+			if ((err as Error).name === 'ConditionalCheckFailedException') throw notFound(`System "${systemId}" not found`);
+			throw err;
+		}
+		return this.getSystem(actor, systemId);
 	}
 
 	/** Applies the role settings given (R7, R9); at least one is required. */
@@ -1412,9 +1447,11 @@ export class Rbac {
 			if (!items.length) return denied;
 			return { allowed: true, expiresAt: items.reduce<Date | null | undefined>((e, it) => laterEnd(e, date(it.endsAt)), undefined)! };
 		}
-		await this.requireSystem(systemId);
+		const meta = await this.requireSystem(systemId);
 		const roleItem = await this.get(roleKey(systemId, role));
 		if (!roleItem || !live(roleItem)) throw notFound(`Role "${role}" not found in "${systemId}"`);
+		// In maintenance nobody, roots included, holds a role here (R11).
+		if (meta.maintenance === true) return denied;
 		if (this.isRoot(email)) return { allowed: true, expiresAt: null };
 		const ends = (await this.grantedRoleEnds(email)).get(systemId);
 		if (!ends?.has(role)) return denied;
@@ -1436,8 +1473,9 @@ export class Rbac {
 		return { globalRoles: await this.globalRolesOf(email), roles: await this.rolesOf(email) };
 	}
 
-	private async requireSystem(systemId: string): Promise<void> {
+	private async requireSystem(systemId: string): Promise<Item> {
 		const meta = await this.get({ PK: sysPK(systemId), SK: 'META' });
 		if (!meta || !live(meta)) throw notFound(`System "${systemId}" not found`);
+		return meta;
 	}
 }

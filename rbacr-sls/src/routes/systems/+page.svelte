@@ -39,7 +39,7 @@
 			{#each data.systems as system (system.id)}
 				<tr>
 					<td><a href="/systems/{system.id}"><code>{system.id}</code></a></td>
-					<td>{system.name}</td>
+					<td>{system.name}{#if system.maintenance} <span class="badge">maintenance</span>{/if}</td>
 					<td>
 						{#each system.roles as role, i (role)}{i ? ', ' : ''}<RoleName {role} url={system.url} />{/each}
 					</td>

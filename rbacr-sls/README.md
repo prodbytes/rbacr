@@ -25,6 +25,10 @@ app on AWS Lambda. Run every command below from this folder
   what it implies; no grant per person needed.
 - **System URLs.** A system can have a URL; role names on the pages link to
   it in a new tab, so you can follow a role into its system.
+- **Maintenance mode.** Switched on from a system's page, the API gives
+  nobody any role in that system (empty lists, every check denied, roots
+  included) while you fix its application. Grants are kept and count
+  again as soon as it's off.
 - **Grants have a validity**: an optional start and end (`startsAt`,
   `endsAt`). No start means immediately, no end means forever. Outside it a
   grant gives nothing, and shows as `not-started` or `expired`.

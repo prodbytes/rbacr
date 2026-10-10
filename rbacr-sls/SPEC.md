@@ -48,13 +48,15 @@ and the README in sync with the code.
   system, nor be a voucher's role or a catalog role (400). A `root` grant
   found in storage anyway is ignored.
 - **R2** `root` is the **only built-in role**. Roots hold every role of every
-  system: their effective roles are the full catalog of every system. They
+  system: their effective roles are the full catalog of every system
+  (except systems in maintenance, R11). They
   also hold the single **global role** `root`, which belongs to no system.
   It is reported apart from system roles (`globalRoles`), and nobody else
   can hold it. `root` is therefore reserved and can't be a role name in any
   system's catalog. Roots alone manage rbacr (P1).
 - **R3** Everyone else's effective roles combine the grants to their own
-  address, to their domain and to everyone (R9) that are valid now (G1). A global grant of role R adds R in every system
+  address, to their domain and to everyone (R9) that are valid now (G1),
+  in systems that aren't in maintenance (R11). A global grant of role R adds R in every system
   whose catalog has R, including systems created later. Their `globalRoles`
   are the roles of those global grants.
 - **R4 Roles are registered data.** A system has exactly the roles a root
@@ -101,6 +103,17 @@ and the README in sync with the code.
   `{ url }`. The pages print each role name of the system as a link to it
   that opens in a new tab. `/vpi/me` gives the URLs of the systems the
   signed-in person holds roles in.
+- **R11 Maintenance mode.** A root can put a system in maintenance
+  (`PATCH /api/systems/:id` `{ maintenance: true }`, `false` to end it;
+  off by default, as `maintenance` in the system). While it is on, role
+  queries give nobody any role in that system, roots included:
+  `/api/roles` and `/api/me` list it with no roles, and `/api/check`
+  answers `allowed: false` (an unknown role is still 404), so its
+  application can be fixed while nobody is let in. Nothing else changes:
+  grants, implications, roles for everyone (R9), subscriber grants (Q2)
+  and vouchers are kept and still managed, global roles are unaffected,
+  and the system's roles count again as soon as it is off. The system
+  page shows a toggle and a warning, the systems list a badge.
 
 ## Grant validity
 
@@ -416,10 +429,10 @@ ISO-8601 strings in UTC.
 | `POST /api/global-grants` | `{ role, grantee, startsAt?, endsAt? }` | 201, the global grant, with `impliedRolesBySystem` (roots, G1, G2) |
 | `DELETE /api/global-grants` | `{ role, grantee }` | 204 (roots; revokes it, L1) |
 | `DELETE /api/vouchers/:code` | — | the disabled voucher, with `disabledBy` |
-| `GET /api/systems` | — | `{ systems: [{ id, name, roles, implies: { role: [role] }, subscriberRole, everyone: [role], url }] }` (only manageable systems; `implies` lists direct implications) |
+| `GET /api/systems` | — | `{ systems: [{ id, name, roles, implies: { role: [role] }, subscriberRole, everyone: [role], url, maintenance }] }` (only manageable systems; `implies` lists direct implications) |
 | `POST /api/systems` | `{ id, name?, roles?: [string] }` | 201, the system with exactly the given roles (R4) |
-| `GET /api/systems/:id` | — | `{ id, name, roles, implies, subscriberRole, everyone, url }` |
-| `PATCH /api/systems/:id` | `{ subscriberRole?: role or null, url?: URL or null }`, at least one | the system (roots, Q2, R10) |
+| `GET /api/systems/:id` | — | `{ id, name, roles, implies, subscriberRole, everyone, url, maintenance }` |
+| `PATCH /api/systems/:id` | `{ subscriberRole?: role or null, url?: URL or null, maintenance?: boolean }`, at least one | the system (roots, Q2, R10, R11) |
 | `DELETE /api/systems/:id` | — | 204 (marks it and its contents deleted, L1, L3) |
 | `POST /api/systems/:id/roles` | `{ role }` | the system |
 | `DELETE /api/systems/:id/roles/:role` | — | 204 (removes it, L1, L3) |
