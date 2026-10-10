@@ -57,14 +57,42 @@ export interface System {
 	implies: Record<string, string[]>;
 }
 
+/** When a grant gives its role (G1): from startsAt (null: immediately) until endsAt (exclusive; null: forever). */
+export interface Validity {
+	startsAt: Date | null;
+	endsAt: Date | null;
+}
+
 /** A grant; systemId null is a global grant (the role in every system that defines it). */
-export interface Grant {
+export interface Grant extends Validity {
 	systemId: string | null;
 	role: string;
 	grantee: string;
 	grantedBy: string;
 	grantedAt: Date;
 	voucherCode: string | null;
+}
+
+export type GrantStatus = 'active' | 'not-started' | 'expired';
+
+export function grantStatus(g: Validity, now: Date): GrantStatus {
+	if (g.startsAt && g.startsAt > now) return 'not-started';
+	if (g.endsAt && g.endsAt <= now) return 'expired';
+	return 'active';
+}
+
+const sameValidity = (a: Validity, b: Validity) =>
+	a.startsAt?.getTime() === b.startsAt?.getTime() && a.endsAt?.getTime() === b.endsAt?.getTime();
+
+/** Checks optional start and end dates: valid, and the start before the end. */
+function validValidity(input: Partial<Validity>): Validity {
+	const startsAt = input.startsAt ?? null;
+	const endsAt = input.endsAt ?? null;
+	for (const d of [startsAt, endsAt]) {
+		if (d && Number.isNaN(d.getTime())) throw badRequest('Invalid date');
+	}
+	if (startsAt && endsAt && startsAt >= endsAt) throw badRequest('The end date must be after the start date');
+	return { startsAt, endsAt };
 }
 
 /**
@@ -75,6 +103,8 @@ export interface Grant {
  * (and `impliedRoles` is empty).
  */
 export interface GrantWithImplied extends Grant {
+	/** Whether the grant gives its role now (G1). */
+	status: GrantStatus;
 	impliedRoles: string[];
 	impliedRolesBySystem?: Record<string, string[]>;
 }
@@ -155,6 +185,7 @@ export function normalizeVoucherCode(raw: string): string {
  *   implication PK SYS#<id>       SK IMPL#<role>#<implied>
  *   grant       PK SYS#<id>       SK GRANT#<role>#<grantee>    GSI1 GRANTEE#<grantee> / SYS#<id>#<role>
  *   global grant PK GLOBAL        SK GRANT#<role>#<grantee>    GSI1 GRANTEE#<grantee> / GLOBAL#<role>
+ *               (grants carry optional startsAt / endsAt, G1)
  *   voucher     PK VOUCHER#<code> SK META                      GSI1 VOUCHERS#<id, or * if global> / <createdAt>#<code>
  *   redemption  PK VOUCHER#<code> SK REDEEMED#<email>
  *
@@ -187,7 +218,15 @@ const implicationItem = (systemId: string, role: string, implied: string): Item 
 	implies: implied
 });
 
-const grantItem = (systemId: string | null, role: string, grantee: string, grantedBy: string, now: Date, voucherCode?: string): Item => ({
+const grantItem = (
+	systemId: string | null,
+	role: string,
+	grantee: string,
+	grantedBy: string,
+	now: Date,
+	{ startsAt, endsAt }: Validity,
+	voucherCode?: string
+): Item => ({
 	...grantKey(systemId, role, grantee),
 	GSI1PK: `GRANTEE#${grantee}`,
 	GSI1SK: systemId === null ? `GLOBAL#${role}` : `SYS#${systemId}#${role}`,
@@ -196,8 +235,16 @@ const grantItem = (systemId: string | null, role: string, grantee: string, grant
 	grantee,
 	grantedBy,
 	grantedAt: now.toISOString(),
+	startsAt: iso(startsAt),
+	endsAt: iso(endsAt),
 	voucherCode
 });
+
+/** Replaces an existing grant only if nobody changed it since it was read; otherwise writes a new one. */
+const unchangedSince = (existing: Item | undefined) =>
+	existing
+		? { ConditionExpression: 'grantedAt = :was', ExpressionAttributeValues: { ':was': existing.grantedAt } }
+		: { ConditionExpression: 'attribute_not_exists(PK)' };
 
 const toGrant = (it: Item): Grant => ({
 	systemId: (it.systemId as string | undefined) ?? null,
@@ -205,6 +252,8 @@ const toGrant = (it: Item): Grant => ({
 	grantee: it.grantee as string,
 	grantedBy: it.grantedBy as string,
 	grantedAt: new Date(it.grantedAt as string),
+	startsAt: date(it.startsAt),
+	endsAt: date(it.endsAt),
 	voucherCode: (it.voucherCode as string | undefined) ?? null
 });
 
@@ -280,13 +329,15 @@ export class Rbac {
 	}
 
 	/**
-	 * The grants (system and global) to an identity's address and domain.
-	 * `root` comes only from the root allow list (R1), so a grant naming it,
-	 * which no write path accepts, is ignored even if one were in the table.
+	 * The grants (system and global) to an identity's address and domain that
+	 * give their role now (G1). `root` comes only from the root allow list
+	 * (R1), so a grant naming it, which no write path accepts, is ignored even
+	 * if one were in the table.
 	 */
 	private async grantItemsOf(email: string): Promise<Item[]> {
+		const now = this.now();
 		const pages = await Promise.all(granteesFor(email).map((g) => queryIndex(this.table, `GRANTEE#${g}`)));
-		return pages.flat().filter((it) => it.role !== ROOT_ROLE);
+		return pages.flat().filter((it) => it.role !== ROOT_ROLE && grantStatus(toGrant(it), now) === 'active');
 	}
 
 	/**
@@ -349,13 +400,15 @@ export class Rbac {
 			if (!s || !s.roles.includes(role)) return [];
 			return [...closure([role], new Map(Object.entries(s.implies)))].filter((r) => r !== role).sort();
 		};
+		const now = this.now();
 		return Promise.all(
 			grants.map(async (g): Promise<GrantWithImplied> => {
-				if (g.systemId !== null) return { ...g, impliedRoles: await implied(g.systemId, g.role) };
+				const status = grantStatus(g, now);
+				if (g.systemId !== null) return { ...g, status, impliedRoles: await implied(g.systemId, g.role) };
 				const defining = (await queryIndex(this.table, `ROLENAME#${g.role}`)).map((it) => it.systemId as string).sort();
 				const bySystem: Record<string, string[]> = {};
 				for (const id of defining) bySystem[id] = await implied(id, g.role);
-				return { ...g, impliedRoles: [], impliedRolesBySystem: bySystem };
+				return { ...g, status, impliedRoles: [], impliedRolesBySystem: bySystem };
 			})
 		);
 	}
@@ -580,39 +633,64 @@ export class Rbac {
 	}
 
 	/**
-	 * Writes a grant unless it exists (re-granting is idempotent and keeps the
-	 * original), checking the role is in the catalog for system grants.
+	 * Writes a grant, checking the role is in the catalog for system grants.
+	 * A grantee holds a role through at most one grant, so an existing grant
+	 * of that role is kept when `keep` says so, and otherwise replaced.
 	 */
-	private async putGrant(item: Item): Promise<Grant> {
+	private async putGrant(
+		item: Item,
+		keep: (existing: Grant) => boolean
+	): Promise<{ grant: Grant; previous: Grant | null; written: boolean }> {
 		const systemId = (item.systemId as string | undefined) ?? null;
-		const reasons = await this.transact([
-			...(systemId === null
-				? []
-				: [
-						{
-							ConditionCheck: {
-								TableName: this.table.name,
-								Key: roleKey(systemId, item.role as string),
-								ConditionExpression: 'attribute_exists(PK)'
+		for (let attempt = 0; attempt < 3; attempt++) {
+			const existing = await this.get({ PK: item.PK, SK: item.SK });
+			const previous = existing ? toGrant(existing) : null;
+			if (previous && keep(previous)) return { grant: previous, previous, written: false };
+			const reasons = await this.transact([
+				...(systemId === null
+					? []
+					: [
+							{
+								ConditionCheck: {
+									TableName: this.table.name,
+									Key: roleKey(systemId, item.role as string),
+									ConditionExpression: 'attribute_exists(PK)'
+								}
 							}
-						}
-					]),
-			{ Put: { TableName: this.table.name, Item: item, ConditionExpression: 'attribute_not_exists(PK)' } }
-		]);
-		if (!reasons) return toGrant(item);
-		if (systemId !== null && reasons[0] === 'ConditionalCheckFailed') {
-			throw notFound(`Role "${item.role}" not found in "${systemId}"`);
+						]),
+				{ Put: { TableName: this.table.name, Item: item, ...unchangedSince(existing) } }
+			]);
+			if (!reasons) return { grant: toGrant(item), previous, written: true };
+			if (systemId !== null && reasons[0] === 'ConditionalCheckFailed') {
+				throw notFound(`Role "${item.role}" not found in "${systemId}"`);
+			}
+			// Otherwise the grant changed meanwhile: read it again.
 		}
-		const existing = await this.get({ PK: item.PK, SK: item.SK });
-		if (!existing) throw new RbacError(409, 'The grant changed meanwhile; try again');
-		return toGrant(existing);
+		throw new RbacError(409, 'The grant changed meanwhile; try again');
 	}
 
-	async grant(actor: Actor, systemId: string, role: string, rawGrantee: string): Promise<GrantWithImplied> {
+	/**
+	 * A root's grant (G2): sets the validity of the grantee's grant of that
+	 * role. Re-granting with the same validity is idempotent and keeps the
+	 * original; a different validity replaces it.
+	 */
+	private async rootGrant(actor: Actor, systemId: string | null, role: string, grantee: string, validity: Validity) {
+		const item = grantItem(systemId, role, grantee, actor.email, this.now(), validity);
+		const { grant } = await this.putGrant(item, (existing) => sameValidity(existing, validity));
+		return this.withImplied(grant);
+	}
+
+	async grant(
+		actor: Actor,
+		systemId: string,
+		role: string,
+		rawGrantee: string,
+		validity: Partial<Validity> = {}
+	): Promise<GrantWithImplied> {
 		const grantee = parseGrantee(rawGrantee);
 		if (!grantee) throw badRequest(`Invalid grantee "${rawGrantee}": use an e-mail address or a domain`);
 		requireRoot(actor, 'Only roots can grant roles');
-		return this.withImplied(await this.putGrant(grantItem(systemId, role, grantee, actor.email, this.now())));
+		return this.rootGrant(actor, systemId, role, grantee, validValidity(validity));
 	}
 
 	private async deleteGrant(systemId: string | null, role: string, grantee: string): Promise<void> {
@@ -637,12 +715,17 @@ export class Rbac {
 	}
 
 	/** Grants `role` in every system that defines it, now or later. */
-	async grantGlobal(actor: Actor, rawRole: string, rawGrantee: string): Promise<GrantWithImplied> {
+	async grantGlobal(
+		actor: Actor,
+		rawRole: string,
+		rawGrantee: string,
+		validity: Partial<Validity> = {}
+	): Promise<GrantWithImplied> {
 		if (!actor.root) throw forbidden('Only roots can grant global roles');
 		const role = validName('role', rawRole);
 		const grantee = parseGrantee(rawGrantee);
 		if (!grantee) throw badRequest(`Invalid grantee "${rawGrantee}": use an e-mail address or a domain`);
-		return this.withImplied(await this.putGrant(grantItem(null, role, grantee, actor.email, this.now())));
+		return this.rootGrant(actor, null, role, grantee, validValidity(validity));
 	}
 
 	async revokeGlobal(actor: Actor, role: string, rawGrantee: string): Promise<void> {
@@ -655,26 +738,34 @@ export class Rbac {
 	// --- subscription sync (Q1-Q4) -------------------------------------------
 
 	/**
-	 * Makes a paying subscriber hold `role` (globally when systemId is null),
-	 * and takes it away when they stop paying. Called by the Stripe webhook,
-	 * not by a person, so it takes no actor. Only grants this sync made
-	 * (grantedBy SUBSCRIPTION_GRANTOR) are revoked; a grant a root made by
-	 * hand, or through a voucher, stays.
+	 * Makes a paying subscriber hold `role` (globally when systemId is null)
+	 * for their subscription's current period, and takes it away when they
+	 * stop paying (`period` null). Called by the Stripe webhook, not by a
+	 * person, so it takes no actor. Only grants this sync made (grantedBy
+	 * SUBSCRIPTION_GRANTOR) follow the period or are revoked; a grant a root
+	 * made by hand, or through a voucher, stays unless it has expired.
 	 */
 	async syncSubscriber(
 		systemId: string | null,
 		rawRole: string,
 		rawEmail: string,
-		subscribed: boolean
-	): Promise<'granted' | 'revoked' | 'unchanged'> {
+		period: Validity | null
+	): Promise<'granted' | 'updated' | 'revoked' | 'unchanged'> {
 		const role = validName('role', rawRole);
 		const email = normalizeEmail(rawEmail);
 		if (!email) throw badRequest(`Invalid subscriber address "${rawEmail}"`);
-		if (subscribed) {
-			const item = grantItem(systemId, role, email, SUBSCRIPTION_GRANTOR, this.now());
-			const grant = await this.putGrant(item);
-			// putGrant keeps an existing grant, which then has its own grantedAt
-			return grant.grantedAt.toISOString() === item.grantedAt ? 'granted' : 'unchanged';
+		if (period) {
+			const validity = validValidity(period);
+			const now = this.now();
+			const { previous, written } = await this.putGrant(
+				grantItem(systemId, role, email, SUBSCRIPTION_GRANTOR, now, validity),
+				(existing) =>
+					existing.grantedBy === SUBSCRIPTION_GRANTOR
+						? sameValidity(existing, validity)
+						: grantStatus(existing, now) !== 'expired'
+			);
+			if (!written) return 'unchanged';
+			return previous?.grantedBy === SUBSCRIPTION_GRANTOR ? 'updated' : 'granted';
 		}
 		try {
 			await this.table.doc.send(
@@ -698,17 +789,12 @@ export class Rbac {
 		const { systemId } = input;
 		const role = systemId === null ? validName('role', input.role) : input.role;
 		requireRoot(actor, 'Only roots can create vouchers');
-		const startsAt = input.startsAt ?? null;
-		const endsAt = input.endsAt ?? null;
+		const { startsAt, endsAt } = validValidity(input);
 		const maxUses = input.maxUses ?? null;
 		const discountPercent = input.discountPercent ?? 100;
 		if (!Number.isInteger(discountPercent) || discountPercent < 0 || discountPercent > 100) {
 			throw badRequest('The discount must be a whole percentage from 0 to 100');
 		}
-		for (const d of [startsAt, endsAt]) {
-			if (d && Number.isNaN(d.getTime())) throw badRequest('Invalid date');
-		}
-		if (startsAt && endsAt && startsAt >= endsAt) throw badRequest('The end date must be after the start date');
 		if (maxUses !== null && (!Number.isInteger(maxUses) || maxUses < 1)) {
 			throw badRequest('Usage count must be a positive integer');
 		}
@@ -786,7 +872,9 @@ export class Rbac {
 	 * Redeems a voucher for `email`, granting its role (globally for a global
 	 * voucher). Each identity can redeem a given voucher once; counting the
 	 * use, recording the redemption and granting happen in one transaction
-	 * whose conditions keep uses within maxUses. A voucher with less than 100%
+	 * whose conditions keep uses within maxUses. The grant starts now and
+	 * never ends; it replaces an existing grant of that role unless that one
+	 * already gives it now and forever (G3). A voucher with less than 100%
 	 * discount needs payment, which isn't available yet: it fails with 402 and
 	 * the voucher's terms, recording nothing.
 	 */
@@ -812,9 +900,12 @@ export class Rbac {
 				payment: { code, systemId: voucher.systemId, role: voucher.role, discountPercent: voucher.discountPercent }
 			});
 		}
-		const grant = grantItem(voucher.systemId, voucher.role, email, voucher.createdBy, now, code);
+		const forever = { startsAt: null, endsAt: null };
+		const grant = grantItem(voucher.systemId, voucher.role, email, voucher.createdBy, now, forever, code);
 		for (let attempt = 0; attempt < 2; attempt++) {
-			const existing = await this.get({ PK: grant.PK, SK: grant.SK });
+			const found = await this.get({ PK: grant.PK, SK: grant.SK });
+			const previous = found ? toGrant(found) : null;
+			const kept = previous && previous.endsAt === null && grantStatus(previous, now) === 'active' ? previous : null;
 			const reasons = await this.transact([
 				{
 					Update: {
@@ -833,18 +924,16 @@ export class Rbac {
 						ConditionExpression: 'attribute_not_exists(PK)'
 					}
 				},
-				// Re-redeeming a role you already hold keeps the existing grant.
-				...(existing
-					? []
-					: [{ Put: { TableName: this.table.name, Item: grant, ConditionExpression: 'attribute_not_exists(PK)' } }])
+				// A grant that already gives the role now and forever is kept.
+				...(kept ? [] : [{ Put: { TableName: this.table.name, Item: grant, ...unchangedSince(found) } }])
 			]);
-			if (!reasons) return this.withImplied(toGrant(existing ?? grant));
+			if (!reasons) return this.withImplied(kept ?? toGrant(grant));
 			if (reasons[0] === 'ConditionalCheckFailed') {
 				requireActive(await this.get(voucherKey(code)));
 				throw new RbacError(409, 'This voucher has no uses left');
 			}
 			if (reasons[1] === 'ConditionalCheckFailed') throw new RbacError(409, 'You have already redeemed this voucher');
-			// Otherwise the grant appeared meanwhile: retry keeping it.
+			// Otherwise the grant changed meanwhile: retry with it.
 		}
 		throw new RbacError(409, 'The voucher changed meanwhile; try again');
 	}

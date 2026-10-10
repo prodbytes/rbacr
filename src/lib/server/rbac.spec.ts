@@ -347,35 +347,107 @@ describe('global vouchers and grants', () => {
 
 describe('subscription sync', () => {
 	const tick = () => (clock = new Date(clock.getTime() + 1000));
+	// The billing period around the test clock (2026-01-10).
+	const period = { startsAt: new Date('2026-01-01T00:00:00Z'), endsAt: new Date('2026-02-01T00:00:00Z') };
+	const renewed = { startsAt: period.endsAt, endsAt: new Date('2026-03-01T00:00:00Z') };
 
 	it('grants the role globally to a subscriber and revokes it when they stop paying (Q2, Q3)', async () => {
-		expect(await rbac.syncSubscriber(null, 'viewer', 'Sub@Partner.com', true)).toBe('granted');
+		expect(await rbac.syncSubscriber(null, 'viewer', 'Sub@Partner.com', period)).toBe('granted');
 		expect(await rbac.globalRolesOf('sub@partner.com')).toEqual(['viewer']);
 		expect((await rbac.listGlobalGrants(root))[0]).toMatchObject({ grantee: 'sub@partner.com', grantedBy: 'stripe' });
 		tick();
-		expect(await rbac.syncSubscriber(null, 'viewer', 'sub@partner.com', true)).toBe('unchanged');
-		expect(await rbac.syncSubscriber(null, 'viewer', 'sub@partner.com', false)).toBe('revoked');
+		expect(await rbac.syncSubscriber(null, 'viewer', 'sub@partner.com', period)).toBe('unchanged');
+		expect(await rbac.syncSubscriber(null, 'viewer', 'sub@partner.com', null)).toBe('revoked');
 		expect(await rbac.globalRolesOf('sub@partner.com')).toEqual([]);
-		expect(await rbac.syncSubscriber(null, 'viewer', 'sub@partner.com', false)).toBe('unchanged');
+		expect(await rbac.syncSubscriber(null, 'viewer', 'sub@partner.com', null)).toBe('unchanged');
 	});
 
-	it('can grant in one system, whose catalog must have the role', async () => {
-		await rbac.syncSubscriber('billing', 'editor', USER, true);
-		expect(await rbac.rolesOf(USER)).toEqual({ billing: ['editor'] });
-		await expectError(rbac.syncSubscriber('crm', 'editor', USER, true), 404);
-	});
-
-	it("never revokes a grant it didn't make (Q3)", async () => {
-		await rbac.grantGlobal(root, 'viewer', USER);
-		tick();
-		expect(await rbac.syncSubscriber(null, 'viewer', USER, true)).toBe('unchanged');
-		expect(await rbac.syncSubscriber(null, 'viewer', USER, false)).toBe('unchanged');
+	it('makes the grant match the billing period, following renewals (Q2a)', async () => {
+		await rbac.syncSubscriber(null, 'viewer', USER, period);
+		expect((await rbac.listGlobalGrants(root))[0]).toMatchObject({ ...period, status: 'active' });
+		// Without a renewal the role ends with the period, even if no event arrives.
+		clock = period.endsAt;
+		expect(await rbac.globalRolesOf(USER)).toEqual([]);
+		expect(await rbac.syncSubscriber(null, 'viewer', USER, renewed)).toBe('updated');
+		expect((await rbac.listGlobalGrants(root))[0]).toMatchObject({ ...renewed, grantedBy: 'stripe', status: 'active' });
 		expect(await rbac.globalRolesOf(USER)).toEqual(['viewer']);
 	});
 
+	it('can grant in one system, whose catalog must have the role', async () => {
+		await rbac.syncSubscriber('billing', 'editor', USER, period);
+		expect(await rbac.rolesOf(USER)).toEqual({ billing: ['editor'] });
+		await expectError(rbac.syncSubscriber('crm', 'editor', USER, period), 404);
+	});
+
+	it("never changes or revokes a grant it didn't make, until that one expires (Q3)", async () => {
+		await rbac.grantGlobal(root, 'viewer', USER, { endsAt: new Date('2026-01-20T00:00:00Z') });
+		tick();
+		expect(await rbac.syncSubscriber(null, 'viewer', USER, period)).toBe('unchanged');
+		expect(await rbac.syncSubscriber(null, 'viewer', USER, null)).toBe('unchanged');
+		expect((await rbac.listGlobalGrants(root))[0].grantedBy).toBe(ROOT);
+		clock = new Date('2026-01-25T00:00:00Z');
+		expect(await rbac.syncSubscriber(null, 'viewer', USER, period)).toBe('granted');
+		expect((await rbac.listGlobalGrants(root))[0]).toMatchObject({ ...period, grantedBy: 'stripe' });
+	});
+
 	it('refuses root and invalid addresses', async () => {
-		await expectError(rbac.syncSubscriber(null, 'root', USER, true), 400, /reserved/);
-		await expectError(rbac.syncSubscriber(null, 'viewer', 'not-an-address', true), 400);
+		await expectError(rbac.syncSubscriber(null, 'root', USER, period), 400, /reserved/);
+		await expectError(rbac.syncSubscriber(null, 'viewer', 'not-an-address', period), 400);
+	});
+});
+
+describe('grant validity', () => {
+	const feb = new Date('2026-02-01T00:00:00Z');
+	const mar = new Date('2026-03-01T00:00:00Z');
+
+	it('defaults to immediately and forever (G1)', async () => {
+		const g = await rbac.grant(root, 'billing', 'viewer', USER);
+		expect(g).toMatchObject({ startsAt: null, endsAt: null, status: 'active' });
+	});
+
+	it('gives the role only from the start until the end, exclusive (G1)', async () => {
+		await rbac.grant(root, 'billing', 'viewer', USER, { startsAt: feb, endsAt: mar });
+		await rbac.grantGlobal(root, 'editor', 'partner.com', { startsAt: feb });
+		expect((await rbac.listGrants(root, 'billing'))[0].status).toBe('not-started');
+		expect(await rbac.rolesOf(USER)).toEqual({});
+		expect(await rbac.globalRolesOf(USER)).toEqual([]);
+		expect(await rbac.hasRole(root, USER, 'billing', 'viewer')).toBe(false);
+		clock = feb;
+		expect(await rbac.rolesOf(USER)).toEqual({ billing: ['editor', 'viewer'] });
+		expect(await rbac.globalRolesOf(USER)).toEqual(['editor']);
+		clock = mar;
+		expect(await rbac.rolesOf(USER)).toEqual({ billing: ['editor'] });
+		expect(await rbac.hasRole(root, USER, 'billing', 'viewer')).toBe(false);
+		// Expired grants stay listed until revoked.
+		expect((await rbac.listGrants(root, 'billing'))[0].status).toBe('expired');
+		await rbac.revoke(root, 'billing', 'viewer', USER);
+	});
+
+	it('is replaced by granting again with another validity; the same one is idempotent (G2)', async () => {
+		const first = await rbac.grant(root, 'billing', 'viewer', USER, { endsAt: feb });
+		clock = new Date(clock.getTime() + 1000);
+		expect((await rbac.grant(root, 'billing', 'viewer', USER, { endsAt: feb })).grantedAt).toEqual(first.grantedAt);
+		const changed = await rbac.grant(root, 'billing', 'viewer', USER, { endsAt: mar });
+		expect(changed).toMatchObject({ endsAt: mar, grantedAt: clock });
+		expect(await rbac.listGrants(root, 'billing')).toHaveLength(1);
+	});
+
+	it('refuses invalid dates and an end before the start', async () => {
+		await expectError(rbac.grant(root, 'billing', 'viewer', USER, { startsAt: mar, endsAt: feb }), 400, /after/);
+		await expectError(rbac.grant(root, 'billing', 'viewer', USER, { startsAt: feb, endsAt: feb }), 400);
+		await expectError(rbac.grantGlobal(root, 'viewer', USER, { endsAt: new Date('nope') }), 400, /date/);
+	});
+
+	it('voucher grants start now and never end, replacing a limited grant (G3)', async () => {
+		await rbac.grant(root, 'billing', 'viewer', USER, { endsAt: new Date('2026-01-05T00:00:00Z') });
+		const v = await rbac.createVoucher(root, { systemId: 'billing', role: 'viewer' });
+		const g = await rbac.redeemVoucher(USER, v.code);
+		expect(g).toMatchObject({ startsAt: null, endsAt: null, status: 'active', voucherCode: v.code });
+		expect(await rbac.rolesOf(USER)).toEqual({ billing: ['viewer'] });
+		// A grant that already gives the role forever is kept.
+		await rbac.grant(root, 'billing', 'editor', OTHER);
+		const v2 = await rbac.createVoucher(root, { systemId: 'billing', role: 'editor' });
+		expect((await rbac.redeemVoucher(OTHER, v2.code)).grantedBy).toBe(ROOT);
 	});
 });
 

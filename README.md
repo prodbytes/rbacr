@@ -22,6 +22,9 @@ app on AWS Lambda.
   others, e.g. `admin` implies `premium` and `free`, `premium` implies
   `free`, and `free` implies nothing. Implication is transitive. Grants
   returned by the API list the roles they imply (`impliedRoles`).
+- **Grants have a validity**: an optional start and end (`startsAt`,
+  `endsAt`). No start means immediately, no end means forever. Outside it a
+  grant gives nothing, and shows as `not-started` or `expired`.
 - **Vouchers** are codes like `7JH2-UQF5-XA7B-VMQT` that grant a role when
   redeemed, either in one system or **globally**. A global voucher gives the
   role in every system that defines it, and only roots can create global
@@ -216,9 +219,12 @@ Q1-Q5):
    secret.
 3. rbacr reads that customer from the Stripe API. While they have an
    `active`, `trialing` or `past_due` subscription, their e-mail address
-   holds `premium` (a global grant, or in `RBACR_STRIPE_SYSTEM`);
-   otherwise rbacr removes the grant. The grant shows `grantedBy: stripe`,
-   and grants you made by hand or through a voucher are never removed.
+   holds `premium` (a global grant, or in `RBACR_STRIPE_SYSTEM`) for the
+   subscription's current billing period: the grant starts and ends with
+   it, and each renewal moves it to the next period. Otherwise rbacr
+   removes the grant. The grant shows `grantedBy: stripe`, and grants you
+   made by hand or through a voucher are never changed or removed (unless
+   they have expired).
 
 ### Setting it up
 
@@ -245,7 +251,7 @@ Q1-Q5):
    nothing.
 5. Check it: in Stripe, send a test `customer.subscription.updated` event to
    the endpoint. The response is `{ received, outcome }`, with `granted`,
-   `revoked` or `unchanged`. Without the secrets the endpoint answers 503;
+   `updated`, `revoked` or `unchanged`. Without the secrets the endpoint answers 503;
    with a wrong signing secret, 400.
 
 ### Limitations
@@ -254,7 +260,11 @@ Q1-Q5):
 - Existing subscribers are picked up at their next subscription change
   (each renewal counts), so annual subscribers can take up to a year.
 - Complimentary and gift subscriptions bypass Stripe: grant those by hand
-  or with a voucher.
+  (with an end date to match the gift) or with a voucher.
+- The role ends exactly at the end of the paid period. Renewing moves it
+  on when Stripe's `customer.subscription.updated` event arrives, usually
+  within seconds; until then (or while Stripe retries a failed delivery)
+  the subscriber doesn't hold it.
 - Every subscription in the Stripe account counts, so anything else sold
   through it also earns the role.
 

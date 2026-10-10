@@ -1,4 +1,5 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
+import type { Validity } from './rbac';
 
 /**
  * The Substack integration (SPEC "Substack integration"). Substack has no API or
@@ -54,9 +55,45 @@ export function subscriptionCustomer(event: StripeEvent): string | null {
 
 export interface Subscriber {
 	email: string | null;
-	/** Holds at least one subscription in an entitled status. */
-	subscribed: boolean;
+	/**
+	 * The current billing period of their entitled subscription (the one
+	 * running longest when there are several), or null when they hold none.
+	 */
+	period: Validity | null;
 }
+
+interface StripeSubscription {
+	status?: string;
+	current_period_start?: number;
+	current_period_end?: number;
+	items?: { data?: { current_period_start?: number; current_period_end?: number }[] };
+}
+
+const fromUnix = (seconds: number | undefined) => (Number.isFinite(seconds) ? new Date(seconds! * 1000) : null);
+
+/**
+ * A subscription's current billing period. Stripe API versions before
+ * 2025-03-31 put it on the subscription, later ones on each subscription
+ * item; the period is then the span of its items' periods. A bound Stripe
+ * doesn't give is open (null).
+ */
+export function subscriptionPeriod(s: StripeSubscription): Validity {
+	const items = s.items?.data ?? [];
+	const starts = items.map((i) => i.current_period_start).filter(Number.isFinite) as number[];
+	const ends = items.map((i) => i.current_period_end).filter(Number.isFinite) as number[];
+	return {
+		startsAt: fromUnix(s.current_period_start ?? (starts.length ? Math.min(...starts) : undefined)),
+		endsAt: fromUnix(s.current_period_end ?? (ends.length ? Math.max(...ends) : undefined))
+	};
+}
+
+/** The period that lasts longest; an open end lasts forever. */
+const longest = (periods: Validity[]): Validity | null =>
+	periods.reduce<Validity | null>((best, p) => {
+		if (!best) return p;
+		const end = (v: Validity) => v.endsAt?.getTime() ?? Infinity;
+		return end(p) > end(best) ? p : best;
+	}, null);
 
 /**
  * Reads a customer and their current subscriptions from Stripe. A deleted
@@ -68,11 +105,12 @@ export async function fetchSubscriber(apiKey: string, customerId: string, fetchF
 	const res = await fetchFn(`https://api.stripe.com/v1/customers/${customerId}?expand[]=subscriptions`, {
 		headers: { authorization: `Bearer ${apiKey}` }
 	});
-	if (res.status === 404) return { email: null, subscribed: false };
+	if (res.status === 404) return { email: null, period: null };
 	if (!res.ok) throw new Error(`Stripe answered ${res.status} for customer ${customerId}`);
 	const customer = await res.json();
 	const email = typeof customer.email === 'string' ? customer.email : null;
-	if (customer.deleted) return { email, subscribed: false };
-	const subscriptions: { status?: string }[] = customer.subscriptions?.data ?? [];
-	return { email, subscribed: subscriptions.some((s) => ENTITLED_STATUSES.has(s.status ?? '')) };
+	if (customer.deleted) return { email, period: null };
+	const subscriptions: StripeSubscription[] = customer.subscriptions?.data ?? [];
+	const entitled = subscriptions.filter((s) => ENTITLED_STATUSES.has(s.status ?? ''));
+	return { email, period: longest(entitled.map(subscriptionPeriod)) };
 }

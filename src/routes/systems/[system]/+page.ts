@@ -7,6 +7,10 @@ export interface Grant {
 	grantee: string;
 	grantedBy: string;
 	grantedAt: string;
+	/** Validity (G1): null start means immediately, null end means forever. */
+	startsAt: string | null;
+	endsAt: string | null;
+	status: 'active' | 'not-started' | 'expired';
 	voucherCode: string | null;
 	/** Roles the granted role implies in this system. */
 	impliedRoles: string[];

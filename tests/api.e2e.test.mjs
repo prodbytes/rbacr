@@ -188,6 +188,27 @@ describe('rbacr API', { skip: !(await fetch(`${BASE}/health`).then((r) => r.ok, 
 		for (const v of [free.body.code, paid.body.code]) await root('DELETE', `/api/vouchers/${v}`);
 	});
 
+	it('gives grants a validity window', async () => {
+		const grantee = `window-${Date.now()}@example.com`;
+		const check = async () => (await root('POST', '/api/check', { email: grantee, systemId: SYSTEM, role: 'viewer' })).body.allowed;
+		const later = new Date(Date.now() + 86_400_000).toISOString();
+		const bad = await root('POST', `/api/systems/${SYSTEM}/grants`, { role: 'viewer', grantee, startsAt: later, endsAt: later });
+		assert.equal(bad.status, 400);
+		const future = await root('POST', `/api/systems/${SYSTEM}/grants`, { role: 'viewer', grantee, startsAt: later });
+		assert.equal(future.status, 201);
+		assert.equal(future.body.startsAt, later);
+		assert.equal(future.body.endsAt, null);
+		assert.equal(future.body.status, 'not-started');
+		assert.equal(await check(), false);
+		const now = await root('POST', `/api/systems/${SYSTEM}/grants`, { role: 'viewer', grantee, endsAt: later });
+		assert.equal(now.body.status, 'active');
+		assert.equal(await check(), true);
+		const global = await root('POST', '/api/global-grants', { role: 'viewer', grantee, startsAt: later });
+		assert.equal(global.body.status, 'not-started');
+		assert.equal((await root('DELETE', '/api/global-grants', { role: 'viewer', grantee })).status, 204);
+		assert.equal((await root('DELETE', `/api/systems/${SYSTEM}/grants`, { role: 'viewer', grantee })).status, 204);
+	});
+
 	it('answers role checks for roots, and for anyone about themselves', async () => {
 		const check = (who, body) => who('POST', '/api/check', body);
 		assert.equal((await check(root, { email: USER, systemId: SYSTEM, role: 'viewer' })).body.allowed, true);
