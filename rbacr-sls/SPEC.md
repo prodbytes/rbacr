@@ -361,6 +361,11 @@ How applications use rbacr. The README has a walkthrough with examples.
   at once (T3). Clients that cache answers should cache them briefly (a "yes"
   never beyond its `ttl`, C3a) and never cache errors, and should deny
   access when rbacr can't answer.
+- **C7** rbacr's client libraries take their base URL from `RBACR_URL`
+  (default `https://rbacr.nu01.com`) and their token from `RBACR_TOKEN`
+  when the caller passes none. The local dev server (T7) takes the same
+  `RBACR_TOKEN` as its bootstrap token, so one `.env` configures both. A
+  client accepts plain `http` only for localhost.
 
 ## HTTP interface
 

@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:rbacr/rbacr.dart';
+import 'package:rbacr/src/settings.dart' as settings;
 import 'package:test/test.dart';
 
 /// A client whose requests [handler] answers; requests are recorded in [seen].
@@ -20,6 +21,9 @@ http.Response reply(Object body, [int status = 200]) =>
     http.Response(jsonEncode(body), status, headers: {'content-type': 'application/json'});
 
 void main() {
+  // Hermetic: the developer's own RBACR_URL / RBACR_TOKEN must not leak in.
+  setUp(() => settings.environment = () => const {});
+
   group('requests', () {
     test('send the token and JSON body to /api', () async {
       final seen = <http.Request>[];
@@ -63,8 +67,41 @@ void main() {
       expect(() => RbacrClient(baseUrl: Uri.parse('http://rbacr.nu01.com'), token: 't'), throwsArgumentError);
       expect(RbacrClient(baseUrl: Uri.parse('http://127.0.0.1:5173'), token: 't').baseUrl.port, 5173);
       expect(RbacrClient(token: 't').baseUrl, RbacrClient.production);
-      expect(() => RbacrClient(), throwsArgumentError);
+      expect(RbacrClient(baseUrl: RbacrClient.local, token: 't').baseUrl.port, 8686);
+      expect(() => RbacrClient(), throwsArgumentError, reason: 'no token and no RBACR_TOKEN');
       expect(() => RbacrClient(token: 't', tokenProvider: () => 't'), throwsArgumentError);
+    });
+  });
+
+  group('settings', () {
+    test('RBACR_URL and RBACR_TOKEN are the defaults; arguments win', () async {
+      settings.environment = () => {'RBACR_URL': 'http://localhost:8686', 'RBACR_TOKEN': 'rbacr_env'};
+      final seen = <http.Request>[];
+      final client = RbacrClient(
+        httpClient: MockClient((request) async {
+          seen.add(request);
+          return reply({
+            'email': 'a@x.com',
+            'root': true,
+            'globalRoles': ['root'],
+            'roles': {},
+          });
+        }),
+      );
+      expect(client.baseUrl, RbacrClient.local);
+      await client.me();
+      expect(seen.single.url.toString(), 'http://localhost:8686/api/me');
+      expect(seen.single.headers['authorization'], 'Bearer rbacr_env');
+      final explicit = RbacrClient(baseUrl: RbacrClient.production, token: 'rbacr_arg');
+      expect(explicit.baseUrl, RbacrClient.production);
+    });
+
+    test('empty settings count as unset; a plain http RBACR_URL off localhost is refused', () {
+      settings.environment = () => {'RBACR_URL': '', 'RBACR_TOKEN': ''};
+      expect(() => RbacrClient(), throwsArgumentError);
+      expect(RbacrClient(token: 't').baseUrl, RbacrClient.production);
+      settings.environment = () => {'RBACR_URL': 'http://rbacr.example.com'};
+      expect(() => RbacrClient(token: 't'), throwsArgumentError);
     });
   });
 

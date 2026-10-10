@@ -5,6 +5,7 @@ import 'package:http/http.dart' as http;
 
 import 'errors.dart';
 import 'models.dart';
+import 'settings.dart';
 
 /// Supplies the personal API token for each request (SPEC T1-T4), e.g. from
 /// secure storage, so it can change without a new client.
@@ -20,21 +21,27 @@ typedef RbacrTokenProvider = FutureOr<String> Function();
 /// if (await rbacr.allows(email: user.email, systemId: 'presence', role: 'premium')) { ... }
 /// ```
 class RbacrClient {
-  /// [baseUrl] defaults to [production]. Pass either a fixed [token] or a
-  /// [tokenProvider]. Only `https` URLs are accepted, except for localhost
-  /// during development, so the token never travels in clear text.
+  /// [baseUrl] defaults to the `RBACR_URL` setting, else [production]. Pass
+  /// a fixed [token] or a [tokenProvider], or neither to use the
+  /// `RBACR_TOKEN` setting. Settings come from `--dart-define` (Flutter:
+  /// `--dart-define-from-file=.env`), then the process environment. Only
+  /// `https` URLs are accepted, except for localhost during development, so
+  /// the token never travels in clear text.
   RbacrClient({
     Uri? baseUrl,
     String? token,
     RbacrTokenProvider? tokenProvider,
     http.Client? httpClient,
     this.timeout = const Duration(seconds: 10),
-  }) : baseUrl = baseUrl ?? production,
-       _token = tokenProvider ?? _fixed(token),
+  }) : baseUrl = baseUrl ?? _settingUrl() ?? production,
+       _token = tokenProvider ?? _fixed(token ?? setting(tokenSetting)),
        _http = httpClient ?? http.Client(),
        _ownsHttp = httpClient == null {
-    if ((token == null) == (tokenProvider == null)) {
-      throw ArgumentError('Pass exactly one of token and tokenProvider');
+    if (token != null && tokenProvider != null) {
+      throw ArgumentError('Pass at most one of token and tokenProvider');
+    }
+    if (token == null && tokenProvider == null && setting(tokenSetting) == null) {
+      throw ArgumentError('Pass a token or tokenProvider, or set $tokenSetting');
     }
     final local = const {'localhost', '127.0.0.1', '::1'}.contains(this.baseUrl.host);
     if (this.baseUrl.scheme != 'https' && !(local && this.baseUrl.scheme == 'http')) {
@@ -48,6 +55,10 @@ class RbacrClient {
   /// https://rc.rbacr.nu01.com, the release candidate.
   static final Uri releaseCandidate = Uri.parse('https://rc.rbacr.nu01.com');
 
+  /// http://localhost:8686, rbacr-sls's local container (its Containerfile),
+  /// for development; usually set as `RBACR_URL` instead.
+  static final Uri local = Uri.parse('http://localhost:8686');
+
   final Uri baseUrl;
 
   /// Per request; a request that takes longer fails with [RbacrException].
@@ -56,6 +67,11 @@ class RbacrClient {
   final RbacrTokenProvider _token;
   final http.Client _http;
   final bool _ownsHttp;
+
+  static Uri? _settingUrl() {
+    final url = setting(urlSetting);
+    return url == null ? null : Uri.parse(url);
+  }
 
   static RbacrTokenProvider _fixed(String? token) =>
       () => token!;

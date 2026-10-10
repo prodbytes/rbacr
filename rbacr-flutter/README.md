@@ -29,7 +29,7 @@ dependencies:
 import 'package:rbacr/rbacr.dart';
 
 final rbacr = RbacrClient(
-  // https://rbacr.nu01.com by default; RbacrClient.releaseCandidate for RC.
+  // RBACR_URL, else https://rbacr.nu01.com; RbacrClient.releaseCandidate for RC.
   tokenProvider: () => secureStorage.read('rbacr_token'),
 );
 
@@ -93,6 +93,42 @@ stay (V6). Removing its role or deleting its system disables it the same
 way (L3). The rest of root management (systems, grants) is left out of this
 client. Plain `http` URLs are refused, except for localhost during
 development.
+
+## Settings: `RBACR_URL` and `RBACR_TOKEN`
+
+Without arguments, the client takes its base URL from `RBACR_URL` (else
+production) and its token from `RBACR_TOKEN`. Arguments always win. The
+settings come from compile-time defines first, then the process
+environment:
+
+```bash
+flutter run --dart-define-from-file=.env    # Flutter apps
+dart run bin/server.dart                    # Dart servers: RBACR_URL / RBACR_TOKEN in the environment
+```
+
+```dart
+final rbacr = RbacrClient(); // RBACR_URL, RBACR_TOKEN
+```
+
+A define is compiled into the app, so only define `RBACR_TOKEN` for
+development builds against the local dev server. In release builds, pass the
+user's own token with `tokenProvider` (see Tokens).
+
+## Against a local rbacr
+
+For development, run the rbacr dev server
+([rbacr-sls: Local rbacr for your app](../rbacr-sls/README.md#local-rbacr-for-your-app)),
+with `RBACR_URL=http://localhost:8686` and `RBACR_TOKEN` in your project's
+`.env`. The same file configures the dev server and this client, so nothing
+else changes. `RbacrClient.local` is that URL as a constant.
+
+`localhost` is the host machine on desktop and in the iOS simulator. On
+Android (emulator or device), run `adb reverse tcp:8686 tcp:8686` so the
+device's `localhost:8686` reaches the dev server. Also allow cleartext
+traffic to `localhost` in debug builds (`android:usesCleartextTraffic="true"`
+in the debug manifest, or a network security config). Plain `http` is
+accepted only for `localhost`, `127.0.0.1` and `::1`. The dev server's token
+is a root's, so keep it out of release builds.
 
 ## Develop
 
