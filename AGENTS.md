@@ -7,6 +7,11 @@ folder (paths below are relative to the repository root):
 
 - [rbacr-sls/](rbacr-sls/) — the rbacr service (SvelteKit on AWS Lambda).
   Run its commands (`npm`, `devbox`, `scripts/…`) from `rbacr-sls/`.
+- [rbacr-flutter/](rbacr-flutter/) — the Dart client (package `rbacr`) for
+  Flutter apps. Before committing it: `dart analyze --fatal-infos`,
+  `dart format --line-length 120 --set-exit-if-changed lib test example`,
+  `dart test`, and its e2e tests (`dart test -t e2e`, see its README)
+  against `devbox services up`. Keep it in step with rbacr-sls's `/api`.
 - [rbacr-lib/](rbacr-lib/) — the client library that caches role grants;
   only a README until it is specified.
 
