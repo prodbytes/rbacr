@@ -146,9 +146,11 @@ class RbacrClient {
     return List.unmodifiable(grants.map((g) => Grant.fromJson(g as Map<String, Object?>)));
   }
 
-  /// Creates a voucher granting [roles] in [systemId], or a global voucher
-  /// without a system (V1); roots only, so call it from your server, never
-  /// an app. Pass [roles], or a single [role] as before. [code] is a code of
+  /// Creates a voucher granting [roles] in [systemId], or without a system a
+  /// global voucher granting [grants], roles of any systems, each in its own
+  /// (V1); roots only, so call it from your server, never an app. Pass one
+  /// of [grants] (global only), [roles] or a single [role]: a global voucher
+  /// given [roles] grants them by name, in every system that has them. [code] is a code of
   /// your own; without one rbacr makes one up from the quarter and animal
   /// names (V2). [discountPercent] defaults to 100 (free); [endsAt] is
   /// exclusive.
@@ -156,17 +158,22 @@ class RbacrClient {
     String? systemId,
     List<String>? roles,
     String? role,
+    List<SystemRole>? grants,
     String? code,
     int? discountPercent,
     DateTime? startsAt,
     DateTime? endsAt,
     int? maxUses,
   }) async {
-    if ((roles == null) == (role == null)) throw ArgumentError('Pass either roles or role');
+    if ([roles, role, grants].where((v) => v != null).length != 1) {
+      throw ArgumentError('Pass one of grants, roles or role');
+    }
+    if (grants != null && systemId != null) throw ArgumentError('Only a global voucher takes grants');
     return Voucher.fromJson(
       await _send('POST', _vouchersPath(systemId), {
         'roles': ?roles,
         'role': ?role,
+        'grants': ?grants?.map((g) => g.toJson()).toList(),
         'code': ?code,
         'discountPercent': ?discountPercent,
         'startsAt': ?startsAt?.toUtc().toIso8601String(),

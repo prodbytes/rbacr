@@ -314,6 +314,36 @@ void main() {
       );
       expect(Voucher.fromJson(voucher()).roles, ['premium']);
       expect(() => fake((_) => reply(voucher())).createVoucher(roles: ['a'], role: 'b'), throwsArgumentError);
+      expect(
+        () => fake(
+          (_) => reply(voucher()),
+        ).createVoucher(systemId: 'presence', grants: [const SystemRole('presence', 'a')]),
+        throwsArgumentError,
+      );
+    });
+
+    test('create a global voucher of system roles (V1)', () async {
+      final seen = <http.Request>[];
+      final created = await fake(
+        (_) => reply({
+          ...voucher(systemId: null),
+          'roles': ['premium'],
+          'grants': [
+            {'systemId': 'presence', 'role': 'premium'},
+            {'systemId': 'tabscan', 'role': 'premium'},
+          ],
+        }, 201),
+        seen: seen,
+      ).createVoucher(grants: [const SystemRole('presence', 'premium'), const SystemRole('tabscan', 'premium')]);
+      expect(seen.single.url.path, '/api/vouchers');
+      expect(jsonDecode(seen.single.body), {
+        'grants': [
+          {'systemId': 'presence', 'role': 'premium'},
+          {'systemId': 'tabscan', 'role': 'premium'},
+        ],
+      });
+      expect(created.grants, [const SystemRole('presence', 'premium'), const SystemRole('tabscan', 'premium')]);
+      expect(Voucher.fromJson(voucher()).grants, isNull);
     });
 
     test('lists a voucher\'s redemptions with their details', () async {

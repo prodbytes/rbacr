@@ -1,5 +1,5 @@
 import { json, type RequestEvent } from '@sveltejs/kit';
-import { RbacError, appMayCall, type Actor, type GrantWithImplied, type Notification, type OwnRedemption, type RedeemEvent, type RedeemFailure, type SystemSettings, type Validity, type Voucher, type VoucherInput } from './rbac';
+import { RbacError, appMayCall, type Actor, type GrantWithImplied, type Notification, type OwnRedemption, type RedeemEvent, type RedeemFailure, type SystemRole, type SystemSettings, type Validity, type Voucher, type VoucherInput } from './rbac';
 import { getServices, type Services } from './services';
 import type { ApiToken } from './tokens';
 
@@ -122,14 +122,27 @@ export function validity(body: Record<string, unknown>): Validity {
 	return { startsAt: optDate(body.startsAt, 'startsAt'), endsAt: optDate(body.endsAt, 'endsAt') };
 }
 
+/** A global voucher's `grants`: system roles, `[{ systemId, role }]` (V1). */
+function systemRoles(value: unknown): SystemRole[] {
+	if (!Array.isArray(value)) throw new RbacError(400, '"grants" must be an array of { systemId, role }');
+	return value.map((g) => {
+		if (!g || typeof g !== 'object') throw new RbacError(400, '"grants" must be an array of { systemId, role }');
+		const { systemId, role } = g as Record<string, unknown>;
+		return { systemId: str(systemId, 'grants[].systemId'), role: str(role, 'grants[].role') };
+	});
+}
+
 /**
  * A voucher's terms from a request body (V1, V2): `roles`, or a single
- * `role` as older clients send it, and an optional `code`.
+ * `role` as older clients send it, or for a global voucher its system
+ * roles as `grants`, and an optional `code`.
  */
 export function voucherInput(body: Record<string, unknown>, systemId: string | null): VoucherInput {
 	return {
 		systemId,
-		roles: body.roles === undefined ? [str(body.role, 'role')] : strList(body.roles, 'roles'),
+		...(body.grants !== undefined
+			? { roles: [], grants: systemRoles(body.grants) }
+			: { roles: body.roles === undefined ? [str(body.role, 'role')] : strList(body.roles, 'roles') }),
 		code: optStr(body.code, 'code'),
 		startsAt: optDate(body.startsAt, 'startsAt'),
 		endsAt: optDate(body.endsAt, 'endsAt'),

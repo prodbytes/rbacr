@@ -21,6 +21,8 @@ export interface Voucher {
 	systemId: string | null;
 	/** The roles redeeming it grants (SPEC V1). */
 	roles: string[];
+	/** A global voucher's system roles (SPEC V1); null for a system voucher or an older global one. */
+	grants: { systemId: string; role: string }[] | null;
 	discountPercent: number;
 	startsAt: string | null;
 	endsAt: string | null;

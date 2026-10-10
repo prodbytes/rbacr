@@ -11,7 +11,9 @@
 		email: string;
 		redeemedAt: string;
 		via: 'api' | 'page' | null;
+		systemId: string | null;
 		grants: {
+			systemId: string | null;
 			role: string;
 			outcome: 'granted' | 'kept' | 'replaced';
 			replaced: { grantedBy: string; endsAt: string | null } | null;
@@ -47,12 +49,14 @@
 		}
 	}
 
-	const outcome = (g: RedeemEvent['grants'][number]) =>
+	// A global voucher's system roles (SPEC V1) say which system each is in.
+	const name = (e: RedeemEvent, g: RedeemEvent['grants'][number]) => (!e.systemId && g.systemId ? `${g.systemId} / ${g.role}` : g.role);
+	const outcome = (e: RedeemEvent, g: RedeemEvent['grants'][number]) =>
 		g.outcome === 'replaced' && g.replaced
-			? `${g.role} (replaced ${g.replaced.grantedBy}'s grant${g.replaced.endsAt ? ` ending ${formatDate(g.replaced.endsAt)}` : ''})`
+			? `${name(e, g)} (replaced ${g.replaced.grantedBy}'s grant${g.replaced.endsAt ? ` ending ${formatDate(g.replaced.endsAt)}` : ''})`
 			: g.outcome === 'kept'
-				? `${g.role} (already held)`
-				: g.role;
+				? `${name(e, g)} (already held)`
+				: name(e, g);
 </script>
 
 <details ontoggle={load}>
@@ -67,7 +71,7 @@
 				<li>
 					<strong>{e.email}</strong>
 					<span class="muted">{formatDate(e.redeemedAt)}{e.via ? `, via ${e.via === 'page' ? 'the page' : 'the API'}` : ''}</span>
-					{#if e.grants.length}<br /><span class="muted">{e.grants.map(outcome).join('; ')}</span>{/if}
+					{#if e.grants.length}<br /><span class="muted">{e.grants.map((g) => outcome(e, g)).join('; ')}</span>{/if}
 				</li>
 			{/each}
 		</ul>

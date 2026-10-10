@@ -61,7 +61,8 @@ final grants = await rbacr.redeemVoucherGrants('spring sale');          // one p
 final admin = RbacrClient(tokenProvider: () => serverSecrets.read('rbacr_root_token'));
 final voucher = await admin.createVoucher(systemId: 'presence', roles: ['premium'], maxUses: 100);
 final sale = await admin.createVoucher(systemId: 'presence', roles: ['free', 'premium'], code: 'SPRING-SALE');
-final global = await admin.createVoucher(roles: ['pro'], endsAt: DateTime.utc(2027)); // no system: global
+// No system: a global voucher, granting roles picked from any systems, each in its own.
+final bundle = await admin.createVoucher(grants: [SystemRole('presence', 'premium'), SystemRole('tabscan', 'premium')]);
 final vouchers = await admin.listVouchers(systemId: 'presence'); // newest first; none: global ones
 await admin.disableVoucher(voucher.code); // DELETE: disabled for good (disabledBy), still listed
 ```
@@ -77,7 +78,7 @@ await admin.disableVoucher(voucher.code); // DELETE: disabled for good (disabled
 | `allRoles(email)` | `POST /api/roles` | `AllRoles`: global roles and roles per system |
 | `redeemVoucher(code)` | `POST /api/vouchers/redeem` | the `Grant` of its first role |
 | `redeemVoucherGrants(code)` | `POST /api/vouchers/redeem` | a `Grant` per role |
-| `createVoucher(systemId?, roles or role, code?, discountPercent?, startsAt?, endsAt?, maxUses?)` | `POST /api/systems/:id/vouchers`, or `POST /api/vouchers` without a system | the `Voucher` (roots) |
+| `createVoucher(systemId?, grants (global only), roles or role, code?, discountPercent?, startsAt?, endsAt?, maxUses?)` | `POST /api/systems/:id/vouchers`, or `POST /api/vouchers` without a system | the `Voucher` (roots) |
 | `listVouchers(systemId?)` | `GET /api/systems/:id/vouchers`, or `GET /api/vouchers` | the `Voucher`s, newest first (roots) |
 | `listRedemptions(code)` | `GET /api/vouchers/:code/redemptions` | the `RedeemEvent`s, newest first (roots) |
 | `listRedeemFailures({code})` | `GET /api/vouchers/:code/failures`, or without `code` `GET /api/redeem-failures` | the `RedeemFailure`s (failed attempts, V9), newest first (roots) |

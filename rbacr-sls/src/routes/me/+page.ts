@@ -2,19 +2,8 @@ import { vpiLoad } from '#lib/vpi.js';
 import type { Card } from '#lib/SystemCard.svelte';
 import type { PageLoad } from './$types';
 
-export interface Token {
-	id: string;
-	name: string;
-	prefix: string;
-	createdAt: string;
-	expiresAt: string | null;
-	lastUsedAt: string | null;
-	revokedAt: string | null;
-}
-
-export const load: PageLoad = async ({ fetch }) => {
-	const [me, { tokens }] = await Promise.all([
-		vpiLoad<{
+export const load: PageLoad = ({ fetch }) =>
+	vpiLoad<{
 			email: string;
 			root: boolean;
 			globalRoles: string[];
@@ -23,8 +12,4 @@ export const load: PageLoad = async ({ fetch }) => {
 			urls: Record<string, string>;
 			/** Each system's card (SPEC R13). */
 			systems: Record<string, Card>;
-		}>(fetch, '/me'),
-		vpiLoad<{ tokens: Token[] }>(fetch, '/tokens')
-	]);
-	return { ...me, tokens };
-};
+		}>(fetch, '/me');

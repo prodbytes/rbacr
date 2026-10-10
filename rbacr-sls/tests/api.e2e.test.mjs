@@ -296,7 +296,7 @@ describe('rbacr API', { skip: !(await fetch(`${BASE}/health`).then((r) => r.ok, 
 		const paid = await root('POST', '/api/vouchers', { role, discountPercent: 25 });
 		const res = await user('POST', '/api/vouchers/redeem', { code: paid.body.code });
 		assert.equal(res.status, 402);
-		assert.deepEqual(res.body.payment, { code: paid.body.code, systemId: null, roles: [role], role, discountPercent: 25 });
+		assert.deepEqual(res.body.payment, { code: paid.body.code, systemId: null, roles: [role], role, grants: null, discountPercent: 25 });
 
 		assert.equal((await root('DELETE', '/api/global-grants', { role, grantee: OTHER })).status, 204);
 		assert.deepEqual((await other('GET', '/api/me')).body.globalRoles, []);
@@ -541,6 +541,32 @@ describe('rbacr API', { skip: !(await fetch(`${BASE}/health`).then((r) => r.ok, 
 		const refused = await ask(`/api/systems/${SYSTEM}/grants`, 'POST');
 		assert.equal(refused.status, 403);
 		assert.equal(refused.headers.get('access-control-allow-origin'), null);
+	});
+
+	it('lets roots issue global vouchers of the system roles they pick (V1)', async () => {
+		const picked = [{ systemId: SYSTEM, role: 'viewer' }];
+		const v = await root('POST', '/api/vouchers', { grants: picked, maxUses: 1 });
+		assert.equal(v.status, 201, JSON.stringify(v.body));
+		assert.deepEqual([v.body.systemId, v.body.grants, v.body.roles], [null, picked, ['viewer']]);
+		assert.equal((await root('POST', '/api/vouchers', { grants: [{ systemId: SYSTEM, role: 'nope' }] })).status, 404);
+		assert.equal((await root('POST', `/api/systems/${SYSTEM}/vouchers`, { grants: picked })).status, 400);
+		const redeemed = await other('POST', '/api/vouchers/redeem', { code: v.body.code });
+		assert.equal(redeemed.status, 200, JSON.stringify(redeemed.body));
+		assert.deepEqual(redeemed.body.grants.map((g) => [g.systemId, g.role]), [[SYSTEM, 'viewer']]);
+		assert.deepEqual((await other('GET', '/api/me')).body.globalRoles, []);
+		// The global page's voucher form picks from each system's roles.
+		const global = await vpi(creds[0].cookie, 'GET', '/global');
+		assert.ok(global.body.systems.some((s) => s.id === SYSTEM && s.roles.includes('viewer')));
+		assert.equal((await root('DELETE', `/api/vouchers/${v.body.code}`)).status, 200);
+	});
+
+	it('shows everyone their API tokens on /global, and roots the rest (T1)', async () => {
+		const html = async (cookie) => (await fetch(`${BASE}/global`, { headers: { cookie, accept: 'text/html' } })).text();
+		const mine = await html(creds[2].cookie);
+		assert.match(mine, /API tokens/);
+		assert.doesNotMatch(mine, /Global grants/);
+		assert.match(await html(creds[0].cookie), /Global grants/);
+		assert.doesNotMatch(await (await fetch(`${BASE}/me`, { headers: { cookie: creds[2].cookie, accept: 'text/html' } })).text(), /API tokens/);
 	});
 
 	it('lets roots delete systems', async () => {

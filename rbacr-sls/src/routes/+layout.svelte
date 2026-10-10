@@ -21,7 +21,7 @@
 		<nav>
 			<a href="/me">My roles</a>
 			{#if data.user.root}<a href="/systems">Systems</a>{/if}
-			{#if data.user.root}<a href="/global">Global</a>{/if}
+			<a href="/global">Global</a>
 			{#if data.user.root}
 				<a href="/notifications">
 					Notifications{#if data.user.openNotifications}{' '}<span class="badge alert">{data.user.openNotifications}</span>{/if}

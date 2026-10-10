@@ -6,6 +6,10 @@
 	let { data }: PageProps = $props();
 	let r = $derived(data.redemption);
 	let roles = $derived(r.roles.length ? r.roles : [...new Set(data.systems.flatMap((s) => s.roles))]);
+	// A global voucher's system roles name their systems (SPEC V1); an older one's apply wherever they exist.
+	let names = $derived(new Map(data.systems.map((s) => [s.id, s.name])));
+	let pairs = $derived(r.systemId ? [] : r.grants.filter((g) => g.systemId !== null));
+	let granted = $derived(pairs.length ? pairs.map((g) => `${g.role} in ${names.get(g.systemId!) ?? g.systemId}`) : roles);
 </script>
 
 <svelte:head><title>Voucher redeemed · rbacr</title></svelte:head>
@@ -14,7 +18,8 @@
 	<h1><span class="ok" aria-hidden="true">✓</span> Roles granted</h1>
 	<p>
 		Voucher <code>{r.code}</code> gave you
-		{#each roles as role, i (role)}{i ? (i === roles.length - 1 ? ' and ' : ', ') : ''}<strong>{role}</strong>{/each}{r.systemId
+		{#each granted as item, i (item)}{i ? (i === granted.length - 1 ? ' and ' : ', ') : ''}<strong>{item}</strong>{/each}{r.systemId ||
+		pairs.length
 			? ''
 			: ` in every system that has ${roles.length > 1 ? 'them' : 'it'}`}.
 		<span class="muted">Redeemed {formatDate(r.redeemedAt)}.</span>
