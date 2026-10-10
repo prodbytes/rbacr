@@ -63,6 +63,30 @@ void main() {
       expect(seen.map((r) => r.headers['authorization']), ['Bearer rbacr_1', 'Bearer rbacr_2']);
     });
 
+    test("send an app's Google ID token as a bearer token, and surface its 403s (SPEC I4)", () async {
+      const idToken = 'eyJhbGciOiJSUzI1NiJ9.eyJlbWFpbCI6ImFuYUB4LmNvbSJ9.c2ln';
+      final seen = <http.Request>[];
+      final client = RbacrClient(
+        baseUrl: Uri.parse('https://rbacr.test'),
+        tokenProvider: () async => idToken,
+        httpClient: MockClient((r) async {
+          seen.add(r);
+          if (r.url.path == '/api/me') {
+            return reply({'email': 'ana@x.com', 'root': false, 'globalRoles': <String>[], 'roles': <String, Object>{}});
+          }
+          return reply({
+            'error': "A Google ID token only reaches rbacr's self-service routes; use a personal API token",
+          }, 403);
+        }),
+      );
+      expect((await client.me()).email, 'ana@x.com');
+      expect(seen.single.headers['authorization'], 'Bearer $idToken');
+      await expectLater(
+        client.listVouchers(systemId: 'presence'),
+        throwsA(isA<RbacrException>().having((e) => e.isForbidden, 'isForbidden', true)),
+      );
+    });
+
     test('refuse plain http except on localhost, and exactly one token source', () {
       expect(() => RbacrClient(baseUrl: Uri.parse('http://rbacr.nu01.com'), token: 't'), throwsArgumentError);
       expect(RbacrClient(baseUrl: Uri.parse('http://127.0.0.1:5173'), token: 't').baseUrl.port, 5173);

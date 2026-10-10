@@ -54,8 +54,33 @@ const notFound = (message: string) => new RbacError(404, message);
 
 export interface Actor {
 	email: string;
-	/** On the root allow list: holds `root`, so every role, and manages everything. */
+	/**
+	 * Has root powers: on the root allow list and not signed in through an
+	 * application (I5). Holds `root`, so every role, and manages everything.
+	 */
 	root: boolean;
+	/** Authenticated by an application's Google ID token (I1): self-service only (I4), never root powers (I5). */
+	app?: boolean;
+}
+
+/**
+ * The /api routes an application's user may call with a Google ID token
+ * (I4): their own roles and checks, a system's status, and redeeming a
+ * voucher for themselves. Every other /api route answers 403 to them,
+ * whatever their roles (I5). `/api/roles` and `/api/check` stay limited to
+ * the caller's own address by T6, since such an actor is never a root.
+ */
+const APP_ROUTES: ReadonlyArray<readonly [method: string, path: RegExp]> = [
+	['GET', /^\/api\/me$/],
+	['POST', /^\/api\/roles$/],
+	['POST', /^\/api\/check$/],
+	['GET', /^\/api\/systems\/[^/]+\/status$/],
+	['POST', /^\/api\/vouchers\/redeem$/]
+];
+
+/** Whether an ID-token caller may send `method` to the /api `path` (I4). */
+export function appMayCall(method: string, path: string): boolean {
+	return APP_ROUTES.some(([m, re]) => m === method && re.test(path));
 }
 
 /** Effective roles keyed by system id, each list sorted. */
@@ -667,9 +692,13 @@ export class Rbac {
 		return [...this.roots.entries].sort();
 	}
 
-	async actor(email: string): Promise<Actor> {
-		const root = this.isRoot(email);
-		return { email, root };
+	/**
+	 * Who is acting. `app`: authenticated by an application's Google ID token
+	 * (I1), which never carries root powers (I5), even for a root's address.
+	 */
+	async actor(email: string, { app = false }: { app?: boolean } = {}): Promise<Actor> {
+		if (app) return { email, root: false, app: true };
+		return { email, root: this.isRoot(email) };
 	}
 
 	/**

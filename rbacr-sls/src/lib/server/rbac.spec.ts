@@ -2,7 +2,7 @@ import { PutCommand } from '@aws-sdk/lib-dynamodb';
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { Table } from './dynamo';
 import { Allowlist } from './identity';
-import { Rbac, RbacError, voucherStatus, type Actor } from './rbac';
+import { Rbac, RbacError, appMayCall, voucherStatus, type Actor } from './rbac';
 import { ANIMALS, quarterOf } from '../vouchers';
 import { createTestTable, scanAll } from './testing/dynamodb';
 
@@ -1006,6 +1006,69 @@ describe('role queries (the external API)', () => {
 		await expectError(rbac.hasRole(user, OTHER, 'billing', 'editor'), 403, /Only roots/);
 		await expectError(rbac.rolesIn(user, OTHER, 'billing'), 403);
 		await expectError(rbac.allRoles(user, ROOT), 403);
+	});
+});
+
+describe("apps' users, signed in with a Google ID token (I4, I5)", () => {
+	it('reach only the self-service routes', () => {
+		for (const [method, path] of [
+			['GET', '/api/me'],
+			['POST', '/api/roles'],
+			['POST', '/api/check'],
+			['GET', '/api/systems/presence/status'],
+			['POST', '/api/vouchers/redeem']
+		]) {
+			expect(appMayCall(method, path), `${method} ${path}`).toBe(true);
+		}
+		for (const [method, path] of [
+			['POST', '/api/me'],
+			['GET', '/api/roles'],
+			['OPTIONS', '/api/check'],
+			['GET', '/api/systems'],
+			['POST', '/api/systems'],
+			['GET', '/api/systems/presence'],
+			['PATCH', '/api/systems/presence'],
+			['GET', '/api/systems/presence/status/x'],
+			['GET', '/api/systems//status'],
+			['GET', '/api/systems/presence/grants'],
+			['POST', '/api/systems/presence/grants'],
+			['POST', '/api/systems/presence/vouchers'],
+			['GET', '/api/vouchers'],
+			['POST', '/api/vouchers'],
+			['DELETE', '/api/vouchers/redeem'],
+			['GET', '/api/vouchers/X/redemptions'],
+			['GET', '/api/redeem-failures'],
+			['GET', '/api/global-grants'],
+			['GET', '/api/me/'],
+			['GET', '/api'],
+			['GET', '/api/nope']
+		]) {
+			expect(appMayCall(method, path), `${method} ${path}`).toBe(false);
+		}
+	});
+
+	it('never act as roots, even with a root address', async () => {
+		const rootViaApp = await rbac.actor(ROOT, { app: true });
+		expect(rootViaApp).toEqual({ email: ROOT, root: false, app: true });
+		await expectError(rbac.createSystem(rootViaApp, { id: 'sneaky' }), 403);
+		await expectError(rbac.grant(rootViaApp, 'billing', 'viewer', USER), 403);
+		await expectError(rbac.createVoucher(rootViaApp, { systemId: 'billing', roles: ['viewer'] }), 403);
+		await expectError(rbac.hasRole(rootViaApp, USER, 'billing', 'viewer'), 403, /Only roots/);
+		await expectError(rbac.allRoles(rootViaApp, USER), 403);
+		expect(rbac.isRoot(ROOT)).toBe(true);
+	});
+
+	it("still hold their own roles, a root's included, and redeem vouchers for themselves", async () => {
+		await rbac.grant(root, 'billing', 'viewer', USER);
+		const userViaApp = await rbac.actor(USER, { app: true });
+		expect(await rbac.hasRole(userViaApp, USER, 'billing', 'viewer')).toBe(true);
+		expect(await rbac.rolesIn(userViaApp, USER, 'billing')).toEqual(['viewer']);
+		await expectError(rbac.rolesIn(userViaApp, OTHER, 'billing'), 403);
+		const rootViaApp = await rbac.actor(ROOT, { app: true });
+		expect(await rbac.hasRole(rootViaApp, ROOT, 'billing', 'editor')).toBe(true);
+		expect(await rbac.allRoles(rootViaApp, ROOT)).toEqual({ globalRoles: ['root'], roles: { billing: ['editor', 'viewer'], crm: [] } });
+		const v = await rbac.createVoucher(root, { systemId: 'billing', roles: ['editor'] });
+		expect((await rbac.redeemVoucher(userViaApp.email, v.code))[0]).toMatchObject({ systemId: 'billing', role: 'editor', grantee: USER });
 	});
 });
 

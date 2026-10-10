@@ -95,6 +95,9 @@ jobs:
           # This tenant's settings: RBACR_RC_<NAME> becomes RBACR_<NAME>.
           RBACR_ROOT_LIST: ${{ vars.RBACR_RC_ROOT_LIST }}
           RBACR_GOOGLE_CLIENT_ID: ${{ vars.RBACR_RC_GOOGLE_CLIENT_ID }}
+          # Apps whose users call /api with Google ID tokens (SPEC I1-I5, H3); unset: off.
+          RBACR_GOOGLE_AUDIENCES: ${{ vars.RBACR_RC_GOOGLE_AUDIENCES }}
+          RBACR_CORS_ORIGINS: ${{ vars.RBACR_RC_CORS_ORIGINS }}
           HEALTH_EMAILS: ${{ vars.RBACR_RC_HEALTH_EMAILS }}
           # Secrets; when unset, the stack keeps its deployed values.
           RBACR_GOOGLE_CLIENT_SECRET: ${{ secrets.RBACR_RC_GOOGLE_CLIENT_SECRET }}

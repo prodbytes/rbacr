@@ -1,5 +1,5 @@
 import { json, type RequestEvent } from '@sveltejs/kit';
-import { RbacError, type Actor, type GrantWithImplied, type Notification, type OwnRedemption, type RedeemEvent, type RedeemFailure, type SystemSettings, type Validity, type Voucher, type VoucherInput } from './rbac';
+import { RbacError, appMayCall, type Actor, type GrantWithImplied, type Notification, type OwnRedemption, type RedeemEvent, type RedeemFailure, type SystemSettings, type Validity, type Voucher, type VoucherInput } from './rbac';
 import { getServices, type Services } from './services';
 import type { ApiToken } from './tokens';
 
@@ -17,18 +17,25 @@ async function run(ctx: Ctx, fn: (ctx: Ctx) => Promise<unknown>): Promise<Respon
 }
 
 /**
- * The external API (/api): authenticated only by a personal API token,
- * `Authorization: Bearer rbacr_…`, acting as the person who created it.
- * hooks.server.ts has already checked the token (and refused the request
- * without a valid one); session cookies never count here.
+ * The external API (/api): authenticated by a personal API token,
+ * `Authorization: Bearer rbacr_…`, acting as the person who created it, or
+ * on the self-service routes by an app's Google ID token (I1-I5), acting as
+ * its user without root powers. hooks.server.ts has already checked the
+ * token (and refused the request without a valid one); session cookies never
+ * count here.
  */
 export async function api(event: RequestEvent, fn: (ctx: Ctx) => Promise<unknown>): Promise<Response> {
 	const email = event.url.pathname.startsWith('/api/') ? event.locals.email : null;
 	if (!email) {
 		return json({ error: 'A valid API token is required' }, { status: 401, headers: { 'www-authenticate': 'Bearer' } });
 	}
+	const app = event.locals.app === true;
+	// Also checked in hooks.server.ts; repeated so no route can be reached around it (I4).
+	if (app && !appMayCall(event.request.method, event.url.pathname)) {
+		return json({ error: "A Google ID token only reaches rbacr's self-service routes; use a personal API token" }, { status: 403 });
+	}
 	const services = await getServices();
-	return run({ ...services, actor: await services.rbac.actor(email) }, fn);
+	return run({ ...services, actor: await services.rbac.actor(email, { app }) }, fn);
 }
 
 /**

@@ -1,9 +1,11 @@
 import {
 	RBACR_BOOTSTRAP_EMAIL,
 	RBACR_BOOTSTRAP_TOKEN,
+	RBACR_CORS_ORIGINS,
 	RBACR_DYNAMODB_ENDPOINT,
 	RBACR_DYNAMODB_SESSIONS_TABLE,
 	RBACR_DYNAMODB_TABLE,
+	RBACR_GOOGLE_AUDIENCES,
 	RBACR_GOOGLE_CLIENT_ID,
 	RBACR_GOOGLE_CLIENT_SECRET,
 	RBACR_PUBLIC_ORIGIN,
@@ -12,7 +14,9 @@ import {
 	RBACR_STRIPE_API_KEY,
 	RBACR_STRIPE_WEBHOOK_SECRET
 } from '$app/env/private';
+import { parseCorsOrigins } from './cors';
 import { createTable, ensureTable, type Table } from './dynamo';
+import { GoogleIdTokens, parseAudiences } from './idtokens';
 import { Allowlist, normalizeEmail } from './identity';
 import { Rbac } from './rbac';
 import { Sessions } from './session';
@@ -80,4 +84,23 @@ export function stripeSync(): StripeSync | null {
 		webhookSecret: RBACR_STRIPE_WEBHOOK_SECRET,
 		apiKey: RBACR_STRIPE_API_KEY
 	};
+}
+
+let idTokens: GoogleIdTokens | null | undefined;
+
+/** The verifier of apps' Google ID tokens (I1), or null when RBACR_GOOGLE_AUDIENCES is empty. Its key cache lives per process. */
+export function googleIdTokens(): GoogleIdTokens | null {
+	if (idTokens === undefined) {
+		const audiences = parseAudiences(RBACR_GOOGLE_AUDIENCES);
+		idTokens = audiences.length ? new GoogleIdTokens(audiences) : null;
+	}
+	return idTokens;
+}
+
+let cors: string[] | undefined;
+
+/** The origins allowed to call /api from a browser (H3); empty: no CORS. */
+export function corsOrigins(): readonly string[] {
+	cors ??= parseCorsOrigins(RBACR_CORS_ORIGINS);
+	return cors;
 }

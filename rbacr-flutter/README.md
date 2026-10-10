@@ -7,8 +7,11 @@ HTTP API by hand. It wraps the external API (`/api`) of
 defines every answer.
 
 It is a pure Dart package (only `package:http`), so it works in Flutter on
-Android, iOS and desktop, and in Dart backends. **Not on Flutter web:**
-rbacr's `/api` sends no CORS headers, so browsers block the calls.
+Android, iOS, desktop and the web, and in Dart backends. **On Flutter
+web**, the browser lets the app call rbacr only when the app's origin
+(e.g. `https://presence.nu01.com`) is in rbacr's `RBACR_CORS_ORIGINS`
+([rbacr-sls: Apps calling rbacr as their users](../rbacr-sls/README.md#apps-calling-rbacr-as-their-users));
+from any other origin the calls fail as unreachable.
 
 ## Add it
 
@@ -87,8 +90,39 @@ payment throws `RbacrPaymentRequired` with its `payment` terms.
 
 ## Tokens
 
-The client authenticates with a personal API token (rbacr's `/me` page,
-SPEC T1-T5) and acts as its owner, so it sees what they may see (SPEC C2):
+The client authenticates with a bearer token and acts as its owner, so it
+sees what they may see (SPEC C2). The token is either a personal API token
+(rbacr's `/me` page, SPEC T1-T5) or, in an app that signs its users in with
+Google, the user's **Google ID token** (SPEC I1-I5).
+
+### Your user's Google ID token
+
+An app that already signs its users in with Google can call rbacr as the
+signed-in user with nothing else to store: pass their ID token from the
+`tokenProvider`. It expires within an hour, so get a fresh one for each
+request (`google_sign_in` refreshes it):
+
+```dart
+final rbacr = RbacrClient(
+  tokenProvider: () async => (await googleUser.authentication).idToken!,
+);
+final me = await rbacr.me();                          // their roles
+final status = await rbacr.systemStatus('presence');  // maintenance?
+await rbacr.redeemVoucher(code);                      // for themselves
+```
+
+rbacr accepts the ID token only when Google issued it to one of the OAuth
+clients in rbacr's `RBACR_GOOGLE_AUDIENCES`. On Android and iOS the ID
+token's audience is the **web** client id the app passes as
+`serverClientId`, so that id must be listed; list the Android and iOS
+client ids too if the app ever gets tokens issued to them. An ID token
+reaches only the **self-service** calls: `me()`, `check`, `allows`,
+`rolesIn` and `allRoles` about the signed-in user, `systemStatus`,
+`redeemVoucher` and `redeemVoucherGrants`. Anything else answers 403
+(`isForbidden`), even when the user is a root: root management always
+needs a personal token.
+
+### Personal API tokens
 
 - A **user's own token** may ask only about that user: `me()`, `check` and
   `rolesIn` with their own address, and `redeemVoucher`; plus any system's

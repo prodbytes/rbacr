@@ -155,6 +155,9 @@ the environment are read from the git-ignored `.env.$STAGE` (`.env.prod`,
      gh variable set "RBACR_${t}_ROOT_LIST" --body "nu01.com"
      gh variable set "RBACR_${t}_GOOGLE_CLIENT_ID" --body "<client id>.apps.googleusercontent.com"
      gh variable set "RBACR_${t}_HEALTH_EMAILS" --body "julio+health@nu01.com"  # optional
+     # optional: apps whose users call /api with Google ID tokens (README "Apps calling rbacr as their users")
+     gh variable set "RBACR_${t}_GOOGLE_AUDIENCES" --body "<app web client id>,<app android client id>"
+     gh variable set "RBACR_${t}_CORS_ORIGINS" --body "https://app.example.com"
      gh secret set "RBACR_${t}_GOOGLE_CLIENT_SECRET"
    done
    # LOCAL, for codespaces (optional; local machines use .env directly)

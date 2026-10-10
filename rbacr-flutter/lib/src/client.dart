@@ -7,18 +7,31 @@ import 'errors.dart';
 import 'models.dart';
 import 'settings.dart';
 
-/// Supplies the personal API token for each request (SPEC T1-T4), e.g. from
-/// secure storage, so it can change without a new client.
+/// Supplies the bearer token for each request, so it can change without a
+/// new client: a personal API token (SPEC T1-T4), e.g. from secure storage,
+/// or the signed-in user's Google ID token (SPEC I1-I5), e.g. from
+/// `google_sign_in`, which expires within an hour, so fetch a fresh one here.
 typedef RbacrTokenProvider = FutureOr<String> Function();
 
 /// A client for rbacr's external API (`/api`), authenticated with a personal
-/// API token. It acts as the token's owner (SPEC T4): anyone may ask about
-/// themselves; asking about other people needs a root's token (C2), which
-/// must never ship inside an app.
+/// API token or a Google ID token. It acts as the token's owner (SPEC T4):
+/// anyone may ask about themselves; asking about other people needs a root's
+/// personal token (C2), which must never ship inside an app.
+///
+/// A Google ID token (SPEC I1-I5), issued to one of the OAuth clients rbacr
+/// trusts (`RBACR_GOOGLE_AUDIENCES`), reaches only the self-service calls:
+/// [me], [check], [allows], [rolesIn] and [allRoles] about the signed-in user,
+/// [systemStatus], [redeemVoucher] and [redeemVoucherGrants]. Everything else
+/// answers 403, even for a root. On Flutter web, the app's origin must be in
+/// rbacr's `RBACR_CORS_ORIGINS`.
 ///
 /// ```dart
 /// final rbacr = RbacrClient(token: myToken);
 /// if (await rbacr.allows(email: user.email, systemId: 'presence', role: 'premium')) { ... }
+///
+/// // In an app, as its signed-in user:
+/// final mine = RbacrClient(tokenProvider: () async => (await googleUser.authentication).idToken!);
+/// final me = await mine.me();
 /// ```
 class RbacrClient {
   /// [baseUrl] defaults to the `RBACR_URL` setting, else [production]. Pass

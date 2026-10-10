@@ -44,6 +44,21 @@ Parameters:
     Type: String
     NoEcho: true
     Description: RBACR_GOOGLE_CLIENT_SECRET
+  GoogleAudiences:
+    Type: String
+    Default: ''
+    AllowedPattern: '[A-Za-z0-9._, -]*'
+    Description: >
+      RBACR_GOOGLE_AUDIENCES, comma-separated Google OAuth client ids whose
+      users' ID tokens /api accepts on its self-service routes (SPEC I1-I5).
+      Empty turns ID tokens off.
+  CorsOrigins:
+    Type: String
+    Default: ''
+    AllowedPattern: '[A-Za-z0-9.:/, -]*'
+    Description: >
+      RBACR_CORS_ORIGINS, comma-separated web origins (https://app.example.com)
+      allowed to call /api from the browser (SPEC H3, H4). Empty: no CORS.
   StripeWebhookSecret:
     Type: String
     NoEcho: true
@@ -179,6 +194,8 @@ Resources:
           RBACR_ROOT_LIST: !Ref RootList
           RBACR_GOOGLE_CLIENT_ID: !Ref GoogleClientId
           RBACR_GOOGLE_CLIENT_SECRET: !Ref GoogleClientSecret
+          RBACR_GOOGLE_AUDIENCES: !Ref GoogleAudiences
+          RBACR_CORS_ORIGINS: !Ref CorsOrigins
           RBACR_STRIPE_WEBHOOK_SECRET: !Ref StripeWebhookSecret
           RBACR_STRIPE_API_KEY: !Ref StripeApiKey
           RBACR_DYNAMODB_TABLE: !Ref TableName
@@ -240,7 +257,9 @@ Resources:
               - HeaderName: x-rbacr-host
                 HeaderValue: !Ref DomainName
         # Pages and the JSON API: nothing cached; every viewer header but
-        # Host, every cookie and query string forwarded.
+        # Host (Origin and the CORS preflight headers included), every cookie
+        # and query string forwarded, and every method (OPTIONS preflights,
+        # SPEC H4) reaches the app.
         DefaultCacheBehavior:
           TargetOriginId: app
           ViewerProtocolPolicy: redirect-to-https

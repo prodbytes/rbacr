@@ -3,7 +3,9 @@
 // against a running dev server (`devbox services up` or `npm run dev`) with
 // RBACR_DEV_LOGIN=1 and RBACR_ROOT_LIST containing the root below (default:
 // e2e.test). Each person signs in through /login/dev, then mints an API token
-// through /vpi the way the /me page does, and uses it on /api.
+// through /vpi the way the /me page does, and uses it on /api. With
+// RBACR_E2E_CORS_ORIGIN, one of the server's RBACR_CORS_ORIGINS, it also
+// checks CORS on /api (H3, H4).
 //
 //   RBACR_E2E_URL=http://127.0.0.1:5173 npm run test:e2e
 import assert from 'node:assert/strict';
@@ -15,6 +17,7 @@ const ADMIN = 'admin@partner.test';
 const USER = 'user@partner.test';
 const OTHER = 'other@partner.test';
 const SYSTEM = `e2e-${Date.now()}`;
+const CORS_ORIGIN = process.env.RBACR_E2E_CORS_ORIGIN;
 
 async function login(email) {
 	const res = await fetch(`${BASE}/login/dev`, {
@@ -515,6 +518,29 @@ describe('rbacr API', { skip: !(await fetch(`${BASE}/health`).then((r) => r.ok, 
 		assert.equal((await user('GET', '/api/redeem-failures')).status, 403);
 		assert.equal((await user('GET', `/api/vouchers/${v.code}/failures`)).status, 403);
 		assert.equal((await vpi(creds[2].cookie, 'GET', '/redeem-failures')).status, 403);
+	});
+
+	it('answers browsers from listed origins on /api (H3, H4)', { skip: !CORS_ORIGIN && 'RBACR_E2E_CORS_ORIGIN is unset' }, async () => {
+		const { token } = creds[2];
+		const me = await fetch(`${BASE}/api/me`, { headers: { authorization: `Bearer ${token}`, origin: CORS_ORIGIN } });
+		assert.equal(me.status, 200);
+		assert.equal(me.headers.get('access-control-allow-origin'), CORS_ORIGIN);
+		assert.match(me.headers.get('vary'), /Origin/);
+		// Errors too, so the app can read them; an ID-token-shaped forgery is just a 401.
+		const forged = await fetch(`${BASE}/api/me`, { headers: { authorization: 'Bearer eyJhbGciOiJub25lIn0.eyJlbWFpbCI6InhAeC54In0.', origin: CORS_ORIGIN } });
+		assert.equal(forged.status, 401);
+		assert.equal(forged.headers.get('access-control-allow-origin'), CORS_ORIGIN);
+		const evil = await fetch(`${BASE}/api/me`, { headers: { authorization: `Bearer ${token}`, origin: 'https://evil.example' } });
+		assert.equal(evil.status, 200);
+		assert.equal(evil.headers.get('access-control-allow-origin'), null);
+		const ask = (path, method) =>
+			fetch(`${BASE}${path}`, { method: 'OPTIONS', headers: { origin: CORS_ORIGIN, 'access-control-request-method': method, 'access-control-request-headers': 'authorization' } });
+		const ok = await ask(`/api/systems/${SYSTEM}/status`, 'GET');
+		assert.equal(ok.status, 204);
+		assert.equal(ok.headers.get('access-control-allow-origin'), CORS_ORIGIN);
+		const refused = await ask(`/api/systems/${SYSTEM}/grants`, 'POST');
+		assert.equal(refused.status, 403);
+		assert.equal(refused.headers.get('access-control-allow-origin'), null);
 	});
 
 	it('lets roots delete systems', async () => {
