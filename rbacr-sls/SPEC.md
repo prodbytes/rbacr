@@ -144,8 +144,8 @@ and the README in sync with the code.
   **generated cover**, drawn in the browser as SVG (nothing is fetched or
   stored): an icon for what the system is for, picked from words in its
   id and name, then its description (payments, conversations, analytics,
-  camera, calendar, documents, learning, shop, people, security, media, games, or
-  a generic app), on colours derived from its id, so it never changes.
+  camera, calendar, documents, learning, shop, people, security, media,
+  climbing, games, or a generic app), on colours derived from its id, so it never changes.
   Description and screenshot are only
   shown, never interpreted: the description is text, not HTML. R12's
   status leaves them out.

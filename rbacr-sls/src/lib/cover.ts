@@ -72,6 +72,18 @@ export const THEMES: Theme[] = [
 		icon: ['M4 5h16v14H4z', 'M10 9v6l5-3z']
 	},
 	{
+		// A grigri: its body, the rope wrapped round the cam with both strands out the top, the handle, the carabiner hole.
+		label: 'climbing',
+		words: ['grigri', 'climb', 'belay', 'boulder', 'crag', 'rope', 'carabiner', 'alpin', 'mountain'],
+		icon: [
+			'M7.5 4h7a4.5 4.5 0 0 1 4.5 4.5v5A7.5 7.5 0 0 1 11.5 21 5.5 5.5 0 0 1 6 15.5V5.5A1.5 1.5 0 0 1 7.5 4z',
+			'M13.8 10.5a1.8 1.8 0 1 1-3.6 0 1.8 1.8 0 0 1 3.6 0z',
+			'M9 0.5v10a3 3 0 0 0 6 0v-10',
+			'M18.5 7l3.5-3.5',
+			'M10 17.3a1.3 1.3 0 1 1-2.6 0 1.3 1.3 0 0 1 2.6 0z'
+		]
+	},
+	{
 		label: 'games',
 		words: ['game', 'play', 'quest', 'puzzle', 'arcade'],
 		icon: ['M6 8h12a4 4 0 0 1 0 8H6a4 4 0 0 1 0-8z', 'M8 10v4', 'M6 12h4', 'M15 11h.01', 'M17 13h.01']
