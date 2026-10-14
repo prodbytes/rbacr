@@ -16,10 +16,12 @@ export function safeNext(raw: string | null | undefined): string {
 	if (!/^\/(?![/\\])/.test(raw)) return DEFAULT_NEXT;
 	// No backslashes or control characters anywhere: browsers rewrite them unpredictably.
 	if (/[\\\u0000-\u001f\u007f]/.test(raw)) return DEFAULT_NEXT;
-	// What a browser would make of it must still be on this site.
+	// What a browser would make of it must still be on this site, and stay a
+	// path once normalized: dot segments can collapse `/.//host` into `//host`.
 	const base = 'https://rbacr.invalid';
 	const url = new URL(raw, base);
-	return url.origin === base ? url.pathname + url.search + url.hash : DEFAULT_NEXT;
+	const path = url.pathname + url.search + url.hash;
+	return url.origin === base && /^\/(?![/\\])/.test(path) ? path : DEFAULT_NEXT;
 }
 
 /** The redeem page's path for a voucher code (V8). */

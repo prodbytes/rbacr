@@ -1,4 +1,5 @@
 import { json } from '@sveltejs/kit';
+import { normalizeEmail } from '#lib/server/identity.js';
 import { getServices, stripeSync } from '#lib/server/services.js';
 import { fetchSubscriber, subscriptionCustomer, verifyEvent } from '#lib/server/stripe.js';
 import type { RequestHandler } from './$types';
@@ -19,6 +20,8 @@ export const POST: RequestHandler = async ({ request }) => {
 	if (!customer) return json({ received: true, ignored: event.type });
 	const subscriber = await fetchSubscriber(config.apiKey, customer);
 	if (!subscriber.email) return json({ received: true, ignored: 'no e-mail' });
+	// An address rbacr can't use is acknowledged (Q4): a retry would only fail again.
+	if (!normalizeEmail(subscriber.email)) return json({ received: true, ignored: 'invalid e-mail' });
 	const { rbac } = await getServices();
 	const outcomes = await rbac.syncSubscriber(subscriber.email, subscriber.period);
 	// Addresses are people's: logged by Stripe customer id only.

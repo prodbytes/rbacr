@@ -416,15 +416,18 @@ describe('rbacr API', { skip: !(await fetch(`${BASE}/health`).then((r) => r.ok, 
 				headers: { origin: BASE, accept: 'text/html', 'content-type': 'application/x-www-form-urlencoded' },
 				body: new URLSearchParams({ email: `link${Date.now()}@partner.test`, next })
 			});
-		for (const evil of ['//evil.example', 'https://evil.example', '/\\evil.example']) {
+		for (const evil of ['//evil.example', 'https://evil.example', '/\\evil.example', '/.//evil.example', '/%2e//evil.example']) {
 			assert.equal((await signIn(evil)).headers.get('location'), '/me');
 		}
 		const back = await signIn(link);
 		assert.equal(back.status, 303);
 		assert.equal(back.headers.get('location'), link);
 		const cookie = back.headers.getSetCookie().find((c) => c.startsWith('rbacr_session=')).split(';')[0];
-		// Signed in, the link's page renders (it redeems from the browser).
-		assert.equal((await fetch(`${BASE}${link}`, { headers: { cookie, accept: 'text/html' } })).status, 200);
+		// Signed in, the link's page renders and redeems only on a click (V8):
+		// opening it changes nothing.
+		const opened = await fetch(`${BASE}${link}`, { headers: { cookie, accept: 'text/html' } });
+		assert.equal(opened.status, 200);
+		assert.match(await opened.text(), />Redeem</);
 
 		assert.equal((await vpi(cookie, 'GET', `/me/redemptions/${code}`)).status, 404);
 		assert.equal((await vpi(cookie, 'POST', '/me/redeem', { code })).status, 200);

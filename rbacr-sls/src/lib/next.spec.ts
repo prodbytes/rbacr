@@ -21,6 +21,12 @@ describe('safeNext (S5)', () => {
 			'javascript:alert(1)',
 			'/x\nLocation: https://evil.com',
 			'\t//evil.com',
+			// Dot segments that normalize into "//host".
+			'/.//evil.com',
+			'/%2e//evil.com',
+			'/..//evil.com',
+			'/a/..//evil.com',
+			'/%2e%2e//evil.com/x?y',
 			`/${'a'.repeat(600)}`
 		]) {
 			expect(safeNext(bad)).toBe(DEFAULT_NEXT);

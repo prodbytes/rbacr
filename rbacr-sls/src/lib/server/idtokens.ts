@@ -25,6 +25,8 @@ const DEFAULT_KEYS_TTL_MS = 60 * 60 * 1000;
 const MAX_KEYS_TTL_MS = 24 * 60 * 60 * 1000;
 /** An unknown `kid` refetches the keys at most this often (a forged kid can't make rbacr hammer the issuer). */
 const MIN_REFETCH_INTERVAL_MS = 60 * 1000;
+/** How long a JWKS fetch may take, so a hanging issuer can't hold requests until the Lambda times out. */
+const FETCH_TIMEOUT_MS = 3000;
 
 /** A client id as Google writes them, e.g. 1234-abc.apps.googleusercontent.com. */
 const AUDIENCE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
@@ -47,7 +49,18 @@ export interface TrustedIssuer {
 	jwks: string;
 	/** The `aud` values accepted from it. */
 	audiences: string[];
+	/** The only systems its tokens reach (I10); undefined: every system. */
+	systems?: string[];
 }
+
+/** A verified ID token's identity, and the systems its issuer is limited to (I10; null: none). */
+export interface AppIdentity {
+	email: string;
+	systems: readonly string[] | null;
+}
+
+/** A system id, as rbacr's catalog writes them. */
+const SYSTEM_ID_RE = /^[a-z0-9][a-z0-9_.:-]{0,62}$/;
 
 /**
  * Parses RBACR_TRUSTED_ISSUERS (I7), a JSON array of
@@ -67,9 +80,9 @@ export function parseTrustedIssuers(raw: string | undefined): TrustedIssuer[] {
 	return value.map((entry, i) => {
 		const where = `trusted issuer #${i + 1}`;
 		if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new Error(`${where} must be an object`);
-		const extra = Object.keys(entry).filter((k) => !['issuer', 'jwks', 'audiences'].includes(k));
+		const extra = Object.keys(entry).filter((k) => !['issuer', 'jwks', 'audiences', 'systems'].includes(k));
 		if (extra.length) throw new Error(`${where} has unknown key(s): ${extra.join(', ')}`);
-		const { issuer, jwks, audiences } = entry as Record<string, unknown>;
+		const { issuer, jwks, audiences, systems } = entry as Record<string, unknown>;
 		if (typeof issuer !== 'string' || !TOKEN_STRING_RE.test(issuer)) throw new Error(`${where}: issuer must be a non-empty string without spaces`);
 		if (GOOGLE_ISSUERS.includes(issuer)) throw new Error(`${where}: ${issuer} is Google's issuer, configured by RBACR_GOOGLE_AUDIENCES`);
 		if (seen.has(issuer)) throw new Error(`${where}: duplicate issuer ${issuer}`);
@@ -85,7 +98,15 @@ export function parseTrustedIssuers(raw: string | undefined): TrustedIssuer[] {
 		if (!audiences.every((a) => typeof a === 'string' && TOKEN_STRING_RE.test(a))) {
 			throw new Error(`${where}: each audience must be a non-empty string without spaces`);
 		}
-		return { issuer, jwks: url.href, audiences: [...new Set(audiences as string[])] };
+		if (systems !== undefined && !(Array.isArray(systems) && systems.length && systems.every((s) => typeof s === 'string' && SYSTEM_ID_RE.test(s)))) {
+			throw new Error(`${where}: systems must be a non-empty array of system ids`);
+		}
+		return {
+			issuer,
+			jwks: url.href,
+			audiences: [...new Set(audiences as string[])],
+			...(systems !== undefined && { systems: [...new Set(systems as string[])].sort() })
+		};
 	});
 }
 
@@ -144,6 +165,8 @@ class JwksKeys {
 				// Stale keys still verify tokens signed with them; with none, the caller learns rbacr can't check.
 				if (!this.keys.size) throw err;
 				console.error(`Refreshing ${this.label} ID token keys failed`, (err as Error).message);
+				// Keep them a little longer rather than refetching on every request meanwhile.
+				this.keysExpireAt = this.now() + MIN_REFETCH_INTERVAL_MS;
 			}
 		}
 		return this.keys.get(kid) ?? null;
@@ -159,7 +182,11 @@ class JwksKeys {
 
 	private async load(): Promise<void> {
 		this.lastFetchAt = this.now();
-		const res = await this.fetchFn(this.url, { headers: { accept: 'application/json' }, redirect: 'error' });
+		const res = await this.fetchFn(this.url, {
+			headers: { accept: 'application/json' },
+			redirect: 'error',
+			signal: AbortSignal.timeout(FETCH_TIMEOUT_MS)
+		});
 		if (!res.ok) throw new Error(`${this.label}'s ID token keys answered ${res.status}`);
 		const body = (await res.json()) as { keys?: Jwk[] };
 		if (!Array.isArray(body.keys)) throw new Error(`${this.label}'s ID token keys had no keys`);
@@ -190,15 +217,18 @@ class JwksKeys {
 /** Verifies one issuer's ID tokens (I2, I8): its JWKS, its `iss` values, its audiences. */
 export class IdTokenVerifier {
 	readonly issuers: ReadonlySet<string>;
+	/** The only systems this issuer's tokens reach (I10); null: every system. */
+	readonly systems: readonly string[] | null;
 	private readonly audiences: ReadonlySet<string>;
 	private readonly jwks: JwksKeys;
 
 	constructor(
-		config: { issuers: Iterable<string>; audiences: Iterable<string>; jwks: string; label: string },
+		config: { issuers: Iterable<string>; audiences: Iterable<string>; jwks: string; label: string; systems?: readonly string[] },
 		fetchFn: typeof fetch = fetch,
 		private readonly now: () => number = Date.now
 	) {
 		this.issuers = new Set(config.issuers);
+		this.systems = config.systems ? [...config.systems] : null;
 		this.audiences = new Set(config.audiences);
 		if (!this.issuers.size) throw new Error(`${config.label} ID tokens need at least one issuer`);
 		if (!this.audiences.size) throw new Error(`${config.label} ID tokens need at least one audience`);
@@ -249,7 +279,11 @@ export class GoogleIdTokens extends IdTokenVerifier {
 
 /** A trusted issuer's ID tokens (I7, I8). */
 export function trustedIssuerTokens(issuer: TrustedIssuer, fetchFn: typeof fetch = fetch, now: () => number = Date.now) {
-	return new IdTokenVerifier({ issuers: [issuer.issuer], audiences: issuer.audiences, jwks: issuer.jwks, label: issuer.issuer }, fetchFn, now);
+	return new IdTokenVerifier(
+		{ issuers: [issuer.issuer], audiences: issuer.audiences, jwks: issuer.jwks, label: issuer.issuer, systems: issuer.systems },
+		fetchFn,
+		now
+	);
 }
 
 /**
@@ -277,9 +311,15 @@ export class IdTokens {
 
 	/** As IdTokenVerifier.verify, for whichever configured issuer the token names; null for any other. */
 	async verify(token: string): Promise<string | null> {
+		return (await this.verifyIdentity(token))?.email ?? null;
+	}
+
+	/** The verified identity, with the systems its issuer is limited to (I10), or null. */
+	async verifyIdentity(token: string): Promise<AppIdentity | null> {
 		if (!looksLikeJwt(token)) return null;
 		const iss = decodeJson(token.split('.')[1])?.iss;
 		const verifier = typeof iss === 'string' ? this.byIssuer.get(iss) : undefined;
-		return verifier ? verifier.verify(token) : null;
+		const email = verifier ? await verifier.verify(token) : null;
+		return email && verifier ? { email, systems: verifier.systems } : null;
 	}
 }

@@ -27,8 +27,11 @@ and the README in sync with the code.
   and a `state` check). Only Google accounts with a verified e-mail can sign in.
 - **S2** Anyone with a Google account can sign in. Signing in grants no roles.
 - **S3** A successful sign-in creates a server-side session that lasts 30 days.
-  The browser holds a random token in the `rbacr_session` cookie (`HttpOnly`,
-  `SameSite=Lax`, `Secure` outside dev). The database stores only the token's
+  The browser holds a random token in the `__Host-rbacr_session` cookie
+  (`HttpOnly`, `SameSite=Lax`, `Secure`, path `/`; the `__Host-` prefix
+  means only rbacr's own host can set it, so a sibling subdomain can't
+  plant one). The dev server, on plain http, names it `rbacr_session`; a
+  cookie of that older name is cleared and authenticates nothing. The database stores only the token's
   SHA-256 hash. Signing out (`POST /logout`) revokes the session (L1).
   Sessions are kept in a table of their own, which DynamoDB's TTL purges
   `RBACR_SESSION_RETENTION_DAYS` days (default 365) after each session
@@ -43,7 +46,9 @@ and the README in sync with the code.
   `/?next=` goes there at once). Only a path on rbacr itself is followed:
   anything else (another origin, `//host`, a backslash, a control
   character, more than 512 characters) means `/me`, so `next` can't
-  redirect off the site.
+  redirect off the site. The check applies to the path as a browser
+  normalizes it too, so dot segments that collapse into `//host`
+  (`/.//host`, `/%2e//host`) also mean `/me`.
 
 ## Roles
 
@@ -263,9 +268,11 @@ and the README in sync with the code.
   lists on a system's page and on `/global` copy it to the clipboard for
   vouchers that are `active` or `not-started`. Opening it signed out goes
   to `/?next=/redeem/<code>`, which asks to sign in and comes back (S5).
-  Signed in, the page redeems the voucher from the browser through `POST
-  /vpi/me/redeem` (so a server render or prefetch never redeems), as typing
-  the code on `/me` does, then goes to `/redeemed/<code>`; redeeming on
+  Signed in, the page shows the code and the account it would go to, and
+  redeems the voucher only when the person clicks **Redeem**, from the
+  browser through `POST /vpi/me/redeem` as typing the code on `/me` does:
+  opening the link (from another site, a prefetch or a server render)
+  never redeems. Then it goes to `/redeemed/<code>`; redeeming on
   `/me` goes there too. Failures show on the page (402 as in V4a; 404, and
   409 for an inactive voucher), except that a voucher the person already
   redeemed goes straight to `/redeemed/<code>`. That page says which roles
@@ -291,6 +298,14 @@ and the README in sync with the code.
   unknown codes included, with `GET /api/redeem-failures`; on the pages, a
   voucher's uses show its failed attempts, and `/notifications` the latest
   ones.
+
+- **V10 Throttling failures.** An identity whose redeem attempts failed
+  10 times within the current 15-minute window (windows start on the
+  quarter hour, UTC) gets 429 for any further attempt until the window
+  ends, with how many minutes to wait; other identities aren't affected.
+  The count is kept per identity and window (L1: never deleted), the 429
+  isn't recorded as a RedeemFailure (V9), and a success doesn't reset it.
+  With codes of 24 random bits (V2), this keeps guessing them slow.
 
 ## Notifications
 
@@ -424,7 +439,10 @@ Stripe Connect. That account sends webhooks, so rbacr syncs from Stripe:
   `{ received, outcomes: [{ systemId, role, outcome }] }`, each outcome
   `granted`, `updated` (a new period), `revoked` or `unchanged`.
 - **Q4** Other events, and customers without an e-mail address, are
-  acknowledged (200) and change nothing. If Stripe or the database fails,
+  acknowledged (200) and change nothing, and so are customers whose
+  e-mail address isn't a valid one (`ignored: 'invalid e-mail'`), since a
+  retry couldn't fix that. A subscriber role removed meanwhile skips its
+  system and the others are still synced. If Stripe or the database fails,
   the endpoint answers 500 and Stripe retries the event. Only the Stripe
   customer id is logged, never the address.
 - **Q5** The subscriber must sign in with the same address they use on
@@ -567,12 +585,24 @@ the same as a trusted issuer (I7-I9). I4-I6 apply to every ID token.
   clock skew; `email_verified` is `true` (or the string `"true"`); and
   `email` is a valid address. Each issuer's keys are cached and refetched
   as I3 says, separately; when they can't be fetched and none are cached,
-  the request gets 503.
+  the request gets 503. A key fetch gives up after 3 seconds, and after a
+  failed refresh the stale keys are kept for another minute before rbacr
+  tries again, so a slow or failing issuer can't hold or flood requests.
 - **I9** The identity is the token's `email`, lower-cased, as I3 says, and
   the token reaches the self-service routes only, never with root powers
   (I4, I5). A trusted issuer vouches for its users' addresses on every
   system's self-service routes, as I6 says of Google clients: list only
   issuers you run, which verify the addresses they put in tokens.
+- **I10 Issuers limited to systems.** A trusted issuer's entry may list
+  `systems` (system ids, non-empty). Its tokens then reach only those:
+  `/api/check` and `/api/roles` about another system, or about a global
+  role, get 403; `/api/me` and `/api/roles` without a system list only
+  those systems' roles and no global roles; `/api/systems/:id/status`
+  answers only for them (403 otherwise); and `/api/vouchers/redeem`
+  redeems only vouchers whose roles are all in them (403 otherwise, a
+  failed attempt as V9 says). Without `systems`, an issuer reaches every
+  system, as before. Limit each app's issuer to its own systems, so a flaw
+  in its sign-in can't vouch for addresses anywhere else.
 
 ## Client integration
 
@@ -625,8 +655,9 @@ How applications use rbacr. The README has a walkthrough with examples.
 Errors are returned as
 `{ "error": "message" }` with status 400 (invalid input), 401 (no valid token),
 403 (forbidden), 404 (not found) or 409 (conflict, inactive or already
-redeemed voucher), or 402 (the voucher needs payment, V4a), or 503 (Google's
-ID token keys unreachable, I3). Dates are
+redeemed voucher), or 402 (the voucher needs payment, V4a), 429 (too many
+failed redeem attempts, V10), or 503 (an issuer's ID token keys
+unreachable, I3, I8). Dates are
 ISO-8601 strings in UTC.
 
 | Method & path | Body | Response |
@@ -760,6 +791,15 @@ to `/`. The pages need JavaScript.
   requested method and path are a self-service route (I4); otherwise 403
   without CORS headers. Responses are `Cache-Control: no-store`; in AWS,
   CloudFront caches nothing and forwards `Origin` and `OPTIONS` to the app.
+- **H5 Pages.** Every page carries a `Content-Security-Policy`: scripts
+  only from rbacr itself (the inline one gets a per-response nonce),
+  styles from rbacr (inline allowed), images from rbacr, `data:` or any
+  `https` URL (system screenshots, R13; `http` images don't load),
+  connections only to rbacr, no plugins (`object-src 'none'`), `base-uri
+  'none'`, forms only to rbacr, and `frame-ancestors 'none'`; with
+  `X-Frame-Options: DENY`, no site can frame rbacr. A page rendered for
+  someone signed in is `Cache-Control: private, no-store`, so no cache
+  keeps their data after they sign out.
 
 ## Configuration
 
@@ -803,11 +843,16 @@ All settings come from environment variables prefixed `RBACR_`:
   exists; redeeming counts the use (within `maxUses`), records the
   redemption (once per identity) and grants, all or nothing; concurrent
   implication edits are serialized by a version on the system.
-- **D2** Removing a role marks the role first, so nothing new can attach
-  meanwhile (grants, implications and vouchers check that their role is
-  not removed), then marks its dependents (L3). Deleting a system marks its
-  dependents first and the system last, so a failed deletion leaves it
-  listed and can be retried. Neither is atomic.
+- **D2** Removing a role marks its dependents first (L3: vouchers, grants,
+  implications, the subscriber setting), then the role, then its
+  dependents again, for anything attached meanwhile. Deleting a system
+  marks its dependents first and the system last. So a failed removal or
+  deletion leaves the role or system listed, and can be retried. Neither
+  is atomic, so rbacr never relies on dependents being marked: a grant of
+  a role no longer in its system's catalog gives nothing (R3), redeeming
+  checks in its transaction that each role it grants is still in the
+  catalog (409 otherwise), and re-adding a removed role first marks
+  whatever of its dependents is still live, so it starts fresh (L4).
 - **D3** Lookups across partitions (an identity's roles, a person's tokens,
   a system's vouchers) use a secondary index, which is eventually
   consistent: a change can take up to about a second to show there.
@@ -816,8 +861,8 @@ All settings come from environment variables prefixed `RBACR_`:
 
 | Suite | Command | Covers |
 |-------|---------|--------|
-| Unit and domain | `npx vitest --run` | Identity parsing, the R*, G*, P*, V*, N*, Q*, T*, L* and D* rules against DynamoDB Local (a Docker container started by the test setup, or `RBACR_TEST_DYNAMODB_ENDPOINT`), the A3 guard, the `next` check (S5), sessions, Google OAuth exchange, ID token verification (I1-I3, I7, I8, against locally made RSA keys and stubbed JWKS), the self-service scope (I4, I5), CORS (H3, H4) |
-| Lambda smoke | `npm run test:lambda` | The production build invoked through `lambda.js` with function URL (v2) events: H1, H2, H3, H4, A1, A3, I2, I4, I5, I8, I9 (Google's and a trusted issuer's ID tokens signed by a key served from a stubbed JWKS) and the Stripe webhook's signature check (Q1), the version, redirects, 401s, static assets. `scripts/package-lambda.sh` reruns it against the deployable bundle. |
+| Unit and domain | `npx vitest --run` | Identity parsing, the R*, G*, P*, V*, N*, Q*, T*, L* and D* rules against DynamoDB Local (a Docker container started by the test setup, or `RBACR_TEST_DYNAMODB_ENDPOINT`), the A3 guard, the `next` check (S5), sessions, Google OAuth exchange, ID token verification (I1-I3, I7, I8, against locally made RSA keys and stubbed JWKS), the self-service scope (I4, I5) and issuers limited to systems (I10), CORS (H3, H4) |
+| Lambda smoke | `npm run test:lambda` | The production build invoked through `lambda.js` with function URL (v2) events: H1, H2, H3, H4, H5 (the CSP and its nonce), the session cookie's prefix (S3), A1, A3, I2, I4, I5, I8, I9 (Google's and a trusted issuer's ID tokens signed by a key served from a stubbed JWKS) and the Stripe webhook's signature check (Q1), the version, redirects, 401s, static assets. `scripts/package-lambda.sh` reruns it against the deployable bundle. |
 | End-to-end | `npm run test:e2e` | `/api` with personal tokens (and CORS, H3, H4, with `RBACR_E2E_CORS_ORIGIN`), `/vpi` as the frontend (notifications and redeem links included, V8, S5), the A1/A3 separation, and the pages, against a running dev server with DynamoDB Local, directly or through Floci over HTTPS |
 | Live | `scripts/deploy.sh` (last step) | The deployed site: version, sign-in page, 401 (also for an unknown token, which reads DynamoDB), 404 for `/login/dev`, 403 for the bare function URL |
 

@@ -98,11 +98,12 @@ class RbacrClient {
   Future<RoleCheck> check({required String email, String? systemId, required String role}) async =>
       RoleCheck.fromJson(await _send('POST', '/api/check', {'email': email, 'systemId': systemId, 'role': role}));
 
-  /// [check] that fails closed (C6): any error, or no answer, means no.
+  /// [check] that fails closed (C6): any error, or no answer, means no,
+  /// including a token provider that fails and an answer of the wrong shape.
   Future<bool> allows({required String email, String? systemId, required String role}) async {
     try {
       return (await check(email: email, systemId: systemId, role: role)).allowed;
-    } on RbacrException {
+    } catch (_) {
       return false;
     }
   }
@@ -230,8 +231,17 @@ class RbacrClient {
   }
 
   Future<Map<String, Object?>> _send(String method, String path, [Map<String, Object?>? body]) async {
+    final String token;
+    try {
+      token = await Future.value(_token()).timeout(timeout);
+    } catch (e) {
+      // Never the token itself: the provider's failure, e.g. no signed-in user.
+      throw RbacrException('Could not get a token for rbacr', cause: e);
+    }
+    // rbacr's API never redirects; not following one keeps the token from going elsewhere.
     final request = http.Request(method, baseUrl.resolve(path))
-      ..headers['authorization'] = 'Bearer ${await _token()}'
+      ..followRedirects = false
+      ..headers['authorization'] = 'Bearer $token'
       ..headers['accept'] = 'application/json';
     if (body != null) {
       request

@@ -530,6 +530,30 @@ void main() {
         isFalse,
       );
       expect(await fake((_) => throw http.ClientException('down')).allows(email: 'a@x.com', role: 'root'), isFalse);
+      // An answer of the wrong shape, and a token provider that fails, mean no too.
+      expect(await fake((_) => reply({'allowed': 'yes'})).allows(email: 'a@x.com', role: 'root'), isFalse);
+      final signedOut = RbacrClient(
+        baseUrl: Uri.parse('https://rbacr.test'),
+        tokenProvider: () async => throw StateError('no signed-in user'),
+        httpClient: MockClient((_) async => reply({'allowed': true})),
+      );
+      expect(await signedOut.allows(email: 'a@x.com', role: 'root'), isFalse);
+      await expectLater(
+        signedOut.me(),
+        throwsA(isA<RbacrException>().having((e) => e.message, 'message', contains('token'))),
+      );
+    });
+
+    test('never follows redirects, and reports 429 (V10)', () async {
+      final seen = <http.Request>[];
+      final moved = fake((_) => http.Response('', 302, headers: {'location': 'https://elsewhere.test/'}), seen: seen);
+      await expectLater(moved.me(), throwsA(isA<RbacrException>().having((e) => e.statusCode, 'statusCode', 302)));
+      expect(seen.single.followRedirects, isFalse);
+      final busy = fake((_) => reply({'error': 'Too many failed attempts'}, 429));
+      await expectLater(
+        busy.redeemVoucher('X'),
+        throwsA(isA<RbacrException>().having((e) => e.isTooManyRequests, 'isTooManyRequests', isTrue)),
+      );
     });
 
     test('a slow answer times out', () async {

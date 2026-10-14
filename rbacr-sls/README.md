@@ -55,8 +55,10 @@ app on AWS Lambda. Run every command below from this folder
   Payment Required). The start date, end date and usage count are all
   optional. Each voucher in a list has a **Copy link** button: the link
   (`/redeem/<code>`) asks whoever opens it to sign in if they aren't,
-  redeems the voucher and shows the roles it granted, with cards for the
-  systems they open. Every redemption is kept as a **RedeemEvent** (who, when, from
+  then redeems the voucher when they click **Redeem** (opening it alone
+  never does) and shows the roles it granted, with cards for the systems
+  they open. After 10 failed attempts in 15 minutes, a person has to wait
+  for the next quarter hour before trying again. Every redemption is kept as a **RedeemEvent** (who, when, from
   the API or the page, and what it did to each role); open a voucher's
   uses on its page to see them, or `GET /api/vouchers/:code/redemptions`.
   Failed attempts (unknown code, expired, used up, already redeemed, needs
@@ -279,7 +281,7 @@ about the verified e-mail address, server-side, with an API token.
    for the role a feature needs and anyone with a higher role passes too.
 3. A root grants roles to addresses, whole domains or globally, or hands
    out vouchers that people redeem on `/me` or by opening the voucher's
-   link.
+   link and clicking **Redeem**.
 
 ### 2. Create a token for your application
 
@@ -440,17 +442,21 @@ one entry per issuer:
   `Cache-Control: max-age`, at most a day, and refetches on an unknown
   `kid` at most once a minute);
 - `audiences`: the `aud` values accepted from it (each token's `aud` must
-  be a single one of them).
+  be a single one of them);
+- `systems` (optional, recommended): the only systems its tokens reach
+  (SPEC I10). Role checks, role lists, system status and voucher
+  redemption are then limited to those systems, and global roles are
+  hidden. Without it, the issuer reaches every system.
 
 rbacr picks the issuer by the token's `iss` and checks everything against
 that issuer only; tokens of unlisted issuers are refused. A listed issuer
-vouches for its users' e-mail addresses on every system's self-service
-routes, so list only issuers you run. Its web origins still go in
+vouches for its users' e-mail addresses, so list only issuers you run,
+and limit each to its app's own systems. Its web origins still go in
 `RBACR_CORS_ORIGINS`. For Presence's RC and production:
 
 ```bash
-gh variable set RBACR_RC_TRUSTED_ISSUERS --body '[{"issuer":"https://rc.presence.nu01.com/api/auth","jwks":"https://rc.presence.nu01.com/api/auth/.well-known/jwks.json","audiences":["presence"]}]'
-gh variable set RBACR_GA_TRUSTED_ISSUERS --body '[{"issuer":"https://presence.nu01.com/api/auth","jwks":"https://presence.nu01.com/api/auth/.well-known/jwks.json","audiences":["presence"]}]'
+gh variable set RBACR_RC_TRUSTED_ISSUERS --body '[{"issuer":"https://rc.presence.nu01.com/api/auth","jwks":"https://rc.presence.nu01.com/api/auth/.well-known/jwks.json","audiences":["presence"],"systems":["presence"]}]'
+gh variable set RBACR_GA_TRUSTED_ISSUERS --body '[{"issuer":"https://presence.nu01.com/api/auth","jwks":"https://presence.nu01.com/api/auth/.well-known/jwks.json","audiences":["presence"],"systems":["presence"]}]'
 ```
 
 The next deploy of that stage (an RC or GA release) passes it to the app.

@@ -10,6 +10,8 @@ declare global {
 			email: string | null;
 			/** On /api: authenticated by an application's ID token (SPEC I1, I7), so limited to I4. */
 			app: boolean;
+			/** With `app`: the only systems its issuer reaches (SPEC I10); null for every system. */
+			appSystems: readonly string[] | null;
 		}
 	}
 }

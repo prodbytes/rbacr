@@ -113,6 +113,24 @@ describe('lambda handler', () => {
 		assert.doesNotMatch(res.body, /Development sign-in/);
 	});
 
+	it('sends a Content-Security-Policy, with a nonce on the inline script (H5)', async () => {
+		const res = await invoke('/', { headers: { accept: 'text/html' } });
+		const csp = res.headers['content-security-policy'];
+		assert.ok(csp, 'no CSP header');
+		for (const d of ["default-src 'self'", "object-src 'none'", "base-uri 'none'", "frame-ancestors 'none'", "form-action 'self'"]) {
+			assert.ok(csp.includes(d), `${d} missing from ${csp}`);
+		}
+		const nonce = /script-src [^;]*'nonce-([^']+)'/.exec(csp)?.[1];
+		assert.ok(nonce, `no script nonce in ${csp}`);
+		assert.match(res.body, new RegExp(`<script nonce="${nonce}">`));
+	});
+
+	it('clears the session cookie from before the __Host- prefix (S3)', async () => {
+		const res = await invoke('/', { headers: { accept: 'text/html', cookie: 'rbacr_session=old' } });
+		const cookies = [res.headers['set-cookie'], ...(res.cookies ?? [])].flat().filter(Boolean).join('\n');
+		assert.match(cookies, /rbacr_session=;[^\n]*Max-Age=0/i);
+	});
+
 	it('requires an API token on /api, ignoring session cookies', async () => {
 		for (const headers of [{}, { cookie: 'rbacr_session=anything' }, { authorization: 'Basic abc' }]) {
 			const res = await invoke('/api/me', { headers: { accept: 'application/json', ...headers } });

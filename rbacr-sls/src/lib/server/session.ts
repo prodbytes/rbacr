@@ -1,7 +1,16 @@
 import { GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { dev } from '$app/env';
 import { TTL_ATTRIBUTE, type Table } from './dynamo';
 
-export const SESSION_COOKIE = 'rbacr_session';
+/**
+ * The session cookie (S3). Outside dev it has the `__Host-` prefix, so the
+ * browser only accepts it Secure, for path `/` and from rbacr's own host: a
+ * sibling subdomain can't plant one. The dev server runs on plain http,
+ * where such a cookie can't be set.
+ */
+export const SESSION_COOKIE = dev ? 'rbacr_session' : '__Host-rbacr_session';
+/** The cookie's name before it had the prefix, cleared when a browser still sends it. */
+export const LEGACY_SESSION_COOKIE = 'rbacr_session';
 export const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 /** How long a session record is kept after the session expires (RBACR_SESSION_RETENTION_DAYS). */
 export const DEFAULT_SESSION_RETENTION_DAYS = 365;

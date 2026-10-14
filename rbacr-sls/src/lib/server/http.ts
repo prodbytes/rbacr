@@ -35,7 +35,7 @@ export async function api(event: RequestEvent, fn: (ctx: Ctx) => Promise<unknown
 		return json({ error: "An ID token only reaches rbacr's self-service routes; use a personal API token" }, { status: 403 });
 	}
 	const services = await getServices();
-	return run({ ...services, actor: await services.rbac.actor(email, { app }) }, fn);
+	return run({ ...services, actor: await services.rbac.actor(email, { app, systems: event.locals.appSystems }) }, fn);
 }
 
 /**

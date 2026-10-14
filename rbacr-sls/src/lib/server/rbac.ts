@@ -47,7 +47,7 @@ export interface PaymentRequired {
 
 export class RbacError extends Error {
 	constructor(
-		readonly status: 400 | 402 | 403 | 404 | 409,
+		readonly status: 400 | 402 | 403 | 404 | 409 | 429,
 		message: string,
 		/** Extra fields for the error response. */
 		readonly details?: { payment?: PaymentRequired }
@@ -69,6 +69,8 @@ export interface Actor {
 	root: boolean;
 	/** Authenticated by an application's ID token (I1, I7): self-service only (I4), never root powers (I5). */
 	app?: boolean;
+	/** With `app`: the only systems its issuer's tokens reach (I10); absent for every system. */
+	systems?: readonly string[];
 }
 
 /**
@@ -237,6 +239,11 @@ export interface RedeemFailure {
 	reason: string;
 }
 
+/** Failed redeem attempts one identity may make per window before it has to wait (V10). */
+export const MAX_REDEEM_FAILURES = 10;
+/** The window those failures are counted in (V10). */
+export const REDEEM_FAILURE_WINDOW_MS = 15 * 60 * 1000;
+
 /** Most failed attempts listed across all vouchers, newest first (V9). */
 export const MAX_REDEEM_FAILURES_LISTED = 100;
 
@@ -386,6 +393,13 @@ export function validUrl(raw: string, what = 'A system URL'): string {
 	return value;
 }
 
+/** I10: an app whose issuer is limited to some systems reaches only those (and no global role). */
+function requireInScope(actor: Actor, systemId: string | null): void {
+	if (actor.systems && (systemId === null || !actor.systems.includes(systemId))) {
+		throw forbidden(`This app's ID tokens only reach ${actor.systems.join(', ')}`);
+	}
+}
+
 /** Management (systems, catalogs, grants, vouchers) is for roots only (P1). */
 function requireRoot(actor: Actor, message = 'Only roots can do this'): void {
 	if (!actor.root) throw forbidden(message);
@@ -411,6 +425,7 @@ export const MAX_VOUCHER_ROLES = 20;
  *               custom codes are keyed by their XXXX-XXXX-XXXX-XXXX code)
  *   failed redemption PK VOUCHER#<key>, or REDEEMFAILS for an unknown code
  *               SK FAILED#<when>#<id>    GSI1 REDEEMFAILS / <when>#<id>   (V9)
+ *   redeem throttle PK REDEEMTHROTTLE#<email>  SK <window start>  (failures counted per window, V10)
  *   notification PK NOTIFS        SK NOTIF#<id>                (N1; dismissed ones carry dismissedAt / dismissedBy)
  *   history     PK as the item   SK HIST#<its SK>#<when it was deleted>  (L4)
  *
@@ -727,8 +742,8 @@ export class Rbac {
 	 * Who is acting. `app`: authenticated by an application's ID token
 	 * (I1, I7), which never carries root powers (I5), even for a root's address.
 	 */
-	async actor(email: string, { app = false }: { app?: boolean } = {}): Promise<Actor> {
-		if (app) return { email, root: false, app: true };
+	async actor(email: string, { app = false, systems = null }: { app?: boolean; systems?: readonly string[] | null } = {}): Promise<Actor> {
+		if (app) return { email, root: false, app: true, ...(systems && { systems: [...systems] }) };
 		return { email, root: this.isRoot(email) };
 	}
 
@@ -806,6 +821,8 @@ export class Rbac {
 			const edges = new Map(Object.entries(system.implies));
 			const ends = new Map<string, Date | null>();
 			for (const [granted, end] of held.get(systemId)!) {
+				// A grant of a role no longer in the catalog gives nothing (L2), even if left live.
+				if (!system.roles.includes(granted)) continue;
 				for (const r of closure([granted], edges)) ends.set(r, laterEnd(ends.get(r), end));
 			}
 			out.set(systemId, ends);
@@ -906,7 +923,8 @@ export class Rbac {
 	 * (R11). Anyone may ask, so an application holding only its users' own
 	 * tokens can tell maintenance from a missing role.
 	 */
-	async systemStatus(systemId: string): Promise<SystemStatus> {
+	async systemStatus(systemId: string, actor?: Actor): Promise<SystemStatus> {
+		if (actor) requireInScope(actor, systemId);
 		const meta = await this.get({ PK: sysPK(systemId), SK: 'META' });
 		if (!meta || !live(meta)) throw notFound(`System "${systemId}" not found`);
 		return {
@@ -983,6 +1001,8 @@ export class Rbac {
 		// A removed role can be added again; its removal is archived first (L4).
 		const old = await this.get(roleKey(systemId, role));
 		if (old && live(old)) throw new RbacError(409, `Role "${role}" already exists`);
+		// Anything its removal left live (D2) goes first, so the new role starts fresh (L4).
+		if (old) await this.sweepRole(systemId, role, (old.removedBy as string | undefined) ?? actor.email, (old.removedAt as string | undefined) ?? this.now().toISOString());
 		await this.archive(old);
 		const reasons = await this.transact([
 			{
@@ -1013,11 +1033,17 @@ export class Rbac {
 
 	/**
 	 * Removes a role from the catalog logically (L1, L3), revoking its grants,
-	 * removing its implications and disabling its vouchers.
+	 * removing its implications, clearing it as subscriber role and disabling
+	 * its vouchers. Those go first and the role is marked last (D2), so a
+	 * failure partway leaves the role listed and the removal can be retried;
+	 * a second sweep then catches anything attached meanwhile.
 	 */
 	async removeRole(actor: Actor, systemId: string, role: string): Promise<void> {
 		if (!actor.root) throw forbidden('Only roots can remove roles');
+		const existing = await this.get(roleKey(systemId, role));
+		if (!existing || !live(existing)) throw notFound(`Role "${role}" not found in "${systemId}"`);
 		const at = this.now().toISOString();
+		await this.sweepRole(systemId, role, actor.email, at);
 		try {
 			await this.table.doc.send(
 				new UpdateCommand({
@@ -1032,20 +1058,28 @@ export class Rbac {
 			if ((err as Error).name === 'ConditionalCheckFailedException') throw notFound(`Role "${role}" not found in "${systemId}"`);
 			throw err;
 		}
-		// The role is removed first, so nothing new can be granted or implied
-		// with it (those writes check it is live) while the rest is marked.
+		await this.sweepRole(systemId, role, actor.email, at);
+	}
+
+	/**
+	 * Marks what depends on a role as deleted (L3): its grants revoked, its
+	 * implications (both directions) removed, its vouchers (system or global)
+	 * disabled, and it cleared as its system's subscriber role. Idempotent.
+	 */
+	private async sweepRole(systemId: string, role: string, by: string, at: string): Promise<void> {
 		const grants = (await queryPrefix(this.table, sysPK(systemId), `GRANT#${role}#`)).filter(live);
 		const implications = (await queryPrefix(this.table, sysPK(systemId), 'IMPL#')).filter(
 			(it) => live(it) && (it.role === role || it.implies === role)
 		);
-		await this.mark(grants, 'revoked', actor.email, at);
-		await this.mark(implications, 'removed', actor.email, at);
-		await this.clearSubscriberRole(systemId, role);
 		const vouchers = [
 			...(await queryIndex(this.table, `VOUCHERS#${systemId}`)),
 			...(await queryIndex(this.table, `VOUCHERS#${GLOBAL_VOUCHERS}`))
 		].filter((it) => voucherGrants(it, systemId, role));
-		await this.disableVouchers(vouchers, actor.email, at);
+		// Vouchers first, so none grants the role again while its grants are revoked.
+		await this.disableVouchers(vouchers, by, at);
+		await this.mark(grants, 'revoked', by, at);
+		await this.mark(implications, 'removed', by, at);
+		await this.clearSubscriberRole(systemId, role);
 	}
 
 	/**
@@ -1508,11 +1542,19 @@ export class Rbac {
 		for (const { systemId, role } of configured) {
 			const item = grantItem(systemId, role, email, SUBSCRIPTION_GRANTOR, now, validity!);
 			wanted.add(`${item.PK}|${item.SK}`);
-			const { previous, written } = await this.putGrant(item, (existing) =>
-				existing.grantedBy === SUBSCRIPTION_GRANTOR
-					? sameValidity(existing, validity!)
-					: grantStatus(existing, now) !== 'expired'
-			);
+			let result: Awaited<ReturnType<Rbac['putGrant']>>;
+			try {
+				result = await this.putGrant(item, (existing) =>
+					existing.grantedBy === SUBSCRIPTION_GRANTOR
+						? sameValidity(existing, validity!)
+						: grantStatus(existing, now) !== 'expired'
+				);
+			} catch (err) {
+				// A subscriber role removed meanwhile (P2) skips its system, not the others.
+				if (err instanceof RbacError && err.status === 404) continue;
+				throw err;
+			}
+			const { previous, written } = result;
 			const outcome = !written ? 'unchanged' : previous?.grantedBy === SUBSCRIPTION_GRANTOR ? 'updated' : 'granted';
 			out.push({ systemId, role, outcome });
 		}
@@ -1711,17 +1753,45 @@ export class Rbac {
 	 * with 402 and the voucher's terms, granting nothing. Every failed
 	 * attempt (402, 404, 409) is kept as a RedeemFailure (V9).
 	 */
-	async redeemVoucher(email: string, rawCode: string, via: RedeemVia = 'api'): Promise<GrantWithImplied[]> {
+	async redeemVoucher(email: string, rawCode: string, via: RedeemVia = 'api', systems?: readonly string[]): Promise<GrantWithImplied[]> {
+		// V10: too many failures in this window and the identity waits, so codes can't be guessed at speed.
+		const window = this.redeemWindow();
+		const counted = await this.get({ PK: `REDEEMTHROTTLE#${email}`, SK: window.start });
+		if (((counted?.failures as number | undefined) ?? 0) >= MAX_REDEEM_FAILURES) {
+			const minutes = Math.max(1, Math.ceil((window.end.getTime() - this.now().getTime()) / 60_000));
+			throw new RbacError(429, `Too many failed attempts to redeem a voucher; try again in ${minutes} minute${minutes > 1 ? 's' : ''}`);
+		}
 		try {
-			return await this.redeem(email, rawCode, via);
+			return await this.redeem(email, rawCode, via, systems);
 		} catch (err) {
 			if (err instanceof RbacError) {
 				// Logged without the address, like the Stripe sync (Q4); the record has it.
 				console.warn(`Redeem failed (${err.status}, via ${via}): ${err.message}`);
-				await this.recordRedeemFailure(email, rawCode, via, err).catch((e) => console.error('Could not record a failed redemption', e));
+				await Promise.all([
+					this.recordRedeemFailure(email, rawCode, via, err),
+					this.countRedeemFailure(email, window)
+				]).catch((e) => console.error('Could not record a failed redemption', e));
 			}
 			throw err;
 		}
+	}
+
+	/** The fixed window failed redemptions are counted in now (V10). */
+	private redeemWindow(): { start: string; end: Date } {
+		const start = Math.floor(this.now().getTime() / REDEEM_FAILURE_WINDOW_MS) * REDEEM_FAILURE_WINDOW_MS;
+		return { start: new Date(start).toISOString(), end: new Date(start + REDEEM_FAILURE_WINDOW_MS) };
+	}
+
+	/** Counts one failed redemption of `email` in its window (V10). */
+	private async countRedeemFailure(email: string, window: { start: string; end: Date }): Promise<void> {
+		await this.table.doc.send(
+			new UpdateCommand({
+				TableName: this.table.name,
+				Key: { PK: `REDEEMTHROTTLE#${email}`, SK: window.start },
+				UpdateExpression: 'ADD failures :one SET windowEndsAt = :end',
+				ExpressionAttributeValues: { ':one': 1, ':end': window.end.toISOString() }
+			})
+		);
 	}
 
 	/**
@@ -1776,7 +1846,7 @@ export class Rbac {
 		return (Items ?? []).map(toRedeemFailure);
 	}
 
-	private async redeem(email: string, rawCode: string, via: RedeemVia): Promise<GrantWithImplied[]> {
+	private async redeem(email: string, rawCode: string, via: RedeemVia, systems?: readonly string[]): Promise<GrantWithImplied[]> {
 		const now = this.now();
 		const reasonsByStatus: Record<Exclude<VoucherStatus, 'active'>, string> = {
 			disabled: 'This voucher has been disabled',
@@ -1794,6 +1864,10 @@ export class Rbac {
 		const item = await this.voucherItem(rawCode);
 		const voucher = requireActive(item);
 		const key = { PK: item!.PK, SK: item!.SK };
+		// I10: an app limited to some systems redeems only vouchers for those.
+		if (systems && voucherTargets(voucher).some((t) => t.systemId === null || !systems.includes(t.systemId))) {
+			throw forbidden(`This app's ID tokens only redeem vouchers for ${systems.join(', ')}`);
+		}
 		if (voucher.discountPercent < 100) {
 			const { code, systemId, roles, role, grants, discountPercent } = voucher;
 			throw new RbacError(402, 'This voucher requires payment, which is not available yet', {
@@ -1802,6 +1876,7 @@ export class Rbac {
 		}
 		const forever = { startsAt: null, endsAt: null };
 		const targets = voucherTargets(voucher);
+		const roleChecks = targets.filter((t) => t.systemId !== null);
 		const grants = targets.map(({ systemId, role }) =>
 			grantItem(systemId, role, email, voucher.createdBy, now, forever, voucher.code)
 		);
@@ -1864,9 +1939,16 @@ export class Rbac {
 				},
 				...grants.flatMap((grant, i) =>
 					kept[i] ? [] : [{ Put: { TableName: this.table.name, Item: grant, ...unchangedSince(found[i]) } }]
-				)
+				),
+				// Each role it grants in a system must still be in that system's catalog (L2, D1).
+				...roleChecks.map((t) => ({
+					ConditionCheck: { TableName: this.table.name, Key: roleKey(t.systemId!, t.role), ConditionExpression: LIVE_ROLE }
+				}))
 			]);
 			if (!reasons) return this.withImpliedRoles(grants.map((g, i) => kept[i] ?? toGrant(g)));
+			if (roleChecks.length && reasons.slice(reasons.length - roleChecks.length).includes('ConditionalCheckFailed')) {
+				throw new RbacError(409, 'This voucher grants a role that no longer exists');
+			}
 			if (reasons[0] === 'ConditionalCheckFailed') {
 				requireActive(await this.get(key));
 				throw new RbacError(409, 'This voucher has no uses left');
@@ -2037,6 +2119,7 @@ export class Rbac {
 	async checkRole(actor: Actor, rawEmail: string, systemId: string | null, rawRole: string): Promise<RoleCheck> {
 		const email = this.queriedEmail(rawEmail);
 		this.requireCanQuery(actor, email);
+		requireInScope(actor, systemId);
 		const role = rawRole.trim().toLowerCase();
 		const denied: RoleCheck = { allowed: false, expiresAt: null };
 		if (systemId === null) {
@@ -2060,6 +2143,7 @@ export class Rbac {
 	async rolesIn(actor: Actor, rawEmail: string, systemId: string): Promise<string[]> {
 		const email = this.queriedEmail(rawEmail);
 		this.requireCanQuery(actor, email);
+		requireInScope(actor, systemId);
 		await this.requireSystem(systemId);
 		return (await this.rolesOf(email))[systemId] ?? [];
 	}
@@ -2068,7 +2152,21 @@ export class Rbac {
 	async allRoles(actor: Actor, rawEmail: string): Promise<{ globalRoles: string[]; roles: RoleMap }> {
 		const email = this.queriedEmail(rawEmail);
 		this.requireCanQuery(actor, email);
-		return { globalRoles: await this.globalRolesOf(email), roles: await this.rolesOf(email) };
+		return this.scoped(actor, { globalRoles: await this.globalRolesOf(email), roles: await this.rolesOf(email) });
+	}
+
+	/** The actor's own roles (`/api/me`), as far as its app reaches (I10). */
+	async me(actor: Actor): Promise<{ email: string; root: boolean; globalRoles: string[]; roles: RoleMap }> {
+		// On the root list, even through an app's ID token, which has no root powers (I5).
+		const own = await this.allRoles(actor, actor.email);
+		return { email: actor.email, root: this.isRoot(actor.email), ...own };
+	}
+
+	/** Roles limited to an app's systems (I10): only those systems, and no global roles. */
+	private scoped(actor: Actor, all: { globalRoles: string[]; roles: RoleMap }): { globalRoles: string[]; roles: RoleMap } {
+		if (!actor.systems) return all;
+		const systems = actor.systems;
+		return { globalRoles: [], roles: Object.fromEntries(Object.entries(all.roles).filter(([id]) => systems.includes(id))) };
 	}
 
 	private async requireSystem(systemId: string): Promise<Item> {

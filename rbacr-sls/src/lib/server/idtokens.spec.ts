@@ -170,6 +170,22 @@ describe('Google key cache', () => {
 		expect(String(log.mock.calls[0])).not.toContain(token);
 		log.mockRestore();
 	});
+
+	it('backs off for a minute after a failed refresh, and bounds each fetch with a timeout', async () => {
+		const token = await sign(k1, valid({ exp: nowSeconds + 3 * 3600 }));
+		expect(await verifier.verify(token)).toBe('ana@example.com');
+		expect(fetchFn.mock.calls[0][1].signal).toBeInstanceOf(AbortSignal);
+		const fetches = fetchFn.mock.calls.length;
+		clock += 2 * 3600_000;
+		fetchFn.mockRejectedValue(new Error('offline'));
+		const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+		for (let i = 0; i < 5; i++) expect(await verifier.verify(token)).toBe('ana@example.com');
+		expect(fetchFn.mock.calls.length).toBe(fetches + 1);
+		clock += 61_000;
+		await verifier.verify(token);
+		expect(fetchFn.mock.calls.length).toBe(fetches + 2);
+		log.mockRestore();
+	});
 });
 
 describe('parseAudiences and looksLikeJwt', () => {
@@ -227,6 +243,16 @@ describe('trusted issuers', () => {
 			])
 		);
 		tokens = new IdTokens([new GoogleIdTokens([AUD], f, () => clock), ...issuers.map((i) => trustedIssuerTokens(i, f, () => clock))]);
+	});
+
+	it('carries the systems an issuer is limited to with the identity (I10)', async () => {
+		const f = issuerFetch as unknown as typeof fetch;
+		const [limited] = parseTrustedIssuers(JSON.stringify([{ issuer: ISS, jwks: ISS_JWKS, audiences: ['presence'], systems: ['presence', 'presence'] }]));
+		expect(limited.systems).toEqual(['presence']);
+		const scoped = new IdTokens([new GoogleIdTokens([AUD], f, () => clock), trustedIssuerTokens(limited, f, () => clock)]);
+		expect(await scoped.verifyIdentity(await sign(k2, session()))).toEqual({ email: 'ana@example.com', systems: ['presence'] });
+		expect(await scoped.verifyIdentity(await sign(k1, valid()))).toEqual({ email: 'ana@example.com', systems: null });
+		expect(await scoped.verifyIdentity(await sign(other, session()))).toBeNull();
 	});
 
 	it("accepts each issuer's tokens, signed by its own keys, as the lower-cased e-mail", async () => {
@@ -327,6 +353,15 @@ describe('trusted issuers', () => {
 describe('parseTrustedIssuers', () => {
 	const entry = { issuer: ISS, jwks: ISS_JWKS, audiences: ['presence'] };
 	const parse = (value: unknown) => parseTrustedIssuers(JSON.stringify(value));
+
+	it('takes an optional, non-empty list of system ids (I10)', () => {
+		const base = { issuer: 'https://a.example/auth', jwks: 'https://a.example/jwks.json', audiences: ['a'] };
+		expect(parseTrustedIssuers(JSON.stringify([base]))[0].systems).toBeUndefined();
+		expect(parseTrustedIssuers(JSON.stringify([{ ...base, systems: ['tabscan', 'presence'] }]))[0].systems).toEqual(['presence', 'tabscan']);
+		for (const systems of [[], 'presence', ['Presence'], ['a b'], [1]]) {
+			expect(() => parseTrustedIssuers(JSON.stringify([{ ...base, systems }]))).toThrow(/systems/);
+		}
+	});
 
 	it('parses the JSON list; empty or unset is none', () => {
 		expect(parseTrustedIssuers(undefined)).toEqual([]);
