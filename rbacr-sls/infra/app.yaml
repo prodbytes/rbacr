@@ -5,8 +5,9 @@ Description: >
   rbacr (and rbacr-rc): the role manager at https://rbacr.nu01.com (or
   https://rc.rbacr.nu01.com). One Lambda (the SvelteKit app, lambda.js)
   using the stage's DynamoDB table (infra/tables.yaml), behind a function
-  URL, fronted by CloudFront with an ACM certificate and Route 53 aliases in
-  the rbacr.nu01.com zone. CloudFront adds a secret header (from SSM
+  URL, fronted by CloudFront with an ACM certificate validated in the
+  nu01.com zone. The DNS aliases (rbacr.nu01.com, rc.rbacr.nu01.com) belong
+  to the nu01-dns stack in the nu01 repository, not here. CloudFront adds a secret header (from SSM
   Parameter Store) that the app requires, so the function URL is useless
   when called directly. Alarms on function errors and throttles e-mail
   HealthNotificationEmails; /health is polled by the central nu01-monitor
@@ -17,9 +18,13 @@ Parameters:
   DomainName:
     Type: String
     Default: rbacr.nu01.com
-  HostedZoneId:
+  ValidationZoneId:
     Type: AWS::Route53::HostedZone::Id
-    Description: The rbacr.nu01.com zone (the rbacr-zone stack's HostedZoneId output)
+    Default: Z04838091YTBIM6PNI1XK
+    Description: >
+      The nu01.com zone (the nu01 repository's nu01-route53-zone stack), where
+      CloudFormation writes the certificate's ACM validation record.
+      scripts/deploy.sh passes it.
   CodeBucket:
     Type: String
     Description: The rbacr(-rc)-artifacts stack's bucket
@@ -120,9 +125,16 @@ Resources:
     Properties:
       DomainName: !Ref DomainName
       ValidationMethod: DNS
+      # Validated in the nu01.com zone since round 2 of the zone merge (it was
+      # the retired rbacr.nu01.com subzone). Changing HostedZoneId replaces
+      # the certificate: CloudFormation requests a new one, validates it
+      # through nu01.com with the same deterministic _<token> CNAME that
+      # round 1 (nu01 repository, scripts/migrate-subzone.sh) already
+      # UPSERTed there, swaps it into the distribution, then deletes the old
+      # certificate.
       DomainValidationOptions:
         - DomainName: !Ref DomainName
-          HostedZoneId: !Ref HostedZoneId
+          HostedZoneId: !Ref ValidationZoneId
 
   LogGroup:
     Type: AWS::Logs::LogGroup
@@ -423,27 +435,8 @@ Resources:
             CloudWatchMetricsEnabled: true
             MetricName: !Sub ${AWS::StackName}-common
 
-  DnsRecordA:
-    Type: AWS::Route53::RecordSet
-    Properties:
-      HostedZoneId: !Ref HostedZoneId
-      Name: !Ref DomainName
-      Type: A
-      AliasTarget:
-        DNSName: !GetAtt Distribution.DomainName
-        HostedZoneId: Z2FDTNDATAQYW2 # CloudFront's alias zone
-        EvaluateTargetHealth: false
-
-  DnsRecordAAAA:
-    Type: AWS::Route53::RecordSet
-    Properties:
-      HostedZoneId: !Ref HostedZoneId
-      Name: !Ref DomainName
-      Type: AAAA
-      AliasTarget:
-        DNSName: !GetAtt Distribution.DomainName
-        HostedZoneId: Z2FDTNDATAQYW2
-        EvaluateTargetHealth: false
+  # No DNS records here: the nu01-dns stack (nu01 repository) owns the
+  # A/AAAA aliases for rbacr.nu01.com and rc.rbacr.nu01.com in nu01.com.
 
   # The alarms' e-mail topic. (Its name predates the move of the /health
   # check to the central nu01-monitor stack; renaming it would replace it

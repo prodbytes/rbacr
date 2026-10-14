@@ -15,7 +15,8 @@ CERT_DIR="$(cd "$(dirname "$0")/.." && pwd)/floci/certs"
 CERT="$CERT_DIR/rbacr.pem"
 KEY="$CERT_DIR/rbacr-key.pem"
 # local.rbacr.nu01.com is a public name that resolves to 127.0.0.1 (Route 53,
-# zone rbacr.nu01.com, infra/zone.yaml), for OAuth redirect URIs that must end in a public TLD.
+# zone nu01.com, stack nu01-dns in the nu01 repository), for OAuth redirect
+# URIs that must end in a public TLD.
 NAMES=("${RBACR_PUBLIC_HOST:-local.rbacr.nu01.com}" rbacr.localhost '*.rbacr.localhost' localhost 127.0.0.1 ::1)
 
 if ! command -v mkcert >/dev/null 2>&1; then

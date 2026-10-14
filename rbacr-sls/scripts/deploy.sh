@@ -8,9 +8,10 @@
 #      (infra/tables.yaml, stack rbacr[-rc]-tables, tables rbacr[-rc] and
 #      rbacr[-rc]-sessions)
 #   3. deploys the app (infra/app.yaml, stack rbacr[-rc]: certificate,
-#      Lambda + function URL, CloudFront, DNS, and the function alarms with
-#      their e-mail topic), with the origin secret from the SSM parameter
-#      /rbacr/<stage>/origin-secret (created here on a stage's first deploy)
+#      validated in the nu01.com zone, Lambda + function URL, CloudFront, and
+#      the function alarms with their e-mail topic; the DNS aliases belong to
+#      the nu01-dns stack in the nu01 repository), with the origin secret
+#      from the SSM parameter /rbacr/<stage>/origin-secret (created here on a stage's first deploy)
 #   4. smoke-tests the live site: /health must be healthy and report this
 #      version, / must be the sign-in page, /api/me must refuse anonymous
 #      calls and unknown tokens (401; the latter is looked up in DynamoDB),
@@ -28,7 +29,6 @@
 #   STAGE         prod (default) or rc
 #   AWS_REGION    must be us-east-1 (CloudFront certificates live there)
 #   SKIP_BUILD    1 to deploy an existing dist/rbacr-lambda.zip
-#   HOSTED_ZONE_ID the rbacr.nu01.com zone (default: the rbacr-zone stack's output)
 #   RBACR_ROOT_LIST   root addresses/domains (default @nu01.com); passed on
 #                 every deploy, so the stack never keeps an old value
 #   RBACR_GOOGLE_CLIENT_ID, RBACR_GOOGLE_CLIENT_SECRET
@@ -72,7 +72,7 @@ TAGS=(project=rbacr "tenancy=$TENANCY")
 # Read KEY=value lines (not sourced, so nothing in it runs); the environment wins.
 if [[ -f ".env.$STAGE" ]]; then
   while IFS='=' read -r key value; do
-    [[ "$key" =~ ^(RBACR_[A-Z_]+|HEALTH_EMAILS|HOSTED_ZONE_ID)$ ]] || continue
+    [[ "$key" =~ ^(RBACR_[A-Z_]+|HEALTH_EMAILS)$ ]] || continue
     [[ -n "${!key:-}" ]] || export "$key=$value"
   done < ".env.$STAGE"
 fi
@@ -101,13 +101,21 @@ stack_exists() {
   aws cloudformation describe-stacks --stack-name "$1" >/dev/null 2>&1
 }
 
-if [[ -z "${HOSTED_ZONE_ID:-}" ]]; then
-  HOSTED_ZONE_ID="$(stack_output rbacr-zone HostedZoneId 2>/dev/null || true)"
-fi
-[[ "$HOSTED_ZONE_ID" =~ ^Z[A-Z0-9]+$ ]] || {
-  echo "error: HOSTED_ZONE_ID isn't set (environment, or the rbacr-zone stack; see infra/README.md)" >&2
+# The certificate validates in the nu01.com zone (the nu01 repository's
+# nu01-route53-zone stack); the retired rbacr.nu01.com subzone is no longer
+# used (infra/README.md, "Zone merge"). A different value replaces the
+# certificate.
+VALIDATION_ZONE_ID=Z04838091YTBIM6PNI1XK
+# This release deletes the stage's aliases from the subzone, so nu01.com must
+# no longer delegate to it (round 1 of the zone merge, nu01 repository). The
+# 48 hours after round 1 can't be checked here: see infra/README.md.
+delegation="$(aws route53 list-resource-record-sets --hosted-zone-id "$VALIDATION_ZONE_ID" \
+  --start-record-name rbacr.nu01.com --start-record-type NS --max-items 1 \
+  --query "ResourceRecordSets[?Name=='rbacr.nu01.com.' && Type=='NS'].Name" --output text)"
+if [[ -n "$delegation" ]]; then
+  echo "error: nu01.com still delegates rbacr.nu01.com; run round 1 of the zone merge (nu01 repository) and wait 48 hours (infra/README.md)" >&2
   exit 1
-}
+fi
 if [[ ! "${HEALTH_EMAILS:-}" =~ ^[A-Za-z0-9._%+@,-]*$ ]]; then
   echo "error: HEALTH_EMAILS must be comma-separated addresses" >&2
   exit 1
@@ -147,7 +155,7 @@ fi
 
 # The parameters: settings that are set override; unset secrets keep their
 # deployed values, but a stage's first deploy needs all of them.
-params=("DomainName=$DOMAIN" "HostedZoneId=$HOSTED_ZONE_ID" "Version=$RELEASE"
+params=("DomainName=$DOMAIN" "ValidationZoneId=$VALIDATION_ZONE_ID" "Version=$RELEASE"
   "RootList=${RBACR_ROOT_LIST:-}"
   "GoogleAudiences=${RBACR_GOOGLE_AUDIENCES:-}" "CorsOrigins=${RBACR_CORS_ORIGINS:-}"
   "TrustedIssuers=${RBACR_TRUSTED_ISSUERS:-}")

@@ -8,7 +8,7 @@ prodbytes/presence's `presence_floci`.
 
 | URL | Notes |
 |-----|-------|
-| https://local.rbacr.nu01.com:8444/ | Public name for 127.0.0.1 (`infra/zone.yaml`). Use it for Google sign-in. |
+| https://local.rbacr.nu01.com:8444/ | Public name for 127.0.0.1 (the `nu01-dns` stack in the nu01 repository). Use it for Google sign-in. |
 | https://rbacr.localhost:8444/ | Works before the DNS record exists. Browsers resolve `*.localhost` to loopback. |
 | http://localhost:5173/ | The dev server directly, without Floci |
 
