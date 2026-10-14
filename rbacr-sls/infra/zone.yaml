@@ -21,6 +21,13 @@ Resources:
       Name: !Ref DomainName
       HostedZoneConfig:
         Comment: rbacr (prodbytes/rbacr infra/zone.yaml)
+      # The stack's tags (infra/README.md) don't reach hosted zones. The zone
+      # holds both stages' records.
+      HostedZoneTags:
+        - Key: project
+          Value: rbacr
+        - Key: tenancy
+          Value: shared
 
   # Delegates rbacr.nu01.com from nu01.com to this zone's name servers.
   Delegation:

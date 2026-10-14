@@ -6,12 +6,12 @@ Description: >
   https://rc.rbacr.nu01.com). One Lambda (the SvelteKit app, lambda.js)
   using the stage's DynamoDB table (infra/tables.yaml), behind a function
   URL, fronted by CloudFront with an ACM certificate and Route 53 aliases in
-  the rbacr.nu01.com zone. CloudFront adds a generated secret header that
-  the app requires, so the function URL is useless when called directly. A
-  Route 53 health check polls https://<domain>/health (sign-in
-  configuration) and an alarm e-mails HealthNotificationEmails when it
-  fails. Deploy in us-east-1 (CloudFront certificates live there) with
-  scripts/deploy.sh.
+  the rbacr.nu01.com zone. CloudFront adds a secret header (from SSM
+  Parameter Store) that the app requires, so the function URL is useless
+  when called directly. Alarms on function errors and throttles e-mail
+  HealthNotificationEmails; /health is polled by the central nu01-monitor
+  stack (the nu01 repository), not here. Deploy in us-east-1 (CloudFront
+  certificates live there) with scripts/deploy.sh.
 
 Parameters:
   DomainName:
@@ -29,6 +29,14 @@ Parameters:
   Version:
     Type: String
     Description: The release version, reported by /health
+  OriginSecretParameter:
+    Type: String
+    AllowedPattern: '/rbacr/[a-z0-9-]+/origin-secret'
+    Description: >
+      Name of the SSM String parameter holding the header value CloudFront
+      sends and the app requires (RBACR_ORIGIN_SECRET):
+      /rbacr/<stage>/origin-secret. scripts/deploy.sh passes it, and creates
+      the parameter on a stage's first deploy.
   RootList:
     Type: String
     Default: '@nu01.com'
@@ -84,8 +92,9 @@ Parameters:
     Type: CommaDelimitedList
     Default: julio+health@nu01.com
     Description: >
-      Addresses e-mailed when the /health check fails and recovers. Each one
-      must confirm the SNS subscription e-mail before it gets notifications.
+      Addresses e-mailed when the function alarms (errors, throttles) fire
+      and recover. Each one must confirm the SNS subscription e-mail before
+      it gets notifications.
   TableName:
     Type: String
     Description: The stage's DynamoDB table (the rbacr(-rc)-tables stack, infra/tables.yaml)
@@ -114,16 +123,6 @@ Resources:
       DomainValidationOptions:
         - DomainName: !Ref DomainName
           HostedZoneId: !Ref HostedZoneId
-
-  # The header value only CloudFront knows (see the app's hooks.server.ts).
-  OriginSecret:
-    Type: AWS::SecretsManager::Secret
-    Properties:
-      Name: !Sub ${AWS::StackName}-origin-secret
-      Description: !Sub Header value CloudFront sends to the ${AWS::StackName} Lambda
-      GenerateSecretString:
-        PasswordLength: 48
-        ExcludePunctuation: true
 
   LogGroup:
     Type: AWS::Logs::LogGroup
@@ -198,7 +197,15 @@ Resources:
           HOST_HEADER: x-rbacr-host
           RBACR_VERSION: !Ref Version
           RBACR_PUBLIC_ORIGIN: !Sub https://${DomainName}
-          RBACR_ORIGIN_SECRET: !Sub '{{resolve:secretsmanager:${OriginSecret}}}'
+          # The header value only CloudFront knows (the app's
+          # hooks.server.ts), resolved at deploy time from a plain SSM String
+          # parameter (standard tier: free; Secrets Manager charged per
+          # secret). Not SecureString: CloudFormation resolves ssm-secure only
+          # in a few resource types, neither Lambda environments nor
+          # CloudFront origin headers. The exposure is the same anyway: the
+          # value is readable in this function's configuration and the
+          # distribution's, as it was with Secrets Manager.
+          RBACR_ORIGIN_SECRET: !Sub '{{resolve:ssm:${OriginSecretParameter}}}'
           RBACR_ROOT_LIST: !Ref RootList
           RBACR_GOOGLE_CLIENT_ID: !Ref GoogleClientId
           RBACR_GOOGLE_CLIENT_SECRET: !Ref GoogleClientSecret
@@ -263,7 +270,7 @@ Resources:
               OriginSSLProtocols: [TLSv1.2]
             OriginCustomHeaders:
               - HeaderName: x-rbacr-origin-secret
-                HeaderValue: !Sub '{{resolve:secretsmanager:${OriginSecret}}}'
+                HeaderValue: !Sub '{{resolve:ssm:${OriginSecretParameter}}}' # as RBACR_ORIGIN_SECRET
               - HeaderName: x-rbacr-host
                 HeaderValue: !Ref DomainName
         # Pages and the JSON API: nothing cached; every viewer header but
@@ -438,27 +445,9 @@ Resources:
         HostedZoneId: Z2FDTNDATAQYW2
         EvaluateTargetHealth: false
 
-  # Route 53 polls /health through CloudFront, like a visitor. The app
-  # answers 503 when the Google client is missing.
-  HealthCheck:
-    Type: AWS::Route53::HealthCheck
-    # Created after the DNS records, so checkers don't cache NXDOMAIN.
-    DependsOn: [DnsRecordA, DnsRecordAAAA]
-    Properties:
-      HealthCheckConfig:
-        Type: HTTPS
-        FullyQualifiedDomainName: !Ref DomainName
-        Port: 443
-        ResourcePath: /health
-        EnableSNI: true
-        RequestInterval: 30
-        FailureThreshold: 3
-        # The minimum of three checker regions keeps the load at ~6 requests a minute.
-        Regions: [us-east-1, us-west-2, eu-west-1]
-      HealthCheckTags:
-        - Key: Name
-          Value: !Sub ${AWS::StackName} https://${DomainName}/health
-
+  # The alarms' e-mail topic. (Its name predates the move of the /health
+  # check to the central nu01-monitor stack; renaming it would replace it
+  # and every subscription would need confirming again.)
   HealthTopic:
     Type: AWS::SNS::Topic
     Properties:
@@ -475,29 +464,8 @@ Resources:
           Protocol: email
           Endpoint: !Ref Email
 
-  # Route 53 publishes health check metrics in us-east-1 only, where this
-  # stack lives.
-  HealthAlarm:
-    Type: AWS::CloudWatch::Alarm
-    Properties:
-      AlarmName: !Sub ${AWS::StackName}-health
-      AlarmDescription: !Sub https://${DomainName}/health is failing (sign-in configuration or the site itself)
-      Namespace: AWS/Route53
-      MetricName: HealthCheckStatus
-      Dimensions:
-        - Name: HealthCheckId
-          Value: !Ref HealthCheck
-      Statistic: Minimum
-      Period: 60
-      EvaluationPeriods: 2
-      Threshold: 1
-      ComparisonOperator: LessThanThreshold
-      TreatMissingData: breaching
-      AlarmActions: [!Ref HealthTopic]
-      OKActions: [!Ref HealthTopic]
-
-  # The function failing or throttled: /health (above) doesn't touch the
-  # database (SPEC HC2), so these catch what it can't.
+  # The function failing or throttled: /health (polled by nu01-monitor)
+  # doesn't touch the database (SPEC HC2), so these catch what it can't.
   ErrorsAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
@@ -548,7 +516,5 @@ Outputs:
   FunctionUrl:
     Description: Direct calls are refused (403); use SiteUrl
     Value: !GetAtt FunctionUrl.FunctionUrl
-  HealthCheckId:
-    Value: !Ref HealthCheck
   HealthTopicArn:
     Value: !Ref HealthTopic

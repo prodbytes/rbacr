@@ -8,8 +8,9 @@
 #      (infra/tables.yaml, stack rbacr[-rc]-tables, tables rbacr[-rc] and
 #      rbacr[-rc]-sessions)
 #   3. deploys the app (infra/app.yaml, stack rbacr[-rc]: certificate,
-#      Lambda + function URL, CloudFront, DNS, and the Route 53 health check
-#      of /health with its e-mail alarm)
+#      Lambda + function URL, CloudFront, DNS, and the function alarms with
+#      their e-mail topic), with the origin secret from the SSM parameter
+#      /rbacr/<stage>/origin-secret (created here on a stage's first deploy)
 #   4. smoke-tests the live site: /health must be healthy and report this
 #      version, / must be the sign-in page, /api/me must refuse anonymous
 #      calls and unknown tokens (401; the latter is looked up in DynamoDB),
@@ -45,7 +46,7 @@
 #   RBACR_STRIPE_WEBHOOK_SECRET, RBACR_STRIPE_API_KEY
 #                 optional (the paid-subscription sync); unset ones keep
 #                 their deployed values
-#   HEALTH_EMAILS comma-separated addresses the health alarm e-mails
+#   HEALTH_EMAILS comma-separated addresses the function alarms e-mail
 #                 (default julio+health@nu01.com); passed on every deploy,
 #                 because the template's Fn::ForEach can't see defaults
 set -euo pipefail
@@ -59,12 +60,14 @@ if [[ "$AWS_REGION" != us-east-1 ]]; then
 fi
 STAGE="${STAGE:-prod}"
 case "$STAGE" in
-  prod) STACK=rbacr; DOMAIN=rbacr.nu01.com ;;
-  rc) STACK=rbacr-rc; DOMAIN=rc.rbacr.nu01.com ;;
+  prod) STACK=rbacr; DOMAIN=rbacr.nu01.com; TENANCY=GA ;;
+  rc) STACK=rbacr-rc; DOMAIN=rc.rbacr.nu01.com; TENANCY=RC ;;
   *) echo "error: STAGE must be prod or rc (got '$STAGE')" >&2; exit 2 ;;
 esac
 ARTIFACTS_STACK=$STACK-artifacts
 TABLES_STACK=$STACK-tables
+# Cost-allocation tags; CloudFormation copies them to every taggable resource.
+TAGS=(project=rbacr "tenancy=$TENANCY")
 
 # Read KEY=value lines (not sourced, so nothing in it runs); the environment wins.
 if [[ -f ".env.$STAGE" ]]; then
@@ -163,6 +166,25 @@ for pair in StripeWebhookSecret:RBACR_STRIPE_WEBHOOK_SECRET StripeApiKey:RBACR_S
   if [[ -n "${!name:-}" ]]; then params+=("$param=${!name}"); fi
 done
 params+=("HealthNotificationEmails=${HEALTH_EMAILS:-julio+health@nu01.com}")
+# The header value CloudFront sends and the app requires: a plain SSM String
+# (standard tier, free; see infra/app.yaml). A stage's first deploy creates
+# it; afterwards it must exist, because a new value would reach the Lambda
+# and CloudFront minutes apart and requests in between would get 403. Its
+# value is never printed.
+ORIGIN_SECRET_PARAM="/rbacr/$STAGE/origin-secret"
+params+=("OriginSecretParameter=$ORIGIN_SECRET_PARAM")
+if ! aws ssm get-parameter --name "$ORIGIN_SECRET_PARAM" --query Parameter.Version --output text >/dev/null 2>&1; then
+  if $first_deploy; then
+    echo "    creating the SSM parameter $ORIGIN_SECRET_PARAM"
+    aws ssm put-parameter --name "$ORIGIN_SECRET_PARAM" --type String --tier Standard \
+      --description "Header value CloudFront sends to the $STACK Lambda (infra/app.yaml)" \
+      --value "$(openssl rand -hex 24)" \
+      --tags Key=project,Value=rbacr "Key=tenancy,Value=$TENANCY" >/dev/null
+  else
+    echo "error: the SSM parameter $ORIGIN_SECRET_PARAM is missing; an administrator creates it with the stack's current origin secret (infra/README.md)" >&2
+    exit 1
+  fi
+fi
 # Unset keeps the deployed value (default 365 days).
 if [[ -n "${RBACR_SESSION_RETENTION_DAYS:-}" ]]; then
   if [[ ! "$RBACR_SESSION_RETENTION_DAYS" =~ ^[1-9][0-9]{0,4}$ ]]; then
@@ -191,7 +213,7 @@ test -f "$zip" || { echo "error: no $zip" >&2; exit 1; }
 # 2. Artifacts
 echo "==> deploying $ARTIFACTS_STACK"
 aws cloudformation deploy --stack-name "$ARTIFACTS_STACK" \
-  --template-file infra/artifacts.yaml --no-fail-on-empty-changeset
+  --template-file infra/artifacts.yaml --tags "${TAGS[@]}" --no-fail-on-empty-changeset
 bucket="$(stack_output "$ARTIFACTS_STACK" ArtifactsBucketName)"
 key="lambda/rbacr-$RELEASE-$(git rev-parse --short HEAD 2>/dev/null || echo local)-$BUILD_NUMBER.zip"
 aws s3 cp "$zip" "s3://$bucket/$key" --only-show-errors
@@ -200,7 +222,7 @@ echo "    code: s3://$bucket/$key"
 echo "==> deploying $TABLES_STACK"
 aws cloudformation deploy --stack-name "$TABLES_STACK" \
   --template-file infra/tables.yaml --parameter-overrides "TableName=$STACK" \
-  --no-fail-on-empty-changeset
+  --tags "${TAGS[@]}" --no-fail-on-empty-changeset
 table_arn="$(stack_output "$TABLES_STACK" TableArn)"
 sessions_table_arn="$(stack_output "$TABLES_STACK" SessionsTableArn)"
 echo "    table: $table_arn"
@@ -213,7 +235,7 @@ aws cloudformation deploy --stack-name "$STACK" \
   --parameter-overrides "${params[@]}" "CodeBucket=$bucket" "CodeKey=$key" \
     "TableName=$STACK" "TableArn=$table_arn" \
     "SessionsTableName=$STACK-sessions" "SessionsTableArn=$sessions_table_arn" \
-  --no-fail-on-empty-changeset
+  --tags "${TAGS[@]}" --no-fail-on-empty-changeset
 function_url="$(stack_output "$STACK" FunctionUrl)"
 
 # 4. Smoke test (retried: on a first deploy DNS and the edge take a moment)

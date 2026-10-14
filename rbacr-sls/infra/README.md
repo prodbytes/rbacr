@@ -9,14 +9,14 @@ rbacr's AWS infrastructure, as CloudFormation templates. Everything lives in
 | [github-deploy.yaml](github-deploy.yaml) | `rbacr-github-deploy` | The `rbacr-github-deploy` role (`*GA` tags), the `rbacr-github-deploy-rc` role (`*RC*` tags and manual runs from `main`), and the `rbacr-lambda-boundary` permissions boundary | An administrator, once |
 | [artifacts.yaml](artifacts.yaml) | `rbacr-artifacts`, `rbacr-rc-artifacts` | A private bucket for the Lambda zips; old zips expire after 90 days | [scripts/deploy.sh](../scripts/deploy.sh) |
 | [tables.yaml](tables.yaml) | `rbacr-tables`, `rbacr-rc-tables` | The DynamoDB tables (`rbacr` and `rbacr-sessions`, `rbacr-rc` and `rbacr-rc-sessions`): on demand, point-in-time recovery, deletion protection, kept if the stack is deleted | [scripts/deploy.sh](../scripts/deploy.sh) |
-| [app.yaml](app.yaml) | `rbacr`, `rbacr-rc` | The ACM certificate, the origin secret, the Lambda with its function URL and log group, the CloudFront distribution, the A/AAAA aliases, and the Route 53 health check of `/health` with its alarm and e-mail topic | [scripts/deploy.sh](../scripts/deploy.sh) |
+| [app.yaml](app.yaml) | `rbacr`, `rbacr-rc` | The ACM certificate, the Lambda with its function URL and log group, the CloudFront distribution with its WAF web ACL, the A/AAAA aliases, and the function alarms with their e-mail topic. The origin secret is an SSM parameter (`/rbacr/<stage>/origin-secret`), outside the stack | [scripts/deploy.sh](../scripts/deploy.sh) |
 
 ## How a request flows
 
 ```
 browser ──https──▶ CloudFront (rbacr.nu01.com, ACM certificate)
                      │ WAF: rate limits per IP (429), AWS known-bad-inputs rules
-                     │ adds x-rbacr-origin-secret (from Secrets Manager)
+                     │ adds x-rbacr-origin-secret (from SSM Parameter Store)
                      │ and x-rbacr-host: rbacr.nu01.com
                      ▼
                    Lambda function URL ──▶ lambda.js ──▶ SvelteKit (adapter-node)
@@ -31,10 +31,17 @@ browser ──https──▶ CloudFront (rbacr.nu01.com, ACM certificate)
   security-headers policy is added to every response.
 - **Locking down the function URL.** The URL is public (`AuthType: NONE`),
   but the app refuses any request without the `x-rbacr-origin-secret` header
-  (`RBACR_ORIGIN_SECRET`). The secret is generated in Secrets Manager, and
-  only CloudFront sends it. CloudFront's IAM origin access control for Lambda
-  is not used: it requires the viewer to sign POST bodies, which HTML forms
-  can't do.
+  (`RBACR_ORIGIN_SECRET`), and only CloudFront sends it. The value lives in
+  the SSM String parameter `/rbacr/<stage>/origin-secret` (`prod` or `rc`;
+  standard tier, so free), which scripts/deploy.sh creates on a stage's first
+  deploy and CloudFormation resolves into both the Lambda's environment and
+  the CloudFront origin header on every deploy. It isn't a SecureString:
+  CloudFormation can't resolve those into either place, and the value is
+  readable in the function's and the distribution's configuration anyway.
+  To change it, expect 403s for the few minutes between the Lambda's update
+  and CloudFront's. CloudFront's IAM origin access control for Lambda is not
+  used: it requires the viewer to sign POST bodies, which HTML forms can't
+  do.
 - **Host header.** Because `Host` isn't forwarded, the Lambda sees the
   function URL's host. CloudFront therefore sends the site's host in
   `x-rbacr-host`, and adapter-node reads it (`HOST_HEADER`). That keeps
@@ -43,15 +50,15 @@ browser ──https──▶ CloudFront (rbacr.nu01.com, ACM certificate)
   stored as a Lambda environment variable (encrypted at rest). The function
   reaches DynamoDB with its execution role, so there are no database
   credentials.
-- **Health check.** Route 53 polls `https://<domain>/health` over HTTPS
-  through CloudFront, every 30 s from three regions, and fails it after 3
-  failed polls. `/health` answers 503 unless the Google client is
-  configured; it doesn't touch DynamoDB, so polls cost nothing there. The `<stack>-health` alarm fires when the
-  check is unhealthy (or reports no data) for 2 minutes, and it notifies
-  the `<stack>-health` SNS topic, again on recovery. Because `/health`
-  doesn't reach the database, `<stack>-errors` (5 or more function errors
-  in 5 minutes) and `<stack>-throttles` (any throttled invocation, the
-  account's Lambda concurrency running out) notify the same topic. The topic e-mails the
+- **Monitoring.** `https://<domain>/health` is polled every 5 minutes by
+  the central `nu01-monitor` stack (the nu01 repository), which e-mails
+  `julio+health@nu01.com`; this stack no longer has a Route 53 health check.
+  `/health` answers 503 unless the Google client is configured; it doesn't
+  touch DynamoDB, so polls cost nothing there. Because it doesn't reach the
+  database, `<stack>-errors` (5 or more function errors in 5 minutes) and
+  `<stack>-throttles` (any throttled invocation, the account's Lambda
+  concurrency running out) notify the `<stack>-health` SNS topic, again on
+  recovery. The topic e-mails the
   `HealthNotificationEmails` parameter (comma-separated, default
   `julio+health@nu01.com`; `HEALTH_EMAILS` for scripts/deploy.sh, which
   always passes it: `Fn::ForEach` doesn't resolve parameter defaults). Each
@@ -106,6 +113,12 @@ the environment are read from the git-ignored `.env.$STAGE` (`.env.prod`,
 `.env.rc`): `KEY=value` lines for `RBACR_*`, `HEALTH_EMAILS` and
 `HOSTED_ZONE_ID`. The file is parsed, not sourced.
 
+Every stack carries the cost-allocation tags `project=rbacr` and `tenancy`
+(`GA` for prod, `RC` for rc, `shared` for `rbacr-zone` and
+`rbacr-github-deploy`), which CloudFormation copies to its resources; the
+hosted zone, which doesn't get stack tags, sets them explicitly, and
+scripts/deploy.sh tags the origin secret parameter it creates.
+
 ## One-time setup
 
 1. **The zone.** Deploy it with administrator credentials. `Z04838091YTBIM6PNI1XK`
@@ -114,7 +127,8 @@ the environment are read from the git-ignored `.env.$STAGE` (`.env.prod`,
    ```bash
    aws cloudformation deploy --region us-east-1 --stack-name rbacr-zone \
      --template-file infra/zone.yaml \
-     --parameter-overrides ParentHostedZoneId=Z04838091YTBIM6PNI1XK
+     --parameter-overrides ParentHostedZoneId=Z04838091YTBIM6PNI1XK \
+     --tags project=rbacr tenancy=shared
    aws cloudformation describe-stacks --region us-east-1 --stack-name rbacr-zone \
      --query 'Stacks[0].Outputs'   # HostedZoneId
    ```
@@ -128,7 +142,8 @@ the environment are read from the git-ignored `.env.$STAGE` (`.env.prod`,
    aws cloudformation deploy --region us-east-1 --stack-name rbacr-github-deploy \
      --template-file infra/github-deploy.yaml --capabilities CAPABILITY_NAMED_IAM \
      --parameter-overrides HostedZoneId=<rbacr-zone HostedZoneId> \
-       DistributionId=<rbacr DistributionId> RcDistributionId=<rbacr-rc DistributionId>
+       DistributionId=<rbacr DistributionId> RcDistributionId=<rbacr-rc DistributionId> \
+     --tags project=rbacr tenancy=shared
    ```
 
    `DistributionId` and `RcDistributionId` are the app stacks' `DistributionId`
@@ -138,7 +153,7 @@ the environment are read from the git-ignored `.env.$STAGE` (`.env.prod`,
    The roles trust only this repository's tokens, in both subject forms
    (`repo:prodbytes@288014477/rbacr@1404734829:…` and `repo:prodbytes/rbacr:…`).
    Each one may manage only its own stage's stacks, function, log group,
-   secret, bucket and DNS names. The roles can create the Lambda's execution
+   origin secret parameter, bucket and DNS names. The roles can create the Lambda's execution
    role only with the `rbacr-lambda-boundary` boundary attached, so a deploy
    can never create a role that does more than write logs. Each role may
    create a CloudFront distribution but read, change or delete only its own
@@ -147,8 +162,10 @@ the environment are read from the git-ignored `.env.$STAGE` (`.env.prod`,
    only its own WAF web ACL (`rbacr-waf`, `rbacr-rc-waf`) and alarms, by
    name. Neither may read, write, export, restore or delete the tables'
    data, nor delete a table: an explicit deny, so a compromised deploy run
-   can't reach the data. ACM and Route 53 health check permissions remain
-   account-wide, because their resource ids aren't known in advance.
+   can't reach the data. ACM permissions remain account-wide, because
+   certificate ids aren't known in advance (so do the leftover Route 53
+   health check delete permissions, until the next deploy of each stage
+   has removed the old health checks).
    Redeploy this stack whenever `github-deploy.yaml` changes, **before**
    the release that needs it (for example, the WAF permissions before the
    first release with the web ACL): the deploy roles can't update
@@ -214,6 +231,39 @@ the environment are read from the git-ignored `.env.$STAGE` (`.env.prod`,
 
 Then run `bash scripts/release-rc.sh`. The first deploy of each stage waits
 for its certificate to validate, which usually takes a few minutes.
+
+## Moving from Secrets Manager and the Route 53 health check (one-time)
+
+Stacks deployed before October 2026 kept the origin secret in Secrets
+Manager (`rbacr-origin-secret`, `rbacr-rc-origin-secret`, about $0.40 a
+month each) and had a Route 53 health check. The first deploy without them
+needs, in this order:
+
+1. An administrator copies each stage's current secret into its SSM
+   parameter, so the Lambda and CloudFront keep the same value through the
+   deploy (no request is refused), without printing it:
+
+   ```bash
+   for s in prod:rbacr:GA rc:rbacr-rc:RC; do
+     IFS=: read -r stage stack tenancy <<<"$s"
+     aws ssm put-parameter --region us-east-1 --name "/rbacr/$stage/origin-secret" \
+       --type String --tier Standard \
+       --description "Header value CloudFront sends to the $stack Lambda (infra/app.yaml)" \
+       --tags Key=project,Value=rbacr "Key=tenancy,Value=$tenancy" \
+       --value "$(aws secretsmanager get-secret-value --region us-east-1 \
+         --secret-id "$stack-origin-secret" --query SecretString --output text)" >/dev/null
+   done
+   ```
+
+   scripts/deploy.sh refuses to deploy an existing stage whose parameter is
+   missing.
+2. An administrator redeploys `rbacr-github-deploy` (step 2 above): the
+   roles need the SSM permissions.
+3. Release RC, then GA. Each stage's deploy deletes its health check, the
+   `<stack>-health` alarm, and its Secrets Manager secret. Then the
+   secret and health check permissions marked as such in
+   `github-deploy.yaml` can be removed (and `rbacr-github-deploy`
+   redeployed).
 
 ## Validating changes
 
