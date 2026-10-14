@@ -68,11 +68,13 @@ jobs:
             exit 1
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          # Always a tag: a branch of the same name can't stand in for it.
+          if [[ -n "$tag" ]]; then echo "ref=refs/tags/$tag" >> "$GITHUB_OUTPUT"; fi
           echo "Deploying ${tag:-the current commit} to rc.rbacr.nu01.com"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ steps.tag.outputs.tag || github.ref }}
+          ref: ${{ steps.tag.outputs.ref || github.ref }}
           persist-credentials: false
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
