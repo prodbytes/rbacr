@@ -187,20 +187,28 @@ Resources:
                 Condition:
                   StringEquals:
                     iam:PassedToService: lambda.amazonaws.com
-              # The origin secret CloudFront sends to the function
+              # The origin secret CloudFront sends to the function: an SSM
+              # String parameter (infra/app.yaml) that scripts/deploy.sh checks,
+              # or creates on the stage's first deploy, and CloudFormation
+              # resolves with this role's credentials.
               - Effect: Allow
                 Action:
-                  - secretsmanager:CreateSecret
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                  - ssm:PutParameter
+                  - ssm:AddTagsToResource
+                Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/rbacr/prod/origin-secret
+              # Only so CloudFormation can delete the stack's old Secrets
+              # Manager secret (and read it, should that update roll back).
+              # These can go after the next GA deploy.
+              - Effect: Allow
+                Action:
                   - secretsmanager:DeleteSecret
                   - secretsmanager:DescribeSecret
                   - secretsmanager:GetSecretValue
-                  - secretsmanager:UpdateSecret
                   - secretsmanager:TagResource
                   - secretsmanager:UntagResource
                 Resource: !Sub arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:rbacr-origin-secret-*
-              - Effect: Allow
-                Action: secretsmanager:GetRandomPassword
-                Resource: '*'
               # CloudFront: a deploy may create a distribution (the stage's first
               # deploy) and read or change only this stage's own afterwards. Never
               # another's: its configuration holds that stage's origin secret, so
@@ -248,6 +256,7 @@ Resources:
                   - acm:DeleteCertificate
                   - acm:ListCertificates
                   - acm:AddTagsToCertificate
+                  - acm:RemoveTagsFromCertificate
                   - acm:ListTagsForCertificate
                 Resource: '*'
               - Effect: Allow
@@ -265,7 +274,7 @@ Resources:
                     route53:ChangeResourceRecordSetsNormalizedRecordNames:
                       - rbacr.nu01.com
                       - _*.rbacr.nu01.com
-              # The /health check, its alarm and e-mail topic (infra/app.yaml).
+              # The function alarms and their e-mail topic (infra/app.yaml).
               # The template uses the AWS::LanguageExtensions transform.
               - Effect: Allow
                 Action: cloudformation:CreateChangeSet
@@ -287,16 +296,16 @@ Resources:
                   - !Sub arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:rbacr-errors
                   - !Sub arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:rbacr-throttles
               - Effect: Allow
-                Action:
-                  - cloudwatch:DescribeAlarms
-                  - route53:CreateHealthCheck
+                Action: cloudwatch:DescribeAlarms
                 Resource: '*'
-              # Health checks have no names to scope by; both stages' roles
-              # can change any health check in the account.
+              # Only so CloudFormation can delete the stack's old Route 53
+              # health check (/health is now polled by the nu01-monitor stack in
+              # the nu01 repository) and, with the rbacr-health alarm above,
+              # its alarm. Health checks have no names to scope by. These can go
+              # after the next GA deploy.
               - Effect: Allow
                 Action:
                   - route53:GetHealthCheck
-                  - route53:UpdateHealthCheck
                   - route53:DeleteHealthCheck
                   - route53:ChangeTagsForResource
                   - route53:ListTagsForResource
@@ -441,20 +450,28 @@ Resources:
                 Condition:
                   StringEquals:
                     iam:PassedToService: lambda.amazonaws.com
-              # The origin secret CloudFront sends to the function
+              # The origin secret CloudFront sends to the function: an SSM
+              # String parameter (infra/app.yaml) that scripts/deploy.sh checks,
+              # or creates on the stage's first deploy, and CloudFormation
+              # resolves with this role's credentials.
               - Effect: Allow
                 Action:
-                  - secretsmanager:CreateSecret
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                  - ssm:PutParameter
+                  - ssm:AddTagsToResource
+                Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/rbacr/rc/origin-secret
+              # Only so CloudFormation can delete the stack's old Secrets
+              # Manager secret (and read it, should that update roll back).
+              # These can go after the next RC deploy.
+              - Effect: Allow
+                Action:
                   - secretsmanager:DeleteSecret
                   - secretsmanager:DescribeSecret
                   - secretsmanager:GetSecretValue
-                  - secretsmanager:UpdateSecret
                   - secretsmanager:TagResource
                   - secretsmanager:UntagResource
                 Resource: !Sub arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:rbacr-rc-origin-secret-*
-              - Effect: Allow
-                Action: secretsmanager:GetRandomPassword
-                Resource: '*'
               # CloudFront: a deploy may create a distribution (the stage's first
               # deploy) and read or change only this stage's own afterwards. Never
               # another's: its configuration holds that stage's origin secret, so
@@ -502,6 +519,7 @@ Resources:
                   - acm:DeleteCertificate
                   - acm:ListCertificates
                   - acm:AddTagsToCertificate
+                  - acm:RemoveTagsFromCertificate
                   - acm:ListTagsForCertificate
                 Resource: '*'
               - Effect: Allow
@@ -519,7 +537,7 @@ Resources:
                     route53:ChangeResourceRecordSetsNormalizedRecordNames:
                       - rc.rbacr.nu01.com
                       - _*.rc.rbacr.nu01.com
-              # The /health check, its alarm and e-mail topic (infra/app.yaml).
+              # The function alarms and their e-mail topic (infra/app.yaml).
               # The template uses the AWS::LanguageExtensions transform.
               - Effect: Allow
                 Action: cloudformation:CreateChangeSet
@@ -541,16 +559,16 @@ Resources:
                   - !Sub arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:rbacr-rc-errors
                   - !Sub arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:rbacr-rc-throttles
               - Effect: Allow
-                Action:
-                  - cloudwatch:DescribeAlarms
-                  - route53:CreateHealthCheck
+                Action: cloudwatch:DescribeAlarms
                 Resource: '*'
-              # Health checks have no names to scope by; both stages' roles
-              # can change any health check in the account.
+              # Only so CloudFormation can delete the stack's old Route 53
+              # health check (/health is now polled by the nu01-monitor stack in
+              # the nu01 repository) and, with the rbacr-rc-health alarm above,
+              # its alarm. Health checks have no names to scope by. These can go
+              # after the next RC deploy.
               - Effect: Allow
                 Action:
                   - route53:GetHealthCheck
-                  - route53:UpdateHealthCheck
                   - route53:DeleteHealthCheck
                   - route53:ChangeTagsForResource
                   - route53:ListTagsForResource

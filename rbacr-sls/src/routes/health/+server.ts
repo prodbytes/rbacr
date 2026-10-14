@@ -8,8 +8,8 @@ import type { RequestHandler } from './$types';
  * Health of the app and its configuration (SPEC "Outside both APIs"): the
  * Google OAuth client for sign-in (not required under `vite dev`, which has
  * the dev login, nor on DynamoDB Local, where apps use a bootstrap token).
- * 503 when it's missing. Polled by the Route 53 health check
- * (infra/app.yaml). DynamoDB isn't checked: it is a managed, regional
+ * 503 when it's missing. Polled every 5 minutes by the central nu01-monitor
+ * stack (the nu01 repository). DynamoDB isn't checked: it is a managed, regional
  * service, and probing it would only add cost to every poll.
  */
 export const GET: RequestHandler = () => {
