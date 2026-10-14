@@ -23,6 +23,19 @@ Parameters:
   HostedZoneId:
     Type: AWS::Route53::HostedZone::Id
     Description: The rbacr.nu01.com zone (the rbacr-zone stack's HostedZoneId output)
+  DistributionId:
+    Type: String
+    Default: E1K2TMPPFWYEL6
+    AllowedPattern: '[A-Z0-9]*'
+    Description: >
+      Production's CloudFront distribution (the rbacr stack's DistributionId
+      output), the only one the production role may read or change. Empty
+      before the first deploy; update it if the distribution is ever replaced.
+  RcDistributionId:
+    Type: String
+    Default: E2LN31BO4LM93P
+    AllowedPattern: '[A-Z0-9]*'
+    Description: The RC's (the rbacr-rc stack's DistributionId output), likewise for the RC role
   CreateOidcProvider:
     Type: String
     AllowedValues: ['true', 'false']
@@ -188,10 +201,46 @@ Resources:
               - Effect: Allow
                 Action: secretsmanager:GetRandomPassword
                 Resource: '*'
-              # CloudFront, the certificate and DNS records
+              # CloudFront: a deploy may create a distribution (the stage's first
+              # deploy) and read or change only this stage's own afterwards. Never
+              # another's: its configuration holds that stage's origin secret, so
+              # nothing here lists or reads distributions in general.
               - Effect: Allow
-                Action: cloudfront:*
+                Action:
+                  - cloudfront:CreateDistribution
                 Resource: '*'
+              - Effect: Allow
+                Action:
+                  - cloudfront:GetDistribution
+                  - cloudfront:GetDistributionConfig
+                  - cloudfront:UpdateDistribution
+                  - cloudfront:DeleteDistribution
+                  - cloudfront:TagResource
+                  - cloudfront:UntagResource
+                  - cloudfront:ListTagsForResource
+                  - cloudfront:CreateInvalidation
+                  - cloudfront:GetInvalidation
+                Resource: !Sub arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${DistributionId}
+              # Its WAF web ACL (infra/app.yaml), which CloudFront needs in us-east-1.
+              - Effect: Allow
+                Action:
+                  - wafv2:CreateWebACL
+                  - wafv2:UpdateWebACL
+                  - wafv2:DeleteWebACL
+                  - wafv2:GetWebACL
+                  - wafv2:TagResource
+                  - wafv2:UntagResource
+                  - wafv2:ListTagsForResource
+                Resource:
+                  - !Sub arn:${AWS::Partition}:wafv2:us-east-1:${AWS::AccountId}:global/webacl/rbacr-waf/*
+                  - !Sub arn:${AWS::Partition}:wafv2:us-east-1:*:global/managedruleset/*/*
+              - Effect: Allow
+                Action:
+                  - wafv2:CheckCapacity
+                  - wafv2:ListWebACLs
+                  - wafv2:DescribeManagedRuleGroup
+                Resource: '*'
+              # The certificate and DNS records
               - Effect: Allow
                 Action:
                   - acm:RequestCertificate
@@ -233,7 +282,10 @@ Resources:
                   - cloudwatch:TagResource
                   - cloudwatch:UntagResource
                   - cloudwatch:ListTagsForResource
-                Resource: !Sub arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:rbacr-health
+                Resource:
+                  - !Sub arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:rbacr-health
+                  - !Sub arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:rbacr-errors
+                  - !Sub arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:rbacr-throttles
               - Effect: Allow
                 Action:
                   - cloudwatch:DescribeAlarms
@@ -257,6 +309,29 @@ Resources:
                   - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/rbacr/*
                   - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/rbacr-sessions
                   - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/rbacr-sessions/*
+              # The tables' data and existence are off limits to deploys, which
+              # only manage their configuration through CloudFormation: a
+              # compromised run can't read, change, export or delete them.
+              - Effect: Deny
+                Action:
+                  - dynamodb:DeleteTable
+                  - dynamodb:DeleteBackup
+                  - dynamodb:ExportTableToPointInTime
+                  - dynamodb:RestoreTableFromBackup
+                  - dynamodb:RestoreTableToPointInTime
+                  - dynamodb:Scan
+                  - dynamodb:Query
+                  - dynamodb:GetItem
+                  - dynamodb:BatchGetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:BatchWriteItem
+                  - dynamodb:PartiQLSelect
+                  - dynamodb:PartiQLInsert
+                  - dynamodb:PartiQLUpdate
+                  - dynamodb:PartiQLDelete
+                Resource: '*'
               - Effect: Allow
                 Action:
                   - route53:GetChange
@@ -380,10 +455,46 @@ Resources:
               - Effect: Allow
                 Action: secretsmanager:GetRandomPassword
                 Resource: '*'
-              # CloudFront, the certificate and DNS records
+              # CloudFront: a deploy may create a distribution (the stage's first
+              # deploy) and read or change only this stage's own afterwards. Never
+              # another's: its configuration holds that stage's origin secret, so
+              # nothing here lists or reads distributions in general.
               - Effect: Allow
-                Action: cloudfront:*
+                Action:
+                  - cloudfront:CreateDistribution
                 Resource: '*'
+              - Effect: Allow
+                Action:
+                  - cloudfront:GetDistribution
+                  - cloudfront:GetDistributionConfig
+                  - cloudfront:UpdateDistribution
+                  - cloudfront:DeleteDistribution
+                  - cloudfront:TagResource
+                  - cloudfront:UntagResource
+                  - cloudfront:ListTagsForResource
+                  - cloudfront:CreateInvalidation
+                  - cloudfront:GetInvalidation
+                Resource: !Sub arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${RcDistributionId}
+              # Its WAF web ACL (infra/app.yaml), which CloudFront needs in us-east-1.
+              - Effect: Allow
+                Action:
+                  - wafv2:CreateWebACL
+                  - wafv2:UpdateWebACL
+                  - wafv2:DeleteWebACL
+                  - wafv2:GetWebACL
+                  - wafv2:TagResource
+                  - wafv2:UntagResource
+                  - wafv2:ListTagsForResource
+                Resource:
+                  - !Sub arn:${AWS::Partition}:wafv2:us-east-1:${AWS::AccountId}:global/webacl/rbacr-rc-waf/*
+                  - !Sub arn:${AWS::Partition}:wafv2:us-east-1:*:global/managedruleset/*/*
+              - Effect: Allow
+                Action:
+                  - wafv2:CheckCapacity
+                  - wafv2:ListWebACLs
+                  - wafv2:DescribeManagedRuleGroup
+                Resource: '*'
+              # The certificate and DNS records
               - Effect: Allow
                 Action:
                   - acm:RequestCertificate
@@ -425,7 +536,10 @@ Resources:
                   - cloudwatch:TagResource
                   - cloudwatch:UntagResource
                   - cloudwatch:ListTagsForResource
-                Resource: !Sub arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:rbacr-rc-health
+                Resource:
+                  - !Sub arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:rbacr-rc-health
+                  - !Sub arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:rbacr-rc-errors
+                  - !Sub arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:rbacr-rc-throttles
               - Effect: Allow
                 Action:
                   - cloudwatch:DescribeAlarms
@@ -449,6 +563,29 @@ Resources:
                   - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/rbacr-rc/*
                   - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/rbacr-rc-sessions
                   - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/rbacr-rc-sessions/*
+              # The tables' data and existence are off limits to deploys, which
+              # only manage their configuration through CloudFormation: a
+              # compromised run can't read, change, export or delete them.
+              - Effect: Deny
+                Action:
+                  - dynamodb:DeleteTable
+                  - dynamodb:DeleteBackup
+                  - dynamodb:ExportTableToPointInTime
+                  - dynamodb:RestoreTableFromBackup
+                  - dynamodb:RestoreTableToPointInTime
+                  - dynamodb:Scan
+                  - dynamodb:Query
+                  - dynamodb:GetItem
+                  - dynamodb:BatchGetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:BatchWriteItem
+                  - dynamodb:PartiQLSelect
+                  - dynamodb:PartiQLInsert
+                  - dynamodb:PartiQLUpdate
+                  - dynamodb:PartiQLDelete
+                Resource: '*'
               - Effect: Allow
                 Action:
                   - route53:GetChange

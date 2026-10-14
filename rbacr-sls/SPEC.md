@@ -711,7 +711,9 @@ addresses stay out of URLs and access logs.
 - **HC3** In AWS, a Route 53 health check polls `https://<domain>/health`
   through CloudFront every 30 seconds from three regions. When it fails, a
   CloudWatch alarm e-mails the stack's `HealthNotificationEmails` (default
-  `julio+health@nu01.com`), and e-mails again on recovery.
+  `julio+health@nu01.com`), and e-mails again on recovery. Two more alarms
+  e-mail them, since `/health` doesn't reach the database: the function
+  failing (5 or more errors in 5 minutes) and any throttled invocation.
 
 ### `/vpi`: the view programming interface (session cookie, A2/A3)
 
@@ -800,6 +802,13 @@ to `/`. The pages need JavaScript.
   `X-Frame-Options: DENY`, no site can frame rbacr. A page rendered for
   someone signed in is `Cache-Control: private, no-store`, so no cache
   keeps their data after they sign out.
+- **H6 Rate limits at the edge.** In AWS, a WAF web ACL on the CloudFront
+  distribution answers 429 (`{ "error": … }`) to a client IP that, within
+  5 minutes, sends more than 60 redeem requests (`/vpi/me/redeem`,
+  `/api/vouchers/redeem`), 60 requests under `/login`, 3000 under `/api/`,
+  or 10000 in all. AWS's known-bad-inputs rules block, and its common rule
+  set only counts for now. This adds to V10, which limits failed
+  redemptions per identity.
 
 ## Configuration
 
@@ -815,7 +824,7 @@ All settings come from environment variables prefixed `RBACR_`:
 | `RBACR_ROOT_LIST` | no (no roots if empty; in AWS the default is `@nu01.com`) | Root addresses and domains (R1, R1a) |
 | `RBACR_GOOGLE_CLIENT_ID`, `RBACR_GOOGLE_CLIENT_SECRET` | for Google sign-in | OAuth web client. Without them `/login/google` returns 503. |
 | `RBACR_GOOGLE_AUDIENCES` | no (ID tokens off if empty) | Comma-separated Google OAuth client ids whose users' ID tokens `/api` accepts on its self-service routes (I1-I6). In AWS, the app stack's `GoogleAudiences` parameter. |
-| `RBACR_TRUSTED_ISSUERS` | no (none if empty) | OIDC issuers besides Google whose ID tokens `/api` accepts on its self-service routes, a JSON array of `{"issuer", "jwks", "audiences"}` (I7-I9). An invalid value stops the app from starting. In AWS, the app stack's `TrustedIssuers` parameter. |
+| `RBACR_TRUSTED_ISSUERS` | no (none if empty) | OIDC issuers besides Google whose ID tokens `/api` accepts on its self-service routes, a JSON array of `{"issuer", "jwks", "audiences", "systems"?}` (I7-I10). An invalid value stops the app from starting. In AWS, the app stack's `TrustedIssuers` parameter. |
 | `RBACR_CORS_ORIGINS` | no (no CORS if empty) | Comma-separated web origins allowed to call `/api` from the browser (H3, H4). In AWS, the app stack's `CorsOrigins` parameter. |
 | `RBACR_PUBLIC_ORIGIN` | no | Origin for the Google redirect URI (`<origin>/login/google/callback`); default: the request's origin |
 | `RBACR_ORIGIN_SECRET` | no | Required value of the `x-rbacr-origin-secret` header (H1) |

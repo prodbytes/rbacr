@@ -247,6 +247,7 @@ Resources:
         HttpVersion: http2and3
         IPV6Enabled: true
         PriceClass: PriceClass_100
+        WebACLId: !GetAtt WebAcl.Arn
         Aliases:
           - !Ref DomainName
         ViewerCertificate:
@@ -288,6 +289,132 @@ Resources:
             CachedMethods: [GET, HEAD]
             CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6 # Managed-CachingOptimized
             ResponseHeadersPolicyId: 67f7725c-6f97-4210-82d7-5512b31e9d03 # Managed-SecurityHeadersPolicy
+
+  # Rate limits per client IP in front of everything (blocked requests get
+  # 429), plus AWS's known-bad-inputs rules. The common rule set only
+  # counts for now: watch its metrics before letting it block.
+  WebAcl:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: !Sub ${AWS::StackName}-waf
+      Description: !Sub rbacr ${DomainName} rate limits and managed rules
+      Scope: CLOUDFRONT
+      DefaultAction: { Allow: {} }
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: !Sub ${AWS::StackName}-waf
+      CustomResponseBodies:
+        slow-down:
+          ContentType: APPLICATION_JSON
+          Content: '{"error":"Too many requests; slow down and try again shortly"}'
+      Rules:
+        # Guessing voucher codes (SPEC V10 limits failures per identity; this
+        # limits attempts per IP, signed in or not).
+        - Name: redeem-rate
+          Priority: 0
+          Action:
+            Block:
+              CustomResponse: { ResponseCode: 429, CustomResponseBodyKey: slow-down }
+          Statement:
+            RateBasedStatement:
+              Limit: 60
+              EvaluationWindowSec: 300
+              AggregateKeyType: IP
+              ScopeDownStatement:
+                OrStatement:
+                  Statements:
+                    - ByteMatchStatement:
+                        FieldToMatch: { UriPath: {} }
+                        PositionalConstraint: STARTS_WITH
+                        SearchString: /vpi/me/redeem
+                        TextTransformations: [{ Priority: 0, Type: LOWERCASE }]
+                    - ByteMatchStatement:
+                        FieldToMatch: { UriPath: {} }
+                        PositionalConstraint: STARTS_WITH
+                        SearchString: /api/vouchers/redeem
+                        TextTransformations: [{ Priority: 0, Type: LOWERCASE }]
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: !Sub ${AWS::StackName}-redeem-rate
+        - Name: login-rate
+          Priority: 1
+          Action:
+            Block:
+              CustomResponse: { ResponseCode: 429, CustomResponseBodyKey: slow-down }
+          Statement:
+            RateBasedStatement:
+              Limit: 60
+              EvaluationWindowSec: 300
+              AggregateKeyType: IP
+              ScopeDownStatement:
+                ByteMatchStatement:
+                  FieldToMatch: { UriPath: {} }
+                  PositionalConstraint: STARTS_WITH
+                  SearchString: /login
+                  TextTransformations: [{ Priority: 0, Type: LOWERCASE }]
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: !Sub ${AWS::StackName}-login-rate
+        # Unknown tokens cost a database call each (SPEC T3).
+        - Name: api-rate
+          Priority: 2
+          Action:
+            Block:
+              CustomResponse: { ResponseCode: 429, CustomResponseBodyKey: slow-down }
+          Statement:
+            RateBasedStatement:
+              Limit: 3000
+              EvaluationWindowSec: 300
+              AggregateKeyType: IP
+              ScopeDownStatement:
+                ByteMatchStatement:
+                  FieldToMatch: { UriPath: {} }
+                  PositionalConstraint: STARTS_WITH
+                  SearchString: /api/
+                  TextTransformations: [{ Priority: 0, Type: LOWERCASE }]
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: !Sub ${AWS::StackName}-api-rate
+        - Name: all-rate
+          Priority: 3
+          Action:
+            Block:
+              CustomResponse: { ResponseCode: 429, CustomResponseBodyKey: slow-down }
+          Statement:
+            RateBasedStatement:
+              Limit: 10000
+              EvaluationWindowSec: 300
+              AggregateKeyType: IP
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: !Sub ${AWS::StackName}-all-rate
+        - Name: known-bad-inputs
+          Priority: 4
+          OverrideAction: { None: {} }
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesKnownBadInputsRuleSet
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: !Sub ${AWS::StackName}-known-bad-inputs
+        - Name: common-count-only
+          Priority: 5
+          OverrideAction: { Count: {} }
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: !Sub ${AWS::StackName}-common
 
   DnsRecordA:
     Type: AWS::Route53::RecordSet
@@ -366,6 +493,46 @@ Resources:
       Threshold: 1
       ComparisonOperator: LessThanThreshold
       TreatMissingData: breaching
+      AlarmActions: [!Ref HealthTopic]
+      OKActions: [!Ref HealthTopic]
+
+  # The function failing or throttled: /health (above) doesn't touch the
+  # database (SPEC HC2), so these catch what it can't.
+  ErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${AWS::StackName}-errors
+      AlarmDescription: !Sub rbacr (${DomainName}) is throwing errors (5 or more in 5 minutes)
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref Function
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref HealthTopic]
+      OKActions: [!Ref HealthTopic]
+
+  ThrottlesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${AWS::StackName}-throttles
+      AlarmDescription: !Sub rbacr (${DomainName}) requests are being throttled (Lambda concurrency)
+      Namespace: AWS/Lambda
+      MetricName: Throttles
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref Function
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
       AlarmActions: [!Ref HealthTopic]
       OKActions: [!Ref HealthTopic]
 

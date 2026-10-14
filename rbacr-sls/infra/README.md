@@ -15,6 +15,7 @@ rbacr's AWS infrastructure, as CloudFormation templates. Everything lives in
 
 ```
 browser ──https──▶ CloudFront (rbacr.nu01.com, ACM certificate)
+                     │ WAF: rate limits per IP (429), AWS known-bad-inputs rules
                      │ adds x-rbacr-origin-secret (from Secrets Manager)
                      │ and x-rbacr-host: rbacr.nu01.com
                      ▼
@@ -47,7 +48,10 @@ browser ──https──▶ CloudFront (rbacr.nu01.com, ACM certificate)
   failed polls. `/health` answers 503 unless the Google client is
   configured; it doesn't touch DynamoDB, so polls cost nothing there. The `<stack>-health` alarm fires when the
   check is unhealthy (or reports no data) for 2 minutes, and it notifies
-  the `<stack>-health` SNS topic, again on recovery. The topic e-mails the
+  the `<stack>-health` SNS topic, again on recovery. Because `/health`
+  doesn't reach the database, `<stack>-errors` (5 or more function errors
+  in 5 minutes) and `<stack>-throttles` (any throttled invocation, the
+  account's Lambda concurrency running out) notify the same topic. The topic e-mails the
   `HealthNotificationEmails` parameter (comma-separated, default
   `julio+health@nu01.com`; `HEALTH_EMAILS` for scripts/deploy.sh, which
   always passes it: `Fn::ForEach` doesn't resolve parameter defaults). Each
@@ -123,19 +127,32 @@ the environment are read from the git-ignored `.env.$STAGE` (`.env.prod`,
    ```bash
    aws cloudformation deploy --region us-east-1 --stack-name rbacr-github-deploy \
      --template-file infra/github-deploy.yaml --capabilities CAPABILITY_NAMED_IAM \
-     --parameter-overrides HostedZoneId=<rbacr-zone HostedZoneId>
+     --parameter-overrides HostedZoneId=<rbacr-zone HostedZoneId> \
+       DistributionId=<rbacr DistributionId> RcDistributionId=<rbacr-rc DistributionId>
    ```
+
+   `DistributionId` and `RcDistributionId` are the app stacks' `DistributionId`
+   outputs (empty before a stage's first deploy; the template's defaults are
+   the current ones). Update them if a distribution is ever replaced.
 
    The roles trust only this repository's tokens, in both subject forms
    (`repo:prodbytes@288014477/rbacr@1404734829:…` and `repo:prodbytes/rbacr:…`).
    Each one may manage only its own stage's stacks, function, log group,
    secret, bucket and DNS names. The roles can create the Lambda's execution
    role only with the `rbacr-lambda-boundary` boundary attached, so a deploy
-   can never create a role that does more than write logs. CloudFront, ACM
-   and Route 53 health check permissions are account-wide, because their
-   resource ids aren't known in advance. Redeploy this stack whenever
-   `github-deploy.yaml` changes (for example, the health check permissions);
-   the deploy roles can't update themselves.
+   can never create a role that does more than write logs. Each role may
+   create a CloudFront distribution but read, change or delete only its own
+   stage's (by id): another stage's configuration holds that stage's origin
+   secret, so nothing lists or reads distributions in general. Each manages
+   only its own WAF web ACL (`rbacr-waf`, `rbacr-rc-waf`) and alarms, by
+   name. Neither may read, write, export, restore or delete the tables'
+   data, nor delete a table: an explicit deny, so a compromised deploy run
+   can't reach the data. ACM and Route 53 health check permissions remain
+   account-wide, because their resource ids aren't known in advance.
+   Redeploy this stack whenever `github-deploy.yaml` changes, **before**
+   the release that needs it (for example, the WAF permissions before the
+   first release with the web ACL): the deploy roles can't update
+   themselves.
 
 3. **Repository settings.** Variables are public identifiers; secrets are
    not. Each tenant has its own settings, named `RBACR_<TENANT>_<NAME>`:
@@ -174,6 +191,26 @@ the environment are read from the git-ignored `.env.$STAGE` (`.env.prod`,
    - `https://rc.rbacr.nu01.com/login/google/callback`
    - `https://local.rbacr.nu01.com:8444/login/google/callback`, for local
      HTTPS through [Floci](../floci/README.md)
+
+5. **Tag protection.** A pushed `*GA` or `*RC*` tag deploys with that
+   stage's role, running the workflow file of the tagged commit. So only
+   administrators may create, move or delete those tags (the release
+   scripts run as an administrator):
+
+   ```bash
+   gh api -X POST repos/prodbytes/rbacr/rulesets --input - <<'JSON'
+   {
+     "name": "release tags",
+     "target": "tag",
+     "enforcement": "active",
+     "conditions": { "ref_name": { "include": ["refs/tags/*GA", "refs/tags/*RC*"], "exclude": [] } },
+     "rules": [{ "type": "creation" }, { "type": "update" }, { "type": "deletion" }],
+     "bypass_actors": [{ "actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always" }]
+   }
+   JSON
+   ```
+
+   (`actor_id` 5 is the repository's admin role.)
 
 Then run `bash scripts/release-rc.sh`. The first deploy of each stage waits
 for its certificate to validate, which usually takes a few minutes.
