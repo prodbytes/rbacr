@@ -1,15 +1,18 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
+	import { page } from '$app/state';
 	import { vpiFetch, VpiError, type Payment } from '#lib/vpi.js';
 	import type { PageProps } from './$types';
 
 	let { data }: PageProps = $props();
 	let failure = $state<{ status: number; message: string; payment?: Payment } | null>(null);
+	let redeeming = $state(false);
 
-	// Redeemed from the browser, once the page is up, so a prefetch or server
-	// render never redeems; then on to what it granted.
-	onMount(async () => {
+	// Redeemed only when the person clicks (V8): opening the link, from any
+	// site, a prefetch or a server render never redeems. Then on to what it granted.
+	async function redeem() {
+		redeeming = true;
+		failure = null;
 		try {
 			await vpiFetch(fetch, '/me/redeem', { method: 'POST', body: { code: data.code } });
 		} catch (err) {
@@ -17,11 +20,12 @@
 			// Redeemed before (V5): show what it gave.
 			if (err.status !== 409 || !/already redeemed/.test(err.message)) {
 				failure = { status: err.status, message: err.message, payment: err.payment };
+				redeeming = false;
 				return;
 			}
 		}
 		await goto(`/redeemed/${encodeURIComponent(data.code)}`, { replaceState: true });
-	});
+	}
 </script>
 
 <svelte:head><title>Redeem {data.code} · rbacr</title></svelte:head>
@@ -29,7 +33,8 @@
 <h1>Redeem a voucher</h1>
 <p><code>{data.code}</code></p>
 {#if !failure}
-	<p class="muted" aria-live="polite">Redeeming…</p>
+	<p>Redeeming it gives its roles to <strong>{page.data.user?.email}</strong>.</p>
+	<p><button onclick={redeem} disabled={redeeming}>{redeeming ? 'Redeeming…' : 'Redeem'}</button></p>
 {:else if failure.payment}
 	<p class="error">
 		This voucher gives {failure.payment.discountPercent}% off

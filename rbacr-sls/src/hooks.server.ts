@@ -7,7 +7,7 @@ import { isCrossSiteForm } from '#lib/server/csrf.js';
 import { looksLikeJwt } from '#lib/server/idtokens.js';
 import { appMayCall } from '#lib/server/rbac.js';
 import { appIdTokens, corsOrigins, getServices } from '#lib/server/services.js';
-import { SESSION_COOKIE } from '#lib/server/session.js';
+import { LEGACY_SESSION_COOKIE, SESSION_COOKIE } from '#lib/server/session.js';
 import { TOKEN_PREFIX } from '#lib/server/tokens.js';
 import { rejectNonFrontend } from '#lib/server/vpiguard.js';
 
@@ -40,6 +40,7 @@ export const handle: Handle = async ({ event, resolve }) => {
 	}
 	event.locals.email = null;
 	event.locals.app = false;
+	event.locals.appSystems = null;
 	const api = path === '/api' || path.startsWith('/api/');
 	// H3: CORS on /api for the listed web origins only; /vpi never gets it (A3).
 	const cors = api ? corsOrigins() : [];
@@ -60,7 +61,9 @@ export const handle: Handle = async ({ event, resolve }) => {
 			const idTokens = bearer.startsWith(TOKEN_PREFIX) ? null : appIdTokens();
 			if (idTokens && looksLikeJwt(bearer)) {
 				try {
-					event.locals.email = await idTokens.verify(bearer);
+					const identity = await idTokens.verifyIdentity(bearer);
+					event.locals.email = identity?.email ?? null;
+					event.locals.appSystems = identity?.systems ?? null;
 				} catch (err) {
 					console.error("Can't check ID tokens:", (err as Error).message);
 					return withCors(
@@ -97,10 +100,16 @@ export const handle: Handle = async ({ event, resolve }) => {
 		event.locals.email = await sessions.validate(token);
 		if (!event.locals.email) event.cookies.delete(SESSION_COOKIE, { path: '/' });
 	}
+	// A cookie from before the __Host- prefix authenticates nothing any more; drop it.
+	if (LEGACY_SESSION_COOKIE !== SESSION_COOKIE && event.cookies.get(LEGACY_SESSION_COOKIE)) {
+		event.cookies.delete(LEGACY_SESSION_COOKIE, { path: '/' });
+	}
 	const response = await resolve(event);
 	response.headers.set('x-content-type-options', 'nosniff');
 	response.headers.set('referrer-policy', 'same-origin');
 	response.headers.set('x-frame-options', 'DENY');
 	if (vpi || api) response.headers.set('cache-control', 'no-store');
+	// Pages rendered for someone signed in carry their data: never kept by a cache (H5).
+	else if (event.locals.email && !response.headers.has('cache-control')) response.headers.set('cache-control', 'private, no-store');
 	return api ? withCors(response) : response;
 };

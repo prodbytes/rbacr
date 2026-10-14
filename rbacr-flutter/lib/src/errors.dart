@@ -28,6 +28,9 @@ class RbacrException implements Exception {
   /// 409: conflict, such as an inactive or already redeemed voucher (V5).
   bool get isConflict => statusCode == 409;
 
+  /// 429: too many failed attempts to redeem a voucher; wait and try again (V10).
+  bool get isTooManyRequests => statusCode == 429;
+
   @override
   String toString() => 'RbacrException(${statusCode ?? 'no answer'}): $message';
 }

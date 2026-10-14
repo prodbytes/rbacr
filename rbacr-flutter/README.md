@@ -159,8 +159,16 @@ final rbacr = RbacrClient(); // RBACR_URL, RBACR_TOKEN
 ```
 
 A define is compiled into the app, so only define `RBACR_TOKEN` for
-development builds against the local dev server. In release builds, pass the
+development builds against the local dev server. Release builds ignore the
+`RBACR_TOKEN` define (the environment variable still counts, for Dart
+servers), so a shared `.env` can't ship a personal token in an app: pass the
 user's own token with `tokenProvider` (see Tokens).
+
+`allows` answers `false` on any failure, including a `tokenProvider` that
+throws (say, nobody is signed in) and an answer it can't read. Requests never
+follow redirects, so the token only goes to `baseUrl`. A 429
+(`isTooManyRequests`) means too many failed attempts to redeem a voucher:
+wait the minutes the message says.
 
 ## Against a local rbacr
 

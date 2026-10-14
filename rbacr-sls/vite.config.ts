@@ -61,6 +61,25 @@ export default defineConfig({
 			// SvelteKit's CSRF check is off ('*') because it also refused /api
 			// clients; hooks.server.ts applies it to everything else (SPEC H2).
 			csrf: { trustedOrigins: ['*'] },
+			// SPEC H5: scripts only from rbacr itself (the inline one in app.html
+			// gets a nonce), images from rbacr or any https URL (system
+			// screenshots, R13), no framing, plugins or foreign form targets.
+			csp: {
+				mode: 'auto',
+				directives: {
+					'default-src': ['self'],
+					'script-src': ['self'],
+					'style-src': ['self', 'unsafe-inline'],
+					'img-src': ['self', 'https:', 'data:'],
+					'font-src': ['self'],
+					// The dev server's HMR socket, on another host when it runs behind Floci (dev only).
+					'connect-src': ['self', ...(hmrHost ? (['ws:'] as const) : [])],
+					'object-src': ['none'],
+					'base-uri': ['none'],
+					'form-action': ['self'],
+					'frame-ancestors': ['none']
+				}
+			},
 			outDir
 		})
 	],

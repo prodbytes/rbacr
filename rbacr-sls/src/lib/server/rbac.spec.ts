@@ -1,8 +1,8 @@
-import { PutCommand } from '@aws-sdk/lib-dynamodb';
+import { PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { Table } from './dynamo';
 import { Allowlist } from './identity';
-import { Rbac, RbacError, appMayCall, voucherStatus, type Actor } from './rbac';
+import { MAX_REDEEM_FAILURES, REDEEM_FAILURE_WINDOW_MS, Rbac, RbacError, appMayCall, voucherStatus, type Actor } from './rbac';
 import { ANIMALS, quarterOf } from '../vouchers';
 import { createTestTable, scanAll } from './testing/dynamodb';
 
@@ -1286,5 +1286,107 @@ describe('global vouchers of system roles (V1)', () => {
 		await rbac.createVoucher(root, { systemId: null, roles: ['viewer'], endsAt: null }); // by name: replaces no system role
 		const [n] = await rbac.verify(root);
 		expect(n).toMatchObject({ voucherCode: v.code, roles: ['crm/viewer'] });
+	});
+});
+
+describe('removing a role, even half-done (L2, L3, D2)', () => {
+	// What a removal that failed right after marking the role used to leave:
+	// the role marked removed, its grants, vouchers and subscriber setting live.
+	const markOnly = (systemId: string, role: string) =>
+		table.doc.send(
+			new UpdateCommand({
+				TableName: table.name,
+				Key: { PK: `SYS#${systemId}`, SK: `ROLE#${role}` },
+				UpdateExpression: 'SET removedAt = :at, removedBy = :by',
+				ExpressionAttributeValues: { ':at': clock.toISOString(), ':by': ROOT }
+			})
+		);
+
+	it('gives nothing through grants or vouchers it left live, and a re-added role starts fresh', async () => {
+		await rbac.grant(root, 'billing', 'editor', USER);
+		const v = await rbac.createVoucher(root, { systemId: 'billing', roles: ['editor'] });
+		const global = await rbac.createVoucher(root, { systemId: null, roles: [], grants: [{ systemId: 'billing', role: 'editor' }] });
+		await markOnly('billing', 'editor');
+		expect((await rbac.rolesOf(USER)).billing ?? []).toEqual([]);
+		await expectError(rbac.redeemVoucher(OTHER, v.code), 409, /no longer exists/);
+		await expectError(rbac.redeemVoucher(OTHER, global.code), 409, /no longer exists/);
+		expect((await rbac.rolesOf(OTHER)).billing ?? []).toEqual([]);
+		// Re-adding it clears the leftovers first.
+		clock = new Date(clock.getTime() + 1000);
+		await rbac.addRole(root, 'billing', 'editor');
+		expect((await rbac.rolesOf(USER)).billing ?? []).toEqual([]);
+		expect((await rbac.listGrants(root, 'billing')).filter((g) => g.role === 'editor')).toEqual([]);
+		const status = new Map((await rbac.listVouchers(root, 'billing')).map((x) => [x.code, voucherStatus(x, clock)]));
+		expect(status.get(v.code)).toBe('disabled');
+		expect((await rbac.listGlobalVouchers(root)).find((x) => x.code === global.code)?.disabledAt).not.toBeNull();
+	});
+
+	it('leaves the role listed until its dependents are gone, and is idempotent', async () => {
+		await rbac.grant(root, 'billing', 'editor', USER);
+		await rbac.removeRole(root, 'billing', 'editor');
+		expect((await rbac.getSystem(root, 'billing')).roles).toEqual(['viewer']);
+		expect(await rbac.listGrants(root, 'billing')).toEqual([]);
+		await expectError(rbac.removeRole(root, 'billing', 'editor'), 404);
+	});
+
+	it("doesn't stop the subscription sync for other systems", async () => {
+		await rbac.addRole(root, 'crm', 'paid');
+		await rbac.configureSystem(root, 'billing', { subscriberRole: 'viewer' });
+		await rbac.configureSystem(root, 'crm', { subscriberRole: 'paid' });
+		await markOnly('billing', 'viewer');
+		const period = { startsAt: new Date('2026-01-01T00:00:00Z'), endsAt: new Date('2026-02-01T00:00:00Z') };
+		const outcomes = await rbac.syncSubscriber(USER, period);
+		expect(outcomes).toEqual([{ systemId: 'crm', role: 'paid', outcome: 'granted' }]);
+	});
+});
+
+
+describe('failed redemptions are throttled per identity (V10)', () => {
+	it(`lets ${MAX_REDEEM_FAILURES} failures through per window, then answers 429 without recording more`, async () => {
+		const v = await rbac.createVoucher(root, { systemId: 'billing', roles: ['viewer'] });
+		clock = new Date('2026-01-10T12:00:00Z');
+		for (let i = 0; i < MAX_REDEEM_FAILURES; i++) await expectError(rbac.redeemVoucher(USER, `NO-SUCH-CODE-${i}`), 404);
+		await expectError(rbac.redeemVoucher(USER, v.code), 429, /try again in 15 minutes/);
+		expect(await rbac.listRedeemFailures(root)).toHaveLength(MAX_REDEEM_FAILURES);
+		// Someone else isn't held back.
+		await rbac.redeemVoucher(OTHER, v.code);
+		// The next window starts afresh.
+		clock = new Date(clock.getTime() + REDEEM_FAILURE_WINDOW_MS);
+		expect((await rbac.redeemVoucher(USER, v.code)).map((g) => g.role)).toEqual(['viewer']);
+	});
+});
+
+describe("apps limited to some systems (I10)", () => {
+	let app: Actor;
+	beforeEach(async () => {
+		app = await rbac.actor(USER, { app: true, systems: ['billing'] });
+		await rbac.addRole(root, 'crm', 'member');
+		await rbac.grant(root, 'billing', 'viewer', USER);
+		await rbac.grant(root, 'crm', 'member', USER);
+		await rbac.grantGlobal(root, 'pro', USER);
+	});
+
+	it('see and check roles only in those systems, and no global roles', async () => {
+		expect(app).toEqual({ email: USER, root: false, app: true, systems: ['billing'] });
+		expect(await rbac.me(app)).toEqual({ email: USER, root: false, globalRoles: [], roles: { billing: ['viewer'] } });
+		expect((await rbac.checkRole(app, USER, 'billing', 'viewer')).allowed).toBe(true);
+		await expectError(rbac.checkRole(app, USER, 'crm', 'member'), 403, /only reach billing/);
+		await expectError(rbac.checkRole(app, USER, null, 'pro'), 403);
+		await expectError(rbac.rolesIn(app, USER, 'crm'), 403);
+		expect(await rbac.systemStatus('billing', app)).toMatchObject({ id: 'billing' });
+		await expectError(rbac.systemStatus('crm', app), 403);
+		// An unlimited app, and a person's token, see everything as before.
+		const unlimited = await rbac.actor(USER, { app: true });
+		expect((await rbac.me(unlimited)).roles).toEqual({ billing: ['viewer'], crm: ['member'] });
+		expect((await rbac.me(user)).globalRoles).toEqual(['pro']);
+	});
+
+	it('redeem only vouchers whose roles are all in those systems', async () => {
+		const own = await rbac.createVoucher(root, { systemId: 'billing', roles: ['editor'] });
+		const theirs = await rbac.createVoucher(root, { systemId: 'crm', roles: ['member'] });
+		const mixed = await rbac.createVoucher(root, { systemId: null, roles: [], grants: [{ systemId: 'billing', role: 'editor' }, { systemId: 'crm', role: 'member' }] });
+		const byName = await rbac.createVoucher(root, { systemId: null, roles: ['editor'] });
+		for (const v of [theirs, mixed, byName]) await expectError(rbac.redeemVoucher(USER, v.code, 'api', app.systems), 403, /only redeem vouchers for billing/);
+		expect((await rbac.redeemVoucher(USER, own.code, 'api', app.systems)).map((g) => g.role)).toEqual(['editor']);
 	});
 });
