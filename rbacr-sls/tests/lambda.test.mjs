@@ -122,7 +122,8 @@ describe('lambda handler', () => {
 		}
 		const nonce = /script-src [^;]*'nonce-([^']+)'/.exec(csp)?.[1];
 		assert.ok(nonce, `no script nonce in ${csp}`);
-		assert.match(res.body, new RegExp(`<script nonce="${nonce}">`));
+		// A base64 nonce can hold + and /, so compare it as text, not as a pattern.
+		assert.ok(res.body.includes(`<script nonce="${nonce}">`), 'the inline script lacks the nonce');
 	});
 
 	it('clears the session cookie from before the __Host- prefix (S3)', async () => {
