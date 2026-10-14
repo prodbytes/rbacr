@@ -97,6 +97,8 @@ jobs:
           RBACR_GOOGLE_CLIENT_ID: ${{ vars.RBACR_RC_GOOGLE_CLIENT_ID }}
           # Apps whose users call /api with Google ID tokens (SPEC I1-I5, H3); unset: off.
           RBACR_GOOGLE_AUDIENCES: ${{ vars.RBACR_RC_GOOGLE_AUDIENCES }}
+          # Other OIDC issuers whose ID tokens /api accepts (SPEC I7-I9), a JSON array; unset: none.
+          RBACR_TRUSTED_ISSUERS: ${{ vars.RBACR_RC_TRUSTED_ISSUERS }}
           RBACR_CORS_ORIGINS: ${{ vars.RBACR_RC_CORS_ORIGINS }}
           HEALTH_EMAILS: ${{ vars.RBACR_RC_HEALTH_EMAILS }}
           # Secrets; when unset, the stack keeps its deployed values.

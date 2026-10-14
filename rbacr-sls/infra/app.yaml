@@ -52,6 +52,14 @@ Parameters:
       RBACR_GOOGLE_AUDIENCES, comma-separated Google OAuth client ids whose
       users' ID tokens /api accepts on its self-service routes (SPEC I1-I5).
       Empty turns ID tokens off.
+  TrustedIssuers:
+    Type: String
+    Default: ''
+    AllowedPattern: '[A-Za-z0-9._~%:/?=&+,"@{}\[\] -]*'
+    Description: >
+      RBACR_TRUSTED_ISSUERS, OIDC issuers besides Google whose ID tokens /api
+      accepts on its self-service routes (SPEC I7-I9): a one-line JSON array
+      of {"issuer", "jwks", "audiences"}. Empty: none.
   CorsOrigins:
     Type: String
     Default: ''
@@ -195,6 +203,7 @@ Resources:
           RBACR_GOOGLE_CLIENT_ID: !Ref GoogleClientId
           RBACR_GOOGLE_CLIENT_SECRET: !Ref GoogleClientSecret
           RBACR_GOOGLE_AUDIENCES: !Ref GoogleAudiences
+          RBACR_TRUSTED_ISSUERS: !Ref TrustedIssuers
           RBACR_CORS_ORIGINS: !Ref CorsOrigins
           RBACR_STRIPE_WEBHOOK_SECRET: !Ref StripeWebhookSecret
           RBACR_STRIPE_API_KEY: !Ref StripeApiKey

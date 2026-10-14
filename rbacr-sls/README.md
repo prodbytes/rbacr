@@ -80,7 +80,9 @@ app on AWS Lambda. Run every command below from this folder
   with Google can send the user's Google ID token instead of an API token,
   straight from the app (web, Android, iOS), for the user's own roles, a
   system's status and redeeming vouchers, and nothing else, not even for
-  a root. See [Apps calling rbacr as their users](#apps-calling-rbacr-as-their-users).
+  a root. An app that issues its own ID tokens (e.g. after Sign in with
+  Apple) can be trusted as an issuer the same way. See
+  [Apps calling rbacr as their users](#apps-calling-rbacr-as-their-users).
 
 [SPEC.md](SPEC.md) has the full rules, permission matrix and API reference.
 
@@ -127,6 +129,7 @@ Devbox scripts: `devbox run dev | test | check | build | certs | release-rc | re
 | `RBACR_ROOT_LIST` | no | Comma-separated root addresses and/or domains, e.g. `ana@example.com, @example.org`: the only way to be a root. An invalid entry stops the app from starting. In AWS it defaults to `@nu01.com`. |
 | `RBACR_GOOGLE_CLIENT_ID` / `RBACR_GOOGLE_CLIENT_SECRET` | for sign-in | Google OAuth web client |
 | `RBACR_GOOGLE_AUDIENCES` | no | Comma-separated Google OAuth client ids whose users' ID tokens `/api` accepts on its self-service routes; empty turns it off. See [Apps calling rbacr as their users](#apps-calling-rbacr-as-their-users). In AWS, the `RBACR_GA_GOOGLE_AUDIENCES` / `RBACR_RC_GOOGLE_AUDIENCES` repository variables. |
+| `RBACR_TRUSTED_ISSUERS` | no | OIDC issuers besides Google whose ID tokens `/api` accepts on its self-service routes: a JSON array of `{"issuer", "jwks", "audiences"}`; empty means none, an invalid value stops the app. See [Apps with their own ID tokens](#apps-with-their-own-id-tokens). In AWS, the `RBACR_GA_TRUSTED_ISSUERS` / `RBACR_RC_TRUSTED_ISSUERS` repository variables. |
 | `RBACR_CORS_ORIGINS` | no | Comma-separated web origins (exact, e.g. `https://app.example.com`) allowed to call `/api` from the browser; empty: no CORS. In AWS, `RBACR_GA_CORS_ORIGINS` / `RBACR_RC_CORS_ORIGINS`. |
 | `RBACR_PUBLIC_ORIGIN` | no | The origin users browse, used for the Google redirect URI (default: the request's origin) |
 | `RBACR_ORIGIN_SECRET` | no | When set, every request must carry it in `x-rbacr-origin-secret`. In AWS, CloudFront adds it, so the Lambda URL can't be called directly. |
@@ -239,7 +242,7 @@ Dev server settings (pass with `-e`, `--env-file` or the compose files):
 | `PORT` | `8686` | Port inside the container |
 | `RBACR_DYNAMODB_TABLE` | `rbacr` | Table name in DynamoDB Local (the sessions table is `<name>-sessions`) |
 | `RBACR_VERSION` | `local` | Version reported by `/health` |
-| `RBACR_GOOGLE_CLIENT_ID` / `RBACR_GOOGLE_CLIENT_SECRET`, `RBACR_GOOGLE_AUDIENCES`, `RBACR_CORS_ORIGINS`, `RBACR_PUBLIC_ORIGIN`, `RBACR_SESSION_RETENTION_DAYS`, `RBACR_STRIPE_*` | unset | As in [Configuration](#configuration), for the UI's sign-in or the Substack sync |
+| `RBACR_GOOGLE_CLIENT_ID` / `RBACR_GOOGLE_CLIENT_SECRET`, `RBACR_GOOGLE_AUDIENCES`, `RBACR_TRUSTED_ISSUERS`, `RBACR_CORS_ORIGINS`, `RBACR_PUBLIC_ORIGIN`, `RBACR_SESSION_RETENTION_DAYS`, `RBACR_STRIPE_*` | unset | As in [Configuration](#configuration), for the UI's sign-in or the Substack sync |
 
 `RBACR_DYNAMODB_ENDPOINT` is set by the container (its own DynamoDB Local
 on port 8000, not published). `RBACR_DEV_LOGIN` has no effect: it is a
@@ -420,12 +423,44 @@ gh variable set RBACR_RC_GOOGLE_AUDIENCES --body "<web client id>,<android clien
 gh variable set RBACR_RC_CORS_ORIGINS --body "https://rc.presence.nu01.com,http://localhost:8080"
 ```
 
+#### Apps with their own ID tokens
+
+An app can also sign its users in some other way (e.g. Sign in with Apple,
+whose identity tokens expire in about ten minutes and can't be refreshed
+silently), verify that once on its own backend, and then issue its own
+short-lived ID tokens: JWTs signed with RS256, whose public keys it
+publishes as a JWKS at an `https` URL, carrying `iss`, `aud`, `exp`, `iat`,
+`email` and `email_verified: true`. rbacr accepts them, on the same
+self-service routes and with the same limits as Google ID tokens, once the
+issuer is listed in `RBACR_TRUSTED_ISSUERS` (SPEC I7-I9), a JSON array with
+one entry per issuer:
+
+- `issuer`: the exact `iss` its tokens carry;
+- `jwks`: its JWKS URL (`https` only; rbacr caches the keys for their
+  `Cache-Control: max-age`, at most a day, and refetches on an unknown
+  `kid` at most once a minute);
+- `audiences`: the `aud` values accepted from it (each token's `aud` must
+  be a single one of them).
+
+rbacr picks the issuer by the token's `iss` and checks everything against
+that issuer only; tokens of unlisted issuers are refused. A listed issuer
+vouches for its users' e-mail addresses on every system's self-service
+routes, so list only issuers you run. Its web origins still go in
+`RBACR_CORS_ORIGINS`. For Presence's RC and production:
+
+```bash
+gh variable set RBACR_RC_TRUSTED_ISSUERS --body '[{"issuer":"https://rc.presence.nu01.com/api/auth","jwks":"https://rc.presence.nu01.com/api/auth/.well-known/jwks.json","audiences":["presence"]}]'
+gh variable set RBACR_GA_TRUSTED_ISSUERS --body '[{"issuer":"https://presence.nu01.com/api/auth","jwks":"https://presence.nu01.com/api/auth/.well-known/jwks.json","audiences":["presence"]}]'
+```
+
+The next deploy of that stage (an RC or GA release) passes it to the app.
+
 ### The two interfaces
 
 | | `/api`: the API (external) | `/vpi`: the VPI (view programming interface, frontend only) |
 |---|---|---|
 | For | scripts and other applications | rbacr's own pages |
-| Auth | personal API token, `Authorization: Bearer rbacr_…`; an app's Google ID token on the self-service routes | the browser session cookie |
+| Auth | personal API token, `Authorization: Bearer rbacr_…`; an app's ID token (Google's or a trusted issuer's) on the self-service routes | the browser session cookie |
 | Contract | stable, documented in [SPEC.md](SPEC.md#api-the-external-api-personal-api-token-a1) | shaped for the pages, may change |
 
 Every `/api` request, unknown paths included, needs a valid personal API

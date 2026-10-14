@@ -67,12 +67,12 @@ export interface Actor {
 	 * application (I5). Holds `root`, so every role, and manages everything.
 	 */
 	root: boolean;
-	/** Authenticated by an application's Google ID token (I1): self-service only (I4), never root powers (I5). */
+	/** Authenticated by an application's ID token (I1, I7): self-service only (I4), never root powers (I5). */
 	app?: boolean;
 }
 
 /**
- * The /api routes an application's user may call with a Google ID token
+ * The /api routes an application's user may call with an ID token
  * (I4): their own roles and checks, a system's status, and redeeming a
  * voucher for themselves. Every other /api route answers 403 to them,
  * whatever their roles (I5). `/api/roles` and `/api/check` stay limited to
@@ -724,8 +724,8 @@ export class Rbac {
 	}
 
 	/**
-	 * Who is acting. `app`: authenticated by an application's Google ID token
-	 * (I1), which never carries root powers (I5), even for a root's address.
+	 * Who is acting. `app`: authenticated by an application's ID token
+	 * (I1, I7), which never carries root powers (I5), even for a root's address.
 	 */
 	async actor(email: string, { app = false }: { app?: boolean } = {}): Promise<Actor> {
 		if (app) return { email, root: false, app: true };

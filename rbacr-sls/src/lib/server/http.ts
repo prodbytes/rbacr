@@ -19,7 +19,7 @@ async function run(ctx: Ctx, fn: (ctx: Ctx) => Promise<unknown>): Promise<Respon
 /**
  * The external API (/api): authenticated by a personal API token,
  * `Authorization: Bearer rbacr_…`, acting as the person who created it, or
- * on the self-service routes by an app's Google ID token (I1-I5), acting as
+ * on the self-service routes by an app's ID token (I1-I8), acting as
  * its user without root powers. hooks.server.ts has already checked the
  * token (and refused the request without a valid one); session cookies never
  * count here.
@@ -32,7 +32,7 @@ export async function api(event: RequestEvent, fn: (ctx: Ctx) => Promise<unknown
 	const app = event.locals.app === true;
 	// Also checked in hooks.server.ts; repeated so no route can be reached around it (I4).
 	if (app && !appMayCall(event.request.method, event.url.pathname)) {
-		return json({ error: "A Google ID token only reaches rbacr's self-service routes; use a personal API token" }, { status: 403 });
+		return json({ error: "An ID token only reaches rbacr's self-service routes; use a personal API token" }, { status: 403 });
 	}
 	const services = await getServices();
 	return run({ ...services, actor: await services.rbac.actor(email, { app }) }, fn);
