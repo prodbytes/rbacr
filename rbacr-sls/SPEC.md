@@ -18,7 +18,7 @@ and the README in sync with the code.
 | Voucher | A code that grants a role to whoever redeems it: in one system, or globally (a global grant). |
 | Subscriber | A paying subscriber of the newsletter (Substack) whose payments run on the publisher's Stripe account. |
 | API token | A person's secret token for the external API (`/api`). It acts as that person, with their current roles. |
-| ID token | A Google-signed token (JWT) an application gets when its user signs in with Google. Sent to `/api` by that application, it acts as the user on the self-service routes only (I1-I6). |
+| ID token | A signed token (JWT) naming a user, from Google when the user signs in with Google (I1-I6) or from an OIDC issuer rbacr trusts, such as an application's own session tokens (I7-I9). Sent to `/api` by that application, it acts as the user on the self-service routes only. |
 | Notification | A warning for the roots (rbacr's admins), raised by a verification rule (N1-N4). |
 
 ## Identity and sign-in
@@ -436,7 +436,7 @@ Stripe Connect. That account sends webhooks, so rbacr syncs from Stripe:
 
 - **A1** `/api` is the **external API** (API), for scripts and other
   applications. It authenticates with a personal API token (T3) or, on its
-  self-service routes only, an application's Google ID token (I1-I6). Every
+  self-service routes only, an application's ID token (I1-I9). Every
   request under `/api`, unknown paths included, is refused with 401 before
   routing unless it carries a valid token, so no `/api` endpoint is public.
   The session cookie is ignored there, even when the browser sends it.
@@ -506,7 +506,9 @@ Stripe Connect. That account sends webhooks, so rbacr syncs from Stripe:
 Applications whose users sign in with Google can call a few `/api` routes
 straight from the app (Flutter on the web, Android or iOS), as the user,
 with the Google ID token the app already has, instead of a personal API
-token.
+token. Applications that issue their own ID tokens (for example after Sign
+in with Apple, whose tokens expire in minutes and can't be refreshed) can do
+the same as a trusted issuer (I7-I9). I4-I6 apply to every ID token.
 
 - **I1** `RBACR_GOOGLE_AUDIENCES` lists the Google OAuth client ids whose
   ID tokens rbacr accepts (comma-separated). Empty or unset turns ID tokens
@@ -543,6 +545,34 @@ token.
   your own applications' clients. On Android and iOS, Google Sign-In issues
   the ID token to the **web** client id the app passes as `serverClientId`,
   so that id must be listed.
+- **I7 Trusted issuers.** `RBACR_TRUSTED_ISSUERS` lists OIDC issuers besides
+  Google, as a JSON array of
+  `{"issuer": "<exact iss>", "jwks": "<https JWKS URL>", "audiences": ["<aud>", ...]}`.
+  Empty or unset: none. The app doesn't start when the value isn't such an
+  array, an entry has another key, an issuer or audience is empty or has
+  spaces, `jwks` isn't an `https` URL (without credentials), `audiences` is
+  empty, an issuer is listed twice, or an issuer is Google's
+  (`accounts.google.com`, `https://accounts.google.com`; Google stays
+  configured by I1 only). Google's ID tokens work as before, with or
+  without trusted issuers.
+- **I8** A token's `iss`, read before its signature is checked, only chooses
+  whose checks run: Google's (I2, when I1 is set) or the trusted issuer's
+  with exactly that `iss`. A token naming any other issuer is a 401, and
+  no keys are fetched for it. A trusted issuer's token is accepted only
+  when, as in I2: it is signed with RS256 (no other algorithm, no `crit`
+  header) by a key, found by its `kid`, of **that issuer's** JWKS (fetched
+  without following redirects); `iss` is that issuer exactly; `aud` is a
+  single string on that issuer's `audiences`; `exp` is in the future and
+  `iat`/`nbf`, when present, not in the future, each with 60 seconds of
+  clock skew; `email_verified` is `true` (or the string `"true"`); and
+  `email` is a valid address. Each issuer's keys are cached and refetched
+  as I3 says, separately; when they can't be fetched and none are cached,
+  the request gets 503.
+- **I9** The identity is the token's `email`, lower-cased, as I3 says, and
+  the token reaches the self-service routes only, never with root powers
+  (I4, I5). A trusted issuer vouches for its users' addresses on every
+  system's self-service routes, as I6 says of Google clients: list only
+  issuers you run, which verify the addresses they put in tokens.
 
 ## Client integration
 
@@ -553,7 +583,8 @@ How applications use rbacr. The README has a walkthrough with examples.
   server-side, with a personal API token (T1-T5). rbacr trusts the address
   it is given. Alternatively, an application that signs its users in with
   Google asks about the signed-in user only, from the app itself, with the
-  user's ID token (I1-I6).
+  user's ID token (I1-I6), or with its own session token as a trusted
+  issuer (I7-I9).
 - **C2** A token sees what its owner may see (T6): a root's token, anyone's
   roles everywhere plus global roles; anyone else's, only their own.
   Applications that ask about their users need a root-owned token, so they
@@ -744,6 +775,7 @@ All settings come from environment variables prefixed `RBACR_`:
 | `RBACR_ROOT_LIST` | no (no roots if empty; in AWS the default is `@nu01.com`) | Root addresses and domains (R1, R1a) |
 | `RBACR_GOOGLE_CLIENT_ID`, `RBACR_GOOGLE_CLIENT_SECRET` | for Google sign-in | OAuth web client. Without them `/login/google` returns 503. |
 | `RBACR_GOOGLE_AUDIENCES` | no (ID tokens off if empty) | Comma-separated Google OAuth client ids whose users' ID tokens `/api` accepts on its self-service routes (I1-I6). In AWS, the app stack's `GoogleAudiences` parameter. |
+| `RBACR_TRUSTED_ISSUERS` | no (none if empty) | OIDC issuers besides Google whose ID tokens `/api` accepts on its self-service routes, a JSON array of `{"issuer", "jwks", "audiences"}` (I7-I9). An invalid value stops the app from starting. In AWS, the app stack's `TrustedIssuers` parameter. |
 | `RBACR_CORS_ORIGINS` | no (no CORS if empty) | Comma-separated web origins allowed to call `/api` from the browser (H3, H4). In AWS, the app stack's `CorsOrigins` parameter. |
 | `RBACR_PUBLIC_ORIGIN` | no | Origin for the Google redirect URI (`<origin>/login/google/callback`); default: the request's origin |
 | `RBACR_ORIGIN_SECRET` | no | Required value of the `x-rbacr-origin-secret` header (H1) |
@@ -784,8 +816,8 @@ All settings come from environment variables prefixed `RBACR_`:
 
 | Suite | Command | Covers |
 |-------|---------|--------|
-| Unit and domain | `npx vitest --run` | Identity parsing, the R*, G*, P*, V*, N*, Q*, T*, L* and D* rules against DynamoDB Local (a Docker container started by the test setup, or `RBACR_TEST_DYNAMODB_ENDPOINT`), the A3 guard, the `next` check (S5), sessions, Google OAuth exchange, ID token verification (I1-I3, against locally made RSA keys and a stubbed JWKS), the self-service scope (I4, I5), CORS (H3, H4) |
-| Lambda smoke | `npm run test:lambda` | The production build invoked through `lambda.js` with function URL (v2) events: H1, H2, H3, H4, A1, A3, I2, I4, I5 (ID tokens signed by a key served from a stubbed JWKS) and the Stripe webhook's signature check (Q1), the version, redirects, 401s, static assets. `scripts/package-lambda.sh` reruns it against the deployable bundle. |
+| Unit and domain | `npx vitest --run` | Identity parsing, the R*, G*, P*, V*, N*, Q*, T*, L* and D* rules against DynamoDB Local (a Docker container started by the test setup, or `RBACR_TEST_DYNAMODB_ENDPOINT`), the A3 guard, the `next` check (S5), sessions, Google OAuth exchange, ID token verification (I1-I3, I7, I8, against locally made RSA keys and stubbed JWKS), the self-service scope (I4, I5), CORS (H3, H4) |
+| Lambda smoke | `npm run test:lambda` | The production build invoked through `lambda.js` with function URL (v2) events: H1, H2, H3, H4, A1, A3, I2, I4, I5, I8, I9 (Google's and a trusted issuer's ID tokens signed by a key served from a stubbed JWKS) and the Stripe webhook's signature check (Q1), the version, redirects, 401s, static assets. `scripts/package-lambda.sh` reruns it against the deployable bundle. |
 | End-to-end | `npm run test:e2e` | `/api` with personal tokens (and CORS, H3, H4, with `RBACR_E2E_CORS_ORIGIN`), `/vpi` as the frontend (notifications and redeem links included, V8, S5), the A1/A3 separation, and the pages, against a running dev server with DynamoDB Local, directly or through Floci over HTTPS |
 | Live | `scripts/deploy.sh` (last step) | The deployed site: version, sign-in page, 401 (also for an unknown token, which reads DynamoDB), 404 for `/login/dev`, 403 for the bare function URL |
 

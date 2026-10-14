@@ -1,6 +1,6 @@
 import { defineEnvVars } from '@sveltejs/kit/env';
 import { parseCorsOrigins } from './lib/server/cors';
-import { parseAudiences } from './lib/server/idtokens';
+import { parseAudiences, parseTrustedIssuers } from './lib/server/idtokens';
 import { Allowlist } from './lib/server/identity';
 import { DEFAULT_SESSION_RETENTION_DAYS } from './lib/server/session';
 import { BOOTSTRAP_TOKEN_RE } from './lib/server/tokens';
@@ -62,6 +62,15 @@ export const variables = defineEnvVars({
 			"Comma-separated Google OAuth client ids whose users' ID tokens /api accepts on its self-service routes (SPEC I1-I5), e.g. an app's web, Android and iOS clients. Empty: ID tokens are refused.",
 		// parsed here so an invalid entry stops the app from starting
 		schema: (value) => parseAudiences(value).join(',')
+	},
+	RBACR_TRUSTED_ISSUERS: {
+		description:
+			'OIDC issuers besides Google whose ID tokens /api accepts on its self-service routes (SPEC I7-I9): a JSON array of {"issuer": "<exact iss>", "jwks": "<https JWKS URL>", "audiences": ["<aud>", ...]}. Empty: none.',
+		// parsed here so an invalid value stops the app from starting
+		schema: (value) => {
+			parseTrustedIssuers(value);
+			return value ?? '';
+		}
 	},
 	RBACR_CORS_ORIGINS: {
 		description:

@@ -1,5 +1,13 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { GOOGLE_JWKS_URL, GoogleIdTokens, looksLikeJwt, parseAudiences } from './idtokens';
+import {
+	GOOGLE_JWKS_URL,
+	GoogleIdTokens,
+	IdTokens,
+	looksLikeJwt,
+	parseAudiences,
+	parseTrustedIssuers,
+	trustedIssuerTokens
+} from './idtokens';
 
 const AUD = 'web-client.apps.googleusercontent.com';
 const NOW = Date.parse('2026-10-10T12:00:00Z');
@@ -179,5 +187,176 @@ describe('parseAudiences and looksLikeJwt', () => {
 	it('tells JWTs from personal tokens', () => {
 		expect(looksLikeJwt('eyJh.eyJi.c2ln')).toBe(true);
 		expect(looksLikeJwt('rbacr_abc')).toBe(false);
+	});
+});
+
+// Trusted issuers (I7-I9): Presence's own session tokens, for example.
+const ISS = 'https://presence.nu01.com/api/auth';
+const ISS_JWKS = 'https://presence.nu01.com/api/auth/.well-known/jwks.json';
+const RC_ISS = 'https://rc.presence.nu01.com/api/auth';
+const RC_JWKS = 'https://rc.presence.nu01.com/api/auth/.well-known/jwks.json';
+
+const session = (extra: Record<string, unknown> = {}) => ({
+	iss: ISS,
+	aud: 'presence',
+	sub: 'user-1',
+	email: 'Ana@Example.com',
+	email_verified: true,
+	iat: nowSeconds - 60,
+	exp: nowSeconds + 840,
+	...extra
+});
+
+describe('trusted issuers', () => {
+	let issuerKeys: Record<string, KeyPair[]>;
+	let issuerFetch: ReturnType<typeof vi.fn>;
+	let tokens: IdTokens;
+
+	beforeEach(() => {
+		issuerKeys = { [GOOGLE_JWKS_URL]: [k1], [ISS_JWKS]: [k2], [RC_JWKS]: [other] };
+		issuerFetch = vi.fn(async (url: string) => {
+			const keys = issuerKeys[url];
+			if (!keys) throw new Error(`unexpected fetch of ${url}`);
+			return new Response(JSON.stringify({ keys: keys.map((k) => k.jwk) }), { headers: { 'cache-control': 'max-age=600' } });
+		});
+		const f = issuerFetch as unknown as typeof fetch;
+		const issuers = parseTrustedIssuers(
+			JSON.stringify([
+				{ issuer: ISS, jwks: ISS_JWKS, audiences: ['presence'] },
+				{ issuer: RC_ISS, jwks: RC_JWKS, audiences: ['presence', 'presence-web'] }
+			])
+		);
+		tokens = new IdTokens([new GoogleIdTokens([AUD], f, () => clock), ...issuers.map((i) => trustedIssuerTokens(i, f, () => clock))]);
+	});
+
+	it("accepts each issuer's tokens, signed by its own keys, as the lower-cased e-mail", async () => {
+		expect(await tokens.verify(await sign(k2, session()))).toBe('ana@example.com');
+		expect(await tokens.verify(await sign(other, session({ iss: RC_ISS, aud: 'presence-web' })))).toBe('ana@example.com');
+		expect(await tokens.verify(await sign(k1, valid()))).toBe('ana@example.com'); // Google's, unchanged
+		expect(issuerFetch.mock.calls.map(([url]) => url).sort()).toEqual([GOOGLE_JWKS_URL, ISS_JWKS, RC_JWKS].sort());
+	});
+
+	it("refuses a token signed with another issuer's key, or claiming another issuer", async () => {
+		// Google's key (k1) signing an ISS token; ISS's key (k2) signing a Google token.
+		expect(await tokens.verify(await sign(k1, session(), { kid: 'k2' }))).toBeNull();
+		expect(await tokens.verify(await sign(k2, valid(), { kid: 'k1' }))).toBeNull();
+		// The RC issuer's key, claiming the production issuer (same kid as Google's k1, too).
+		expect(await tokens.verify(await sign(other, session()))).toBeNull();
+	});
+
+	it('refuses issuers that are not configured, without fetching', async () => {
+		for (const iss of ['https://evil.example', `${ISS}/`, ISS.toUpperCase(), 'presence']) {
+			expect(await tokens.verify(await sign(k2, session({ iss })))).toBeNull();
+		}
+		expect(await tokens.verify(await sign(k2, session({ iss: undefined })))).toBeNull();
+		expect(await tokens.verify(await sign(k2, session({ iss: [ISS] })))).toBeNull();
+		expect(issuerFetch).not.toHaveBeenCalled();
+	});
+
+	it('refuses another audience, several, or one of another issuer', async () => {
+		expect(await tokens.verify(await sign(k2, session({ aud: 'someone-else' })))).toBeNull();
+		expect(await tokens.verify(await sign(k2, session({ aud: ['presence'] })))).toBeNull();
+		expect(await tokens.verify(await sign(k2, session({ aud: ['presence', 'other'] })))).toBeNull();
+		expect(await tokens.verify(await sign(k2, session({ aud: 'presence-web' })))).toBeNull(); // RC's only
+		expect(await tokens.verify(await sign(k2, session({ aud: AUD })))).toBeNull(); // Google's
+	});
+
+	it('refuses expired and future tokens, allowing 60 s of clock skew', async () => {
+		expect(await tokens.verify(await sign(k2, session({ exp: nowSeconds - 30 })))).toBe('ana@example.com');
+		expect(await tokens.verify(await sign(k2, session({ exp: nowSeconds - 61 })))).toBeNull();
+		expect(await tokens.verify(await sign(k2, session({ exp: undefined })))).toBeNull();
+		expect(await tokens.verify(await sign(k2, session({ iat: nowSeconds + 120 })))).toBeNull();
+		expect(await tokens.verify(await sign(k2, session({ nbf: nowSeconds + 120 })))).toBeNull();
+		expect(await tokens.verify(await sign(k2, session({ nbf: nowSeconds + 30 })))).toBe('ana@example.com');
+	});
+
+	it('refuses alg none, HS256 (with the public key as secret) and critical headers', async () => {
+		const claims = b64(session());
+		expect(await tokens.verify(`${b64({ alg: 'none', kid: 'k2' })}.${claims}.`)).toBeNull();
+		expect(await tokens.verify(`${b64({ alg: 'none', kid: 'k2' })}.${claims}.AA`)).toBeNull();
+		const input = `${b64({ alg: 'HS256', kid: 'k2' })}.${claims}`;
+		const hmac = await crypto.subtle.importKey('raw', new TextEncoder().encode(JSON.stringify(k2.jwk)), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+		const mac = Buffer.from(await crypto.subtle.sign('HMAC', hmac, new TextEncoder().encode(input))).toString('base64url');
+		expect(await tokens.verify(`${input}.${mac}`)).toBeNull();
+		expect(await tokens.verify(await sign(k2, session(), { alg: 'HS256' }))).toBeNull();
+		expect(await tokens.verify(await sign(k2, session(), { crit: ['exp'] }))).toBeNull();
+		expect(await tokens.verify(await sign(k2, session(), { kid: undefined }))).toBeNull();
+	});
+
+	it("accepts email_verified true or \"true\" only, and needs a valid e-mail", async () => {
+		expect(await tokens.verify(await sign(k2, session({ email_verified: 'true' })))).toBe('ana@example.com');
+		for (const email_verified of [false, 'false', 'TRUE', 1, undefined]) {
+			expect(await tokens.verify(await sign(k2, session({ email_verified })))).toBeNull();
+		}
+		expect(await tokens.verify(await sign(k2, session({ email: undefined })))).toBeNull();
+		expect(await tokens.verify(await sign(k2, session({ email: 'not an address' })))).toBeNull();
+	});
+
+	it("refetches an issuer's keys on an unknown kid at most once a minute", async () => {
+		expect(await tokens.verify(await sign(k2, session()))).toBe('ana@example.com');
+		expect(issuerFetch).toHaveBeenCalledTimes(1);
+		// A made-up kid right after: no new fetch.
+		expect(await tokens.verify(await sign(k2, session(), { kid: 'made-up' }))).toBeNull();
+		expect(issuerFetch).toHaveBeenCalledTimes(1);
+		// The issuer rotates; a minute later its new kid fetches once.
+		const rotated = { ...k1, jwk: { ...k1.jwk, kid: 'k3' } };
+		issuerKeys[ISS_JWKS] = [k2, rotated];
+		clock += 61_000;
+		expect(await tokens.verify(await sign(rotated, session()))).toBe('ana@example.com');
+		expect(await tokens.verify(await sign(k2, session(), { kid: 'made-up-2' }))).toBeNull();
+		expect(issuerFetch).toHaveBeenCalledTimes(2);
+		// Keys expire after their max-age (600 s), capped at a day.
+		clock += 600_000;
+		expect(await tokens.verify(await sign(k2, session({ exp: clock / 1000 + 600 })))).toBe('ana@example.com');
+		expect(issuerFetch).toHaveBeenCalledTimes(3);
+	});
+
+	it("throws when an issuer's keys can't be fetched and none are cached", async () => {
+		issuerFetch.mockResolvedValueOnce(new Response('nope', { status: 502 }));
+		await expect(tokens.verify(await sign(k2, session()))).rejects.toThrow(/presence\.nu01\.com.*502/);
+		expect(await tokens.verify(await sign(k2, session()))).toBe('ana@example.com');
+	});
+
+	it('refuses everything when only trusted issuers are configured and the token is Google\'s', async () => {
+		const only = new IdTokens(parseTrustedIssuers(`[{"issuer":"${ISS}","jwks":"${ISS_JWKS}","audiences":["presence"]}]`).map((i) => trustedIssuerTokens(i, issuerFetch as unknown as typeof fetch, () => clock)));
+		expect(await only.verify(await sign(k1, valid()))).toBeNull();
+		expect(await only.verify(await sign(k2, session()))).toBe('ana@example.com');
+	});
+});
+
+describe('parseTrustedIssuers', () => {
+	const entry = { issuer: ISS, jwks: ISS_JWKS, audiences: ['presence'] };
+	const parse = (value: unknown) => parseTrustedIssuers(JSON.stringify(value));
+
+	it('parses the JSON list; empty or unset is none', () => {
+		expect(parseTrustedIssuers(undefined)).toEqual([]);
+		expect(parseTrustedIssuers('')).toEqual([]);
+		expect(parseTrustedIssuers('  ')).toEqual([]);
+		expect(parse([])).toEqual([]);
+		expect(parse([entry, { issuer: RC_ISS, jwks: RC_JWKS, audiences: ['presence', 'presence'] }])).toEqual([
+			entry,
+			{ issuer: RC_ISS, jwks: RC_JWKS, audiences: ['presence'] }
+		]);
+	});
+
+	it('refuses invalid configuration', () => {
+		for (const raw of ['not json', '{"issuer":"x"}', '"x"', '[1]', '[null]', '[[]]']) {
+			expect(() => parseTrustedIssuers(raw), raw).toThrow();
+		}
+		expect(() => parse([{ ...entry, jwks: 'http://presence.nu01.com/jwks.json' }])).toThrow(/https/);
+		expect(() => parse([{ ...entry, jwks: 'https://user:pw@presence.nu01.com/jwks.json' }])).toThrow(/https/);
+		expect(() => parse([{ ...entry, jwks: 'not a url' }])).toThrow(/https/);
+		expect(() => parse([{ ...entry, jwks: undefined }])).toThrow(/https/);
+		expect(() => parse([{ ...entry, audiences: [] }])).toThrow(/audiences/);
+		expect(() => parse([{ ...entry, audiences: 'presence' }])).toThrow(/audiences/);
+		expect(() => parse([{ ...entry, audiences: [''] }])).toThrow(/audience/);
+		expect(() => parse([{ ...entry, audiences: [7] }])).toThrow(/audience/);
+		expect(() => parse([{ ...entry, audiences: undefined }])).toThrow(/audiences/);
+		expect(() => parse([entry, { ...entry, audiences: ['other'] }])).toThrow(/duplicate/);
+		expect(() => parse([{ ...entry, issuer: 'https://accounts.google.com' }])).toThrow(/Google/);
+		expect(() => parse([{ ...entry, issuer: 'accounts.google.com' }])).toThrow(/Google/);
+		expect(() => parse([{ ...entry, issuer: '' }])).toThrow(/issuer/);
+		expect(() => parse([{ ...entry, issuer: 'has space' }])).toThrow(/issuer/);
+		expect(() => parse([{ ...entry, audience: ['presence'] }])).toThrow(/unknown key/);
 	});
 });

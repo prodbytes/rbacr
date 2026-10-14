@@ -6,7 +6,7 @@ import { addCorsHeaders, allowedOrigin, isPreflight, preflight } from '#lib/serv
 import { isCrossSiteForm } from '#lib/server/csrf.js';
 import { looksLikeJwt } from '#lib/server/idtokens.js';
 import { appMayCall } from '#lib/server/rbac.js';
-import { corsOrigins, getServices, googleIdTokens } from '#lib/server/services.js';
+import { appIdTokens, corsOrigins, getServices } from '#lib/server/services.js';
 import { SESSION_COOKIE } from '#lib/server/session.js';
 import { TOKEN_PREFIX } from '#lib/server/tokens.js';
 import { rejectNonFrontend } from '#lib/server/vpiguard.js';
@@ -52,18 +52,19 @@ export const handle: Handle = async ({ event, resolve }) => {
 		// H4: preflights are answered for the self-service routes (I4) only.
 		if (cors.length && isPreflight(event.request)) return preflight(event.request, origin, (method) => appMayCall(method, path));
 		// The external API takes personal API tokens (T3) and, when configured,
-		// apps' Google ID tokens (I1-I3), never the session; it refuses
+		// apps' ID tokens from Google or a trusted issuer (I1-I3, I7, I8), never
+		// the session; it refuses
 		// everything else before routing, unknown paths included.
 		const [scheme, bearer] = (event.request.headers.get('authorization') ?? '').trim().split(/\s+/);
 		if (scheme?.toLowerCase() === 'bearer' && bearer) {
-			const idTokens = bearer.startsWith(TOKEN_PREFIX) ? null : googleIdTokens();
+			const idTokens = bearer.startsWith(TOKEN_PREFIX) ? null : appIdTokens();
 			if (idTokens && looksLikeJwt(bearer)) {
 				try {
 					event.locals.email = await idTokens.verify(bearer);
 				} catch (err) {
-					console.error("Can't check Google ID tokens:", (err as Error).message);
+					console.error("Can't check ID tokens:", (err as Error).message);
 					return withCors(
-						Response.json({ error: "rbacr can't check Google ID tokens right now" }, { status: 503, headers: { 'cache-control': 'no-store' } })
+						Response.json({ error: "rbacr can't check ID tokens right now" }, { status: 503, headers: { 'cache-control': 'no-store' } })
 					);
 				}
 				event.locals.app = event.locals.email !== null;
@@ -84,7 +85,7 @@ export const handle: Handle = async ({ event, resolve }) => {
 		if (event.locals.app && !appMayCall(event.request.method, path)) {
 			return withCors(
 				Response.json(
-					{ error: "A Google ID token only reaches rbacr's self-service routes; use a personal API token" },
+					{ error: "An ID token only reaches rbacr's self-service routes; use a personal API token" },
 					{ status: 403, headers: { 'cache-control': 'no-store' } }
 				)
 			);

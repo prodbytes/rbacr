@@ -36,6 +36,9 @@
 #   RBACR_GOOGLE_AUDIENCES  comma-separated Google OAuth client ids whose
 #                 users' ID tokens /api accepts (SPEC I1-I5); empty or unset
 #                 turns them off. Passed on every deploy, like the root list.
+#   RBACR_TRUSTED_ISSUERS  OIDC issuers besides Google whose ID tokens /api
+#                 accepts (SPEC I7-I9): a JSON array of {"issuer", "jwks",
+#                 "audiences"}; empty or unset: none. Passed on every deploy.
 #   RBACR_CORS_ORIGINS  comma-separated web origins allowed to call /api from
 #                 the browser (SPEC H3, H4); empty or unset: no CORS. Passed
 #                 on every deploy.
@@ -117,6 +120,23 @@ if [[ ! "${RBACR_GOOGLE_AUDIENCES:-}" =~ ^[A-Za-z0-9._,\ -]*$ ]]; then
   echo "error: RBACR_GOOGLE_AUDIENCES must be comma-separated Google OAuth client ids" >&2
   exit 1
 fi
+# Compacted to one line (a repository variable may hold pretty-printed JSON);
+# the app checks the rest when it starts (SPEC I7), and the smoke test below
+# would catch it not starting.
+if [[ -n "${RBACR_TRUSTED_ISSUERS:-}" ]]; then
+  RBACR_TRUSTED_ISSUERS="$(node -e '
+    const v = JSON.parse(process.argv[1]);
+    if (!Array.isArray(v)) throw new Error("not an array");
+    process.stdout.write(JSON.stringify(v));' "$RBACR_TRUSTED_ISSUERS" 2>/dev/null)" || {
+    echo "error: RBACR_TRUSTED_ISSUERS must be a JSON array of {\"issuer\", \"jwks\", \"audiences\"} objects" >&2
+    exit 1
+  }
+fi
+trusted_issuers_re='^[][A-Za-z0-9._~%:/?=&+,"@{} -]*$'
+if [[ ! "${RBACR_TRUSTED_ISSUERS:-}" =~ $trusted_issuers_re ]]; then
+  echo "error: RBACR_TRUSTED_ISSUERS has characters the app stack's TrustedIssuers parameter refuses" >&2
+  exit 1
+fi
 if [[ ! "${RBACR_CORS_ORIGINS:-}" =~ ^[A-Za-z0-9.:/,\ -]*$ ]]; then
   echo "error: RBACR_CORS_ORIGINS must be comma-separated origins like https://app.example.com" >&2
   exit 1
@@ -126,7 +146,8 @@ fi
 # deployed values, but a stage's first deploy needs all of them.
 params=("DomainName=$DOMAIN" "HostedZoneId=$HOSTED_ZONE_ID" "Version=$RELEASE"
   "RootList=${RBACR_ROOT_LIST:-}"
-  "GoogleAudiences=${RBACR_GOOGLE_AUDIENCES:-}" "CorsOrigins=${RBACR_CORS_ORIGINS:-}")
+  "GoogleAudiences=${RBACR_GOOGLE_AUDIENCES:-}" "CorsOrigins=${RBACR_CORS_ORIGINS:-}"
+  "TrustedIssuers=${RBACR_TRUSTED_ISSUERS:-}")
 first_deploy=true; stack_exists "$STACK" && first_deploy=false
 for pair in GoogleClientId:RBACR_GOOGLE_CLIENT_ID GoogleClientSecret:RBACR_GOOGLE_CLIENT_SECRET; do
   param="${pair%%:*}" name="${pair#*:}"
@@ -154,6 +175,7 @@ fi
 roots=0; [[ -n "${RBACR_ROOT_LIST:-}" ]] && roots=$(tr ',' '\n' <<<"$RBACR_ROOT_LIST" | grep -c .)
 echo "    root allow list: $roots entr(ies)"
 echo "    Google ID token audiences: ${RBACR_GOOGLE_AUDIENCES:-none}"
+echo "    trusted ID token issuers: ${RBACR_TRUSTED_ISSUERS:-none}"
 echo "    CORS origins: ${RBACR_CORS_ORIGINS:-none}"
 
 # 1. Build and package

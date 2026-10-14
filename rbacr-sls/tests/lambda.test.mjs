@@ -18,6 +18,10 @@ process.env.RBACR_VERSION = '1.2.3-RC';
 process.env.RBACR_STRIPE_WEBHOOK_SECRET = 'whsec_test';
 process.env.RBACR_STRIPE_API_KEY = 'rk_test_unused';
 process.env.RBACR_GOOGLE_AUDIENCES = 'app-web.apps.googleusercontent.com,app-android.apps.googleusercontent.com';
+// A trusted issuer (SPEC I7), e.g. an app's own session tokens; its keys are the same stub's.
+const TRUSTED_ISSUER = 'https://app.example.com/api/auth';
+const TRUSTED_JWKS_URL = 'https://app.example.com/api/auth/.well-known/jwks.json';
+process.env.RBACR_TRUSTED_ISSUERS = JSON.stringify([{ issuer: TRUSTED_ISSUER, jwks: TRUSTED_JWKS_URL, audiences: ['app'] }]);
 process.env.RBACR_CORS_ORIGINS = 'https://app.example.com,http://localhost:8080';
 const APP_ORIGIN = 'https://app.example.com';
 // The Lambda sees the function URL's Host; CloudFront sends the site's host in
@@ -35,7 +39,7 @@ const googleKey = await crypto.subtle.generateKey(
 const { kty, n, e } = await crypto.subtle.exportKey('jwk', googleKey.publicKey);
 const realFetch = globalThis.fetch;
 globalThis.fetch = async (input, init) =>
-	String(input) === GOOGLE_JWKS_URL
+	String(input) === GOOGLE_JWKS_URL || String(input) === TRUSTED_JWKS_URL
 		? Response.json({ keys: [{ kty, n, e, kid: 'test-kid', alg: 'RS256', use: 'sig' }] }, { headers: { 'cache-control': 'max-age=3600' } })
 		: realFetch(input, init);
 
@@ -179,6 +183,23 @@ describe('lambda handler', () => {
 			assert.equal(res.statusCode, 403, `${method} ${path}`);
 			assert.match(JSON.parse(res.body).error, /self-service/);
 			assert.equal(res.headers['access-control-allow-origin'], APP_ORIGIN);
+		}
+	});
+
+	it("keeps a trusted issuer's ID token to the self-service routes too (I7-I9)", async () => {
+		const token = await idToken({ iss: TRUSTED_ISSUER, aud: 'app' });
+		const res = await invoke('/api/systems', { headers: { authorization: `Bearer ${token}`, origin: APP_ORIGIN } });
+		assert.equal(res.statusCode, 403);
+		assert.match(JSON.parse(res.body).error, /self-service/);
+		assert.equal(res.headers['access-control-allow-origin'], APP_ORIGIN);
+		for (const bad of [
+			await idToken({ iss: TRUSTED_ISSUER }), // Google's audience
+			await idToken({ iss: TRUSTED_ISSUER, aud: ['app'] }),
+			await idToken({ iss: 'https://other.example.com/api/auth', aud: 'app' }),
+			await idToken({ aud: 'app' }) // Google's issuer, the trusted issuer's audience
+		]) {
+			const refused = await invoke('/api/systems', { headers: { authorization: `Bearer ${bad}` } });
+			assert.equal(refused.statusCode, 401);
 		}
 	});
 

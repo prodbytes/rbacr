@@ -12,11 +12,12 @@ import {
 	RBACR_ROOT_LIST,
 	RBACR_SESSION_RETENTION_DAYS,
 	RBACR_STRIPE_API_KEY,
-	RBACR_STRIPE_WEBHOOK_SECRET
+	RBACR_STRIPE_WEBHOOK_SECRET,
+	RBACR_TRUSTED_ISSUERS
 } from '$app/env/private';
 import { parseCorsOrigins } from './cors';
 import { createTable, ensureTable, type Table } from './dynamo';
-import { GoogleIdTokens, parseAudiences } from './idtokens';
+import { GoogleIdTokens, IdTokens, parseAudiences, parseTrustedIssuers, trustedIssuerTokens } from './idtokens';
 import { Allowlist, normalizeEmail } from './identity';
 import { Rbac } from './rbac';
 import { Sessions } from './session';
@@ -86,13 +87,21 @@ export function stripeSync(): StripeSync | null {
 	};
 }
 
-let idTokens: GoogleIdTokens | null | undefined;
+let idTokens: IdTokens | null | undefined;
 
-/** The verifier of apps' Google ID tokens (I1), or null when RBACR_GOOGLE_AUDIENCES is empty. Its key cache lives per process. */
-export function googleIdTokens(): GoogleIdTokens | null {
+/**
+ * The verifier of apps' ID tokens (I1, I7): Google's when RBACR_GOOGLE_AUDIENCES
+ * is set, plus each RBACR_TRUSTED_ISSUERS issuer; null when there is none. Its
+ * key caches live per process.
+ */
+export function appIdTokens(): IdTokens | null {
 	if (idTokens === undefined) {
 		const audiences = parseAudiences(RBACR_GOOGLE_AUDIENCES);
-		idTokens = audiences.length ? new GoogleIdTokens(audiences) : null;
+		const verifiers = [
+			...(audiences.length ? [new GoogleIdTokens(audiences)] : []),
+			...parseTrustedIssuers(RBACR_TRUSTED_ISSUERS).map((issuer) => trustedIssuerTokens(issuer))
+		];
+		idTokens = verifiers.length ? new IdTokens(verifiers) : null;
 	}
 	return idTokens;
 }
