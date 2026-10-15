@@ -1,12 +1,12 @@
 <!--
 	The form that creates a voucher (SPEC V1, V2), for a system or global:
-	the roles it grants, its code (suggested), its validity (this quarter by
-	default) and its terms. The page does the request through `create`.
+	the roles it grants, its code (suggested), its validity (this quarter, give
+	or take two weeks, by default) and its terms. The page does the request through `create`.
 -->
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { formValues, utcInputValue, utcIso } from '#lib/vpi.js';
-	import { quarterOf, suggestVoucherCode } from '#lib/vouchers.js';
+	import { defaultValidity, quarterOf, suggestVoucherCode } from '#lib/vouchers.js';
 
 	export interface VoucherBody {
 		/** A system voucher's roles. */
@@ -40,7 +40,9 @@
 	} = $props();
 
 	// A new voucher defaults to this quarter: its code and its validity (V2).
-	const quarter = quarterOf(new Date());
+	const now = new Date();
+	const quarter = quarterOf(now);
+	const validity = defaultValidity(now);
 	// A system's role is `role`; a global voucher's, `systemId#role` (`#` is in neither).
 	let picked = $state<string[]>([]);
 	const pair = (key: string) => {
@@ -124,10 +126,10 @@
 		<fieldset class="group">
 			<legend>Valid (UTC)</legend>
 			<div class="pair">
-				<label>From <input type="datetime-local" name="startsAt" value={utcInputValue(quarter.start)} /></label>
-				<label>Until <input type="datetime-local" name="endsAt" value={utcInputValue(quarter.end)} /></label>
+				<label>From <input type="datetime-local" name="startsAt" value={utcInputValue(validity.start)} /></label>
+				<label>Until <input type="datetime-local" name="endsAt" value={utcInputValue(validity.end)} /></label>
 			</div>
-			<p class="hint">This quarter, {quarter.label}, by default. Leave empty for no limit.</p>
+			<p class="hint">This quarter, {quarter.label}, from two weeks before to two weeks after, by default. Leave empty for no limit.</p>
 		</fieldset>
 
 		<fieldset class="group">
