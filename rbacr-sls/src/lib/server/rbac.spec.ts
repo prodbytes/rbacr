@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import type { Table } from './dynamo';
 import { Allowlist } from './identity';
 import { MAX_REDEEM_FAILURES, REDEEM_FAILURE_WINDOW_MS, Rbac, RbacError, appMayCall, voucherStatus, type Actor } from './rbac';
-import { ANIMALS, quarterOf } from '../vouchers';
+import { ANIMALS, defaultValidity, quarterOf } from '../vouchers';
 import { createTestTable, scanAll } from './testing/dynamodb';
 
 const ROOT = 'root@corp.com';
@@ -480,6 +480,10 @@ describe('vouchers', () => {
 			label: '2026Q4',
 			start: new Date('2026-10-01T00:00:00Z'),
 			end: new Date('2027-01-01T00:00:00Z')
+		});
+		expect(defaultValidity(new Date('2026-11-30T23:59:59Z'))).toEqual({
+			start: new Date('2026-09-17T00:00:00Z'),
+			end: new Date('2027-01-15T00:00:00Z')
 		});
 	});
 

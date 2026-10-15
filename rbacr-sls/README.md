@@ -49,7 +49,8 @@ app on AWS Lambda. Run every command below from this folder
   `presence` and in `tabscan`), each in its own system. The voucher
   forms offer the existing roles as checkboxes and suggest a code (the
   quarter plus random animals, or type your own, e.g. `SPRING-SALE`) valid
-  through the current quarter; codes ignore case and separators. Each
+  through the current quarter, from two weeks before it starts to two
+  weeks after it ends; codes ignore case and separators. Each
   voucher has a **discount**: a 100% voucher grants its roles immediately,
   while a lower discount will require payment (not built yet; it answers 402
   Payment Required). The start date, end date and usage count are all
