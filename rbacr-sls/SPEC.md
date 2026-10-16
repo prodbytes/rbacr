@@ -223,8 +223,9 @@ and the README in sync with the code.
   one up from the current calendar quarter (UTC) and three random animal
   names out of 256, e.g. `2026Q4-OTTER-FALCON-LEMUR` (24 random bits;
   redeeming needs a signed-in identity, V5). The pages suggest such a code
-  and, as the validity, the current quarter: from its first day to the
-  next quarter's first day. A code is stored upper case with any run of
+  and, as the validity, the current quarter widened by two weeks each
+  side: from 14 days before its first day to 14 days after the next
+  quarter's first day. A code is stored upper case with any run of
   other characters as one dash, and needs 6 to 40 letters and digits.
   Codes are matched ignoring case and separators, so `spring sale` and
   `SPRING-SALE` are the same code, and they are unique: reusing one, even

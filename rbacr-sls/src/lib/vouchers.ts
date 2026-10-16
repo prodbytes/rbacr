@@ -2,7 +2,8 @@
  * Voucher codes and their default terms (SPEC V2), shared by the pages and
  * the server: a code defaults to the current quarter plus random animal
  * names, e.g. 2026Q4-OTTER-FALCON-LEMUR, and a voucher to being valid
- * through that quarter.
+ * through that quarter, from two weeks before it starts to two weeks after
+ * it ends.
  */
 
 /** 256 animals, so each one picked is 8 random bits. */
@@ -62,6 +63,16 @@ export function quarterOf(at: Date): Quarter {
 		start: new Date(Date.UTC(year, q * 3, 1)),
 		end: new Date(Date.UTC(year, q * 3 + 3, 1))
 	};
+}
+
+/** Days a default validity reaches before and after its quarter. */
+export const VALIDITY_MARGIN_DAYS = 14;
+
+/** A new voucher's default validity: the quarter of `at`, widened by VALIDITY_MARGIN_DAYS each side. */
+export function defaultValidity(at: Date): { start: Date; end: Date } {
+	const { start, end } = quarterOf(at);
+	const margin = VALIDITY_MARGIN_DAYS * 24 * 60 * 60 * 1000;
+	return { start: new Date(start.getTime() - margin), end: new Date(end.getTime() + margin) };
 }
 
 /** A default code: the quarter of `at` and random animals, e.g. 2026Q4-OTTER-FALCON-LEMUR. */
