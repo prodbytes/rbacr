@@ -12,8 +12,11 @@ folder (paths below are relative to the repository root):
   `dart format --line-length 120 --set-exit-if-changed lib test example`,
   `dart test`, and its e2e tests (`dart test -t e2e`, see its README)
   against `devbox services up`. Keep it in step with rbacr-sls's `/api`.
-- [rbacr-lib/](rbacr-lib/) — the client library that caches role grants;
-  only a README until it is specified.
+- [rbacr-lib/](rbacr-lib/) — the TypeScript client (package `rbacr-lib`)
+  for servers. Before committing it: `npm run check` (typecheck, unit
+  tests, build) and its e2e tests (`npm run test:e2e`, see its README)
+  against a local rbacr. Keep it in step with rbacr-sls's `/api`; release
+  with `rbacr-lib/scripts/release.sh`.
 
 The GitHub workflows (`.github/`), the dev container (`.devcontainer/`,
 `.dockerignore`) and this file stay at the root.
