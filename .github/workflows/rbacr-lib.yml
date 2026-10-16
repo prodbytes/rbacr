@@ -1,0 +1,41 @@
+# Checks rbacr-lib, the TypeScript client (rbacr-lib/README.md):
+# typecheck, the offline unit tests and the build, on pull requests and
+# pushes to main that touch it. The end-to-end tests need an rbacr and run
+# locally (README "Develop").
+name: rbacr-lib
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/rbacr-lib.yml
+      - rbacr-lib/**
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/rbacr-lib.yml
+      - rbacr-lib/**
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rbacr-lib-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rbacr-lib
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      - run: npm ci --no-audit --no-fund
+      - run: npm run check
