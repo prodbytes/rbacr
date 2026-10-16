@@ -1,6 +1,6 @@
 {
   "name": "rbacr-lib",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "TypeScript client for rbacr's external API (/api): role checks with caching, and grants for roots",
   "license": "MIT",
   "type": "module",

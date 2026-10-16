@@ -18,7 +18,7 @@ GitHub releases (tags `rbacr-lib-v<version>`), which npm installs by URL
 and pins by integrity in your lockfile:
 
 ```sh
-npm install https://github.com/prodbytes/rbacr/releases/download/rbacr-lib-v0.1.0/rbacr-lib-0.1.0.tgz
+npm install https://github.com/prodbytes/rbacr/releases/download/rbacr-lib-v0.1.1/rbacr-lib-0.1.1.tgz
 ```
 
 ## Use it
@@ -47,7 +47,7 @@ const blocked = await rbacr.holders('presence', 'blocked'); // Set of addresses
 
 | Option | Default | |
 |---|---|---|
-| `url` | `RBACR_URL`, else `https://rbacr.nu01.com` (C7) | `https`; plain `http` only for localhost. Also exported: `RBACR_PRODUCTION`, `RBACR_RELEASE_CANDIDATE`, `RBACR_LOCAL` (`http://localhost:8686`). |
+| `url` | `RBACR_URL`, else `https://rbacr.nu01.com` (C7) | `https`; plain `http` only for this machine (`localhost`, `*.localhost`, `127.0.0.1`, `::1`, and `host.docker.internal` for an app's local server in Docker). Also exported: `RBACR_PRODUCTION`, `RBACR_RELEASE_CANDIDATE`, `RBACR_LOCAL` (`http://localhost:8686`). |
 | `token` | `RBACR_TOKEN` (C7) | a personal API token, or a function (sync or async) giving one. Asking about other people needs a root's token, kept server-side (C2). |
 | `cacheMs` | 60 000 | how long answers are kept; 0: never. |
 | `timeoutMs` | 5 000 | each request's limit. |
