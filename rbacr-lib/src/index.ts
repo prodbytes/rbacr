@@ -9,7 +9,7 @@ export const RBACR_RELEASE_CANDIDATE = 'https://rc.rbacr.nu01.com';
 export const RBACR_LOCAL = 'http://localhost:8686';
 
 export interface RbacrOptions {
-  /** rbacr's site; default RBACR_URL, else https://rbacr.nu01.com (C7). Plain http only for localhost. */
+  /** rbacr's site; default RBACR_URL, else https://rbacr.nu01.com (C7). Plain http only for this machine (localhost, *.localhost, 127.0.0.1, ::1, host.docker.internal). */
   url?: string;
   /** A personal API token (`rbacr_…`), or a function giving one; default RBACR_TOKEN (C7). */
   token?: string | (() => string | Promise<string>);
@@ -318,7 +318,11 @@ function siteUrl(raw: string): string {
   } catch {
     throw new RbacrError(0, `RBACR_URL isn't a URL: ${raw}`);
   }
-  const local = url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '[::1]';
+  // This machine only: loopback, *.localhost, and a container's name for
+  // its host (an app's local server in Docker reaching a local rbacr).
+  const host = url.hostname;
+  const local =
+    host === 'localhost' || host.endsWith('.localhost') || host === '127.0.0.1' || host === '[::1]' || host === 'host.docker.internal';
   if (url.protocol !== 'https:' && !(url.protocol === 'http:' && local)) {
     throw new RbacrError(0, 'rbacr must be https (plain http only for localhost)');
   }

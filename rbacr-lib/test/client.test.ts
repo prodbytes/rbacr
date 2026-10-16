@@ -39,6 +39,10 @@ describe('rbacr-lib', () => {
     }
     expect(() => new RbacrClient({ url: 'http://rbacr.example.com' })).toThrow(/https/);
     expect(new RbacrClient({ url: 'http://localhost:8686' }).url).toBe('http://localhost:8686');
+    // A local server in Docker reaching rbacr on its host.
+    expect(new RbacrClient({ url: 'http://host.docker.internal:2115' }).url).toBe('http://host.docker.internal:2115');
+    expect(new RbacrClient({ url: 'http://rbacr.localhost' }).url).toBe('http://rbacr.localhost');
+    expect(() => new RbacrClient({ url: 'http://localhost.example.com' })).toThrow(/https/);
     await expect(new RbacrClient({ url: 'https://r.example.com', token: '', fetch: fetchFn }).me()).rejects.toMatchObject({ status: 401 });
   });
 
