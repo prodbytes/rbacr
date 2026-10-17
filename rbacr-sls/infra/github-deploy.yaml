@@ -3,9 +3,10 @@ Description: >
   rbacr-github-deploy: lets GitHub Actions deploy rbacr without stored keys.
   A production role that only *GA tag runs can assume, and a
   release-candidate role for *RC* tag runs and manual runs from main,
-  limited to the rbacr-rc stacks and the rc.rbacr.nu01.com records. Both may
-  only create Lambda roles bounded by rbacr-lambda-boundary (write logs and
-  use the rbacr tables, nothing else). Deployed once, by hand (infra/README.md).
+  limited to the rbacr-rc stacks and the rc.rbacr.nu01.com ACM validation
+  records. Both may only create Lambda roles bounded by rbacr-lambda-boundary
+  (write logs and use the rbacr tables, nothing else). Deployed once, by hand
+  (infra/README.md).
 
 Parameters:
   GitHubRepository:
@@ -20,9 +21,19 @@ Parameters:
       owner@<owner id>/name@<repository id>. The repository uses immutable
       OIDC subject claims (gh api repos/<owner>/<name>/actions/oidc/customization/sub
       shows use_immutable_subject and the sub_claim_prefix).
+  ValidationZoneId:
+    Type: AWS::Route53::HostedZone::Id
+    Default: Z04838091YTBIM6PNI1XK
+    Description: >
+      The nu01.com zone (the nu01 repository's nu01-route53-zone stack), where
+      the certificates' ACM validation records now live (infra/app.yaml).
   HostedZoneId:
     Type: AWS::Route53::HostedZone::Id
-    Description: The rbacr.nu01.com zone (the rbacr-zone stack's HostedZoneId output)
+    Default: Z0415297342E0C595290P
+    Description: >
+      Retired: the old rbacr.nu01.com subzone (stack rbacr-zone). Kept until
+      round 2 of the zone merge has deployed on both stages, because that
+      release deletes the stacks' old records from it (infra/README.md).
   DistributionId:
     Type: String
     Default: E1K2TMPPFWYEL6
@@ -259,16 +270,33 @@ Resources:
                   - acm:RemoveTagsFromCertificate
                   - acm:ListTagsForCertificate
                 Resource: '*'
+              # Route 53: the nu01.com zone (ValidationZoneId) and, until round
+              # 2 of the zone merge has deployed on both stages, the old
+              # rbacr.nu01.com subzone (HostedZoneId); then drop the latter.
               - Effect: Allow
                 Action:
                   - route53:ListResourceRecordSets
                   - route53:GetHostedZone
-                Resource: !Sub arn:${AWS::Partition}:route53:::hostedzone/${HostedZoneId}
+                Resource:
+                  - !Sub arn:${AWS::Partition}:route53:::hostedzone/${ValidationZoneId}
+                  - !Sub arn:${AWS::Partition}:route53:::hostedzone/${HostedZoneId}
+              # In nu01.com only production's ACM validation records
+              # (_<token>.rbacr.nu01.com, lowercase, no trailing dot): its
+              # aliases belong to the nu01-dns stack (nu01 repository), and
+              # the rest of the zone to other projects.
+              - Effect: Allow
+                Action: route53:ChangeResourceRecordSets
+                Resource: !Sub arn:${AWS::Partition}:route53:::hostedzone/${ValidationZoneId}
+                Condition:
+                  ForAllValues:StringLike:
+                    route53:ChangeResourceRecordSetsNormalizedRecordNames:
+                      - _*.rbacr.nu01.com
+              # The old subzone, until round 2 has deployed on both stages:
+              # that release deletes production's aliases and old validation
+              # record from it. Never the zone's own NS/CAA/local records.
               - Effect: Allow
                 Action: route53:ChangeResourceRecordSets
                 Resource: !Sub arn:${AWS::Partition}:route53:::hostedzone/${HostedZoneId}
-                # Production's records and its ACM validation name, never
-                # the zone's own NS/CAA/local records.
                 Condition:
                   ForAllValues:StringLike:
                     route53:ChangeResourceRecordSetsNormalizedRecordNames:
@@ -522,13 +550,28 @@ Resources:
                   - acm:RemoveTagsFromCertificate
                   - acm:ListTagsForCertificate
                 Resource: '*'
+              # Route 53: the nu01.com zone (ValidationZoneId) and, until round
+              # 2 of the zone merge has deployed on both stages, the old
+              # rbacr.nu01.com subzone (HostedZoneId); then drop the latter.
               - Effect: Allow
                 Action:
                   - route53:ListResourceRecordSets
                   - route53:GetHostedZone
-                Resource: !Sub arn:${AWS::Partition}:route53:::hostedzone/${HostedZoneId}
-              # Records may change only for rc.rbacr.nu01.com and its ACM
-              # validation name (_<token>.rc.rbacr.nu01.com): never prod's.
+                Resource:
+                  - !Sub arn:${AWS::Partition}:route53:::hostedzone/${ValidationZoneId}
+                  - !Sub arn:${AWS::Partition}:route53:::hostedzone/${HostedZoneId}
+              # In nu01.com only the RC's ACM validation records
+              # (_<token>.rc.rbacr.nu01.com): never prod's, nor the aliases
+              # (the nu01-dns stack's) or other projects' records.
+              - Effect: Allow
+                Action: route53:ChangeResourceRecordSets
+                Resource: !Sub arn:${AWS::Partition}:route53:::hostedzone/${ValidationZoneId}
+                Condition:
+                  ForAllValues:StringLike:
+                    route53:ChangeResourceRecordSetsNormalizedRecordNames:
+                      - _*.rc.rbacr.nu01.com
+              # The old subzone, until round 2 has deployed on both stages:
+              # rc.rbacr.nu01.com and its old validation name, never prod's.
               - Effect: Allow
                 Action: route53:ChangeResourceRecordSets
                 Resource: !Sub arn:${AWS::Partition}:route53:::hostedzone/${HostedZoneId}

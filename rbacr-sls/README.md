@@ -563,9 +563,13 @@ must be on `RBACR_ROOT_LIST`. With `RBACR_ROOT_LIST=@nu01.com`, run it as
 
 https://rbacr.nu01.com (production) and https://rc.rbacr.nu01.com (release
 candidate) run on AWS. One Lambda serves the SvelteKit app through
-[lambda.js](lambda.js), behind CloudFront, with the certificate and DNS in
-the `rbacr.nu01.com` Route 53 zone. All of it is defined as CloudFormation in
-[infra/](infra/README.md).
+[lambda.js](lambda.js), behind CloudFront, with an ACM certificate
+validated in the `nu01.com` Route 53 zone. All of it is defined as
+CloudFormation in [infra/](infra/README.md). The DNS records (the
+`rbacr.nu01.com` and `rc.rbacr.nu01.com` aliases, `local.rbacr.nu01.com`,
+the CAA record) live in the nu01 repository (stacks `nu01-route53-zone` and
+`nu01-dns`); the `rbacr.nu01.com` subzone is retired
+([infra/README.md](infra/README.md#zone-merge-one-time)).
 
 ```bash
 bash scripts/release-rc.sh   # tag X.Y.Z-RC → release (prerelease) + deploy to rc.rbacr.nu01.com
@@ -600,7 +604,7 @@ src/routes/webhooks/stripe/     Stripe webhook (signature, not token or session)
 src/routes/{me,systems,global}/**  UI pages (load and change data through /vpi)
 lambda.js                       Lambda entrypoint (serverless-http + adapter-node)
 Containerfile, container/       the dev server image for app development (adapter-node on DynamoDB Local), its compose files
-infra/                          CloudFormation: zone, deploy roles, artifacts, app
+infra/                          CloudFormation: deploy roles, artifacts, tables, app
 floci/                          local CloudFront (HTTPS) on Floci
 scripts/                        release, deploy, packaging, dev server image, local certs, health check
 ../.github/workflows/           Release, Deploy RC, Deploy (at the repository root)

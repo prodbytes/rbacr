@@ -5,11 +5,22 @@ rbacr's AWS infrastructure, as CloudFormation templates. Everything lives in
 
 | Template | Stack | Holds | Deployed by |
 |---|---|---|---|
-| [zone.yaml](zone.yaml) | `rbacr-zone` | The public hosted zone `rbacr.nu01.com`, its NS delegation in the `nu01.com` zone, a CAA record (only Amazon issues certificates), and `local.rbacr.nu01.com → 127.0.0.1` for local HTTPS | An administrator, once |
 | [github-deploy.yaml](github-deploy.yaml) | `rbacr-github-deploy` | The `rbacr-github-deploy` role (`*GA` tags), the `rbacr-github-deploy-rc` role (`*RC*` tags and manual runs from `main`), and the `rbacr-lambda-boundary` permissions boundary | An administrator, once |
 | [artifacts.yaml](artifacts.yaml) | `rbacr-artifacts`, `rbacr-rc-artifacts` | A private bucket for the Lambda zips; old zips expire after 90 days | [scripts/deploy.sh](../scripts/deploy.sh) |
 | [tables.yaml](tables.yaml) | `rbacr-tables`, `rbacr-rc-tables` | The DynamoDB tables (`rbacr` and `rbacr-sessions`, `rbacr-rc` and `rbacr-rc-sessions`): on demand, point-in-time recovery, deletion protection, kept if the stack is deleted | [scripts/deploy.sh](../scripts/deploy.sh) |
-| [app.yaml](app.yaml) | `rbacr`, `rbacr-rc` | The ACM certificate, the Lambda with its function URL and log group, the CloudFront distribution with its WAF web ACL, the A/AAAA aliases, and the function alarms with their e-mail topic. The origin secret is an SSM parameter (`/rbacr/<stage>/origin-secret`), outside the stack | [scripts/deploy.sh](../scripts/deploy.sh) |
+| [app.yaml](app.yaml) | `rbacr`, `rbacr-rc` | The ACM certificate (validated in the `nu01.com` zone), the Lambda with its function URL and log group, the CloudFront distribution with its WAF web ACL, and the function alarms with their e-mail topic. The origin secret is an SSM parameter (`/rbacr/<stage>/origin-secret`), outside the stack | [scripts/deploy.sh](../scripts/deploy.sh) |
+
+**DNS lives in the nu01 repository.** The `nu01.com` zone (stack
+`nu01-route53-zone`) holds every rbacr record, managed by the `nu01-dns`
+stack: the A/AAAA aliases of `rbacr.nu01.com` and `rc.rbacr.nu01.com` (to the
+distributions), `local.rbacr.nu01.com → 127.0.0.1` for local HTTPS, and the
+CAA record (only Amazon issues certificates). The app stacks only write
+their certificates' ACM validation records (`_<token>.rbacr.nu01.com`,
+`_<token>.rc.rbacr.nu01.com`) there. A replaced distribution needs its new
+domain name (the app stack's `DistributionDomainName` output) in `nu01-dns`.
+The former `rbacr.nu01.com` subzone (stack `rbacr-zone`, template
+`zone.yaml`, now deleted from the repository) is being retired: see
+[Zone merge](#zone-merge-one-time).
 
 ## How a request flows
 
@@ -110,28 +121,21 @@ touch the app run the Release workflow's build and tests, without publishing.
 You can also run it by hand with admin credentials (inside devbox):
 `STAGE=rc TAG=0.1.<Z>-RC bash scripts/deploy.sh`. Settings not already in
 the environment are read from the git-ignored `.env.$STAGE` (`.env.prod`,
-`.env.rc`): `KEY=value` lines for `RBACR_*`, `HEALTH_EMAILS` and
-`HOSTED_ZONE_ID`. The file is parsed, not sourced.
+`.env.rc`): `KEY=value` lines for `RBACR_*` and `HEALTH_EMAILS`. The file is parsed, not sourced.
 
 Every stack carries the cost-allocation tags `project=rbacr` and `tenancy`
-(`GA` for prod, `RC` for rc, `shared` for `rbacr-zone` and
-`rbacr-github-deploy`), which CloudFormation copies to its resources; the
-hosted zone, which doesn't get stack tags, sets them explicitly, and
+(`GA` for prod, `RC` for rc, `shared` for
+`rbacr-github-deploy`), which CloudFormation copies to its resources, and
 scripts/deploy.sh tags the origin secret parameter it creates.
 
 ## One-time setup
 
-1. **The zone.** Deploy it with administrator credentials. `Z04838091YTBIM6PNI1XK`
-   is the `nu01.com` zone (`aws route53 list-hosted-zones-by-name --dns-name nu01.com`).
-
-   ```bash
-   aws cloudformation deploy --region us-east-1 --stack-name rbacr-zone \
-     --template-file infra/zone.yaml \
-     --parameter-overrides ParentHostedZoneId=Z04838091YTBIM6PNI1XK \
-     --tags project=rbacr tenancy=shared
-   aws cloudformation describe-stacks --region us-east-1 --stack-name rbacr-zone \
-     --query 'Stacks[0].Outputs'   # HostedZoneId
-   ```
+1. **DNS.** The `nu01.com` zone and rbacr's records come from the nu01
+   repository (stacks `nu01-route53-zone`, `nu01-dns`); nothing to deploy
+   here. `Z04838091YTBIM6PNI1XK` is the `nu01.com` zone
+   (`aws route53 list-hosted-zones-by-name --dns-name nu01.com`), the
+   default of the templates' `ValidationZoneId` and the value
+   scripts/deploy.sh passes.
 
 2. **The deploy roles.** They create IAM resources, so an administrator
    deploys them. The account already has GitHub's OIDC provider (from
@@ -141,7 +145,7 @@ scripts/deploy.sh tags the origin secret parameter it creates.
    ```bash
    aws cloudformation deploy --region us-east-1 --stack-name rbacr-github-deploy \
      --template-file infra/github-deploy.yaml --capabilities CAPABILITY_NAMED_IAM \
-     --parameter-overrides HostedZoneId=<rbacr-zone HostedZoneId> \
+     --parameter-overrides \
        DistributionId=<rbacr DistributionId> RcDistributionId=<rbacr-rc DistributionId> \
      --tags project=rbacr tenancy=shared
    ```
@@ -153,7 +157,7 @@ scripts/deploy.sh tags the origin secret parameter it creates.
    The roles trust only this repository's tokens, in both subject forms
    (`repo:prodbytes@288014477/rbacr@1404734829:…` and `repo:prodbytes/rbacr:…`).
    Each one may manage only its own stage's stacks, function, log group,
-   origin secret parameter, bucket and DNS names. The roles can create the Lambda's execution
+   origin secret parameter, bucket and ACM validation records. The roles can create the Lambda's execution
    role only with the `rbacr-lambda-boundary` boundary attached, so a deploy
    can never create a role that does more than write logs. Each role may
    create a CloudFront distribution but read, change or delete only its own
@@ -184,7 +188,6 @@ scripts/deploy.sh tags the origin secret parameter it creates.
    ```bash
    gh variable set AWS_DEPLOY_ROLE_ARN --body "<DeployRoleArn>"
    gh variable set AWS_DEPLOY_RC_ROLE_ARN --body "<RcDeployRoleArn>"
-   gh variable set HOSTED_ZONE_ID --body "<rbacr-zone HostedZoneId>"
    for t in GA RC; do
      gh variable set "RBACR_${t}_ROOT_LIST" --body "nu01.com"
      gh variable set "RBACR_${t}_GOOGLE_CLIENT_ID" --body "<client id>.apps.googleusercontent.com"
@@ -264,6 +267,89 @@ needs, in this order:
    secret and health check permissions marked as such in
    `github-deploy.yaml` can be removed (and `rbacr-github-deploy`
    redeployed).
+
+## Zone merge (one-time)
+
+To save a hosted zone ($0.50 a month), the `rbacr.nu01.com` subzone
+(`Z0415297342E0C595290P`, stack `rbacr-zone`) is merged into `nu01.com`
+(`Z04838091YTBIM6PNI1XK`) in two rounds:
+
+- **Round 1** (an administrator, nu01 repository,
+  `scripts/migrate-subzone.sh rbacr`): in one atomic change it deletes the
+  `rbacr.nu01.com` NS delegation from `nu01.com` and copies the subzone's
+  ACM validation CNAMEs there, then deploys `nu01-dns`, which creates the
+  aliases, `local.rbacr.nu01.com` and the CAA record in `nu01.com`. The
+  subzone stays, unchanged, because resolvers may cache its NS records for
+  up to 2 days. The script prints the earliest time round 2 may be released.
+- **Round 2** (this repository, the first release with this section): the
+  app stacks stop managing DNS records and validate their certificates in
+  `nu01.com`. **Never release it before round 1 + 48 hours** (the time the
+  script printed): until then, resolvers that cached the old delegation
+  still ask the subzone, from which this release deletes the aliases.
+  scripts/deploy.sh refuses to deploy while `nu01.com` still delegates
+  `rbacr.nu01.com`, but it can't check the 48 hours.
+
+Round 2, in order:
+
+1. Check that round 1 ran: no NS record for `rbacr.nu01.com` in `nu01.com`,
+   and the aliases and both `_<token>` validation CNAMEs present there:
+
+   ```bash
+   aws route53 list-resource-record-sets --hosted-zone-id Z04838091YTBIM6PNI1XK \
+     --query "ResourceRecordSets[?ends_with(Name, 'rbacr.nu01.com.')].[Name,Type]" --output text
+   ```
+
+2. An administrator redeploys `rbacr-github-deploy` (One-time setup, step
+   2): the roles gain the validation records in `nu01.com` and keep the
+   subzone's record permissions, which this release needs to delete the old
+   records there. The deploy roles can't update themselves.
+3. Release RC, check https://rc.rbacr.nu01.com, then release GA. On each
+   stage CloudFormation deletes the A/AAAA records from the subzone and
+   **replaces the certificate**, because its validation zone changed: it
+   requests a new one, validates it through `nu01.com` with the same
+   `_<token>` CNAME (ACM reuses it for the same name in the same account,
+   and round 1 already copied it there), points the distribution at it, and
+   deletes the old certificate. The site keeps serving throughout.
+4. Retire the subzone, once round 2 has deployed on **both** stages
+   (`aws cloudformation get-template --stack-name rbacr[-rc]` has no
+   `AWS::Route53::RecordSet`):
+
+   ```bash
+   # a. Round 1 must have deleted the delegation: this prints nothing.
+   aws route53 list-resource-record-sets --hosted-zone-id Z04838091YTBIM6PNI1XK \
+     --query "ResourceRecordSets[?Name=='rbacr.nu01.com.' && Type=='NS']" --output text
+   # b. What's left in the subzone: NS, SOA, CAA and local.rbacr.nu01.com
+   #    (the rbacr-zone stack's), and possibly the old certificates'
+   #    _<token> CNAMEs, which aren't the stack's. Delete any record other
+   #    than those four with a DELETE change batch carrying the values
+   #    printed here; the hosted zone can't be deleted while they exist.
+   aws route53 list-resource-record-sets --hosted-zone-id Z0415297342E0C595290P
+   # c. Delete the stack: CAA, local, the delegation record, then the zone.
+   aws cloudformation delete-stack --region us-east-1 --stack-name rbacr-zone
+   aws cloudformation wait stack-delete-complete --region us-east-1 --stack-name rbacr-zone
+   ```
+
+   The stack's `Delegation` resource is the NS record in `nu01.com` that
+   round 1 already deleted by hand. If Route 53 refuses to delete what isn't
+   there ("Tried to delete resource record set ... but it was not found"),
+   the stack ends in `DELETE_FAILED` with the zone still standing (it waits
+   on the delegation). Then, after checking (step a) that the NS record is
+   really gone, delete again keeping only that resource out:
+
+   ```bash
+   aws cloudformation delete-stack --region us-east-1 --stack-name rbacr-zone \
+     --retain-resources Delegation
+   aws cloudformation wait stack-delete-complete --region us-east-1 --stack-name rbacr-zone
+   aws route53 get-hosted-zone --id Z0415297342E0C595290P   # NoSuchHostedZone
+   ```
+
+   Never pass `--retain-resources HostedZone`: a retained zone keeps
+   costing money.
+5. Clean up: remove the `HostedZoneId` parameter and the subzone
+   statements marked "until round 2 has deployed on both stages" from
+   [github-deploy.yaml](github-deploy.yaml), redeploy `rbacr-github-deploy`,
+   and delete the repository variable `HOSTED_ZONE_ID`
+   (`gh variable delete HOSTED_ZONE_ID`), which nothing reads any more.
 
 ## Validating changes
 

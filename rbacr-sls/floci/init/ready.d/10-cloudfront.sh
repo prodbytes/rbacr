@@ -13,7 +13,7 @@ set -eu
 
 ORIGIN_HOST="${RBACR_ORIGIN_HOST:-dev.rbacr.localhost}"
 ALIAS="${RBACR_CDN_ALIAS:-rbacr.localhost}"
-# A public name for 127.0.0.1 (infra/zone.yaml), for Google sign-in, whose
+# A public name for 127.0.0.1 (nu01 repository, stack nu01-dns), for Google sign-in, whose
 # redirect URIs must be on a public domain.
 PUBLIC_HOST="${RBACR_PUBLIC_HOST:-local.rbacr.nu01.com}"
 APP_PORT="${RBACR_APP_PORT:-5173}"
