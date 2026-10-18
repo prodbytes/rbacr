@@ -24,7 +24,12 @@ dependencies:
     git:
       url: https://github.com/prodbytes/rbacr.git
       path: rbacr-flutter
+      ref: <commit>   # pin a reviewed commit of main; update deliberately
 ```
+
+Pin `ref` to a commit: without it, every `flutter pub upgrade` takes
+whatever `main` holds, and the lockfile is the only thing standing between
+your app and an unreviewed change.
 
 ## Use it
 
@@ -45,7 +50,7 @@ if (await rbacr.allows(email: user.email, systemId: 'presence', role: 'premium')
 final answer = await rbacr.check(email: user.email, systemId: 'presence', role: 'premium');
 answer.allowed;   // true
 answer.expiresAt; // when the grants giving the role end, e.g. the billing period; null: never
-answer.ttl;       // the same as a Duration from now: never cache the "yes" longer
+answer.ttl;       // the same as a Duration from now; the client never keeps the "yes" longer
 
 // Any token may read a system's status (SPEC R12): in maintenance (R11),
 // every check answers no, so show "down for maintenance" instead of "no access".
@@ -67,15 +72,15 @@ final vouchers = await admin.listVouchers(systemId: 'presence'); // newest first
 await admin.disableVoucher(voucher.code); // DELETE: disabled for good (disabledBy), still listed
 ```
 
-| Method | rbacr endpoint | Returns |
-|--------|----------------|---------|
-| `me()` | `GET /api/me` | `Me`: email, root, global roles, roles per system |
-| `check(email, systemId?, role)` | `POST /api/check` | `RoleCheck`: `allowed`, `expiresAt`, `ttl` |
-| `allows(email, systemId?, role)` | `POST /api/check` | `bool`, `false` on any error |
-| `systemStatus(systemId)` | `GET /api/systems/:id/status` | `SystemStatus`: id, name, url, `maintenance` (any token) |
-| `systems()` | `GET /api/systems` | a `SystemStatus` per system (roots; others get none) |
-| `rolesIn(email, systemId)` | `POST /api/roles` | the effective roles, sorted |
-| `allRoles(email)` | `POST /api/roles` | `AllRoles`: global roles and roles per system |
+| Method | rbacr endpoint | Returns | Kept (see below) |
+|--------|----------------|---------|---|
+| `me({fresh})` | `GET /api/me` | `Me`: email, root, global roles, roles per system | `cacheDuration` |
+| `check(email, systemId?, role, {fresh})` | `POST /api/check` | `RoleCheck`: `allowed`, `expiresAt`, `ttl` | a "yes" `cacheDuration` but never past its `ttl`; a "no" `negativeCacheDuration` |
+| `allows(email, systemId?, role, {fresh})` | `POST /api/check` | `bool`, `false` on any error | as `check` |
+| `systemStatus(systemId, {fresh})` | `GET /api/systems/:id/status` | `SystemStatus`: id, name, url, `maintenance` (any token) | `negativeCacheDuration` |
+| `systems()` | `GET /api/systems` | a `SystemStatus` per system (roots; others get none) | no |
+| `rolesIn(email, systemId, {fresh})` | `POST /api/roles` | the effective roles, sorted | roles: `cacheDuration`; none: `negativeCacheDuration` |
+| `allRoles(email, {fresh})` | `POST /api/roles` | `AllRoles`: global roles and roles per system | as `rolesIn` |
 | `redeemVoucher(code)` | `POST /api/vouchers/redeem` | the `Grant` of its first role |
 | `redeemVoucherGrants(code)` | `POST /api/vouchers/redeem` | a `Grant` per role |
 | `createVoucher(systemId?, grants (global only), roles or role, code?, discountPercent?, startsAt?, endsAt?, maxUses?)` | `POST /api/systems/:id/vouchers`, or `POST /api/vouchers` without a system | the `Voucher` (roots) |
@@ -85,9 +90,80 @@ await admin.disableVoucher(voucher.code); // DELETE: disabled for good (disabled
 | `disableVoucher(code)` | `DELETE /api/vouchers/:code` | the disabled `Voucher` (roots) |
 
 Errors are `RbacrException`s with rbacr's message and `statusCode`
-(`isUnauthorized`, `isForbidden`, `isNotFound`, …), or no status when rbacr
-couldn't be reached or timed out (10 s by default). A voucher that needs
-payment throws `RbacrPaymentRequired` with its `payment` terms.
+(`isUnauthorized`, `isForbidden`, `isNotFound`, `isTooManyRequests`, …),
+or no status when rbacr couldn't be reached or timed out (10 s by default).
+A voucher that needs payment throws `RbacrPaymentRequired` with its
+`payment` terms.
+
+## Kept answers
+
+So that an app doesn't ask rbacr on every screen, the questions about
+roles and status keep their answers in memory, per caller (the identity in
+the token) and question:
+
+| Option | Default | |
+|---|---|---|
+| `cacheDuration` | 1 hour | how long an answer that grants something is kept; a "yes" never past the `ttl` rbacr sends with it (SPEC C3a). `Duration.zero` keeps nothing. |
+| `negativeCacheDuration` | 5 minutes | a "no", an empty role list and a system's status, so a role just bought or granted, or maintenance, shows soon |
+| `retryDelays` | 1 s, 3 s | the waits before asking again when rbacr can't be reached, is slow, or answers 5xx or 429 (4xx answers are final) |
+| `maxCacheEntries` | 1000 | the most answers kept; the oldest go first |
+
+- **Refreshed before they expire.** In the last fifth of its life a kept
+  answer is still returned at once and refreshed in the background (a
+  failed refresh keeps it, and is tried again 30 s later at the earliest).
+  A question with no kept answer is retried as above before it errors.
+- **Never past their life, never an error.** An expired answer is not used
+  even when rbacr can't be reached: `allows` then answers `false` and the
+  rest throw (SPEC C6: when rbacr can't answer, deny). Errors are never kept.
+- **Per user.** Answers are keyed by who the token says it is (an ID
+  token's issuer and subject, or the personal token), so one user never
+  gets another's; when another user's token shows up, everything kept is
+  dropped. Ages use a monotonic clock, so changing the device's clock
+  can't keep an answer alive.
+- **One request for many callers.** Concurrent identical questions share
+  one request.
+- **The trade-off.** A role revoked in rbacr can still be answered from
+  memory until its answer expires (at most `cacheDuration`). Where that
+  matters, pass `fresh: true` (asks rbacr now, and keeps the new answer),
+  call `clearCache()`, or pass a shorter `cacheDuration`. `redeemVoucher`
+  drops kept answers itself.
+
+`me()` has no `ttl` (a role in it may end before its answer expires): gate
+features with `allows`/`check`, which have one.
+
+## In a Flutter app
+
+```dart
+// One client per signed-in user, for the whole session (it keeps the
+// connection and the answers); never a root's token in an app.
+final rbacr = RbacrClient(
+  tokenProvider: () async => (await googleUser.authentication).idToken!,
+);
+
+// Gate what the app shows; anything that must hold is enforced on a server.
+final premium = await rbacr.allows(email: user.email, systemId: 'presence', role: 'premium');
+
+// Down for maintenance, not "no access" (kept 5 minutes).
+if ((await rbacr.systemStatus('presence')).maintenance) showMaintenance();
+
+// Right after a purchase or a grant elsewhere: ask rbacr now.
+await rbacr.allows(email: user.email, systemId: 'presence', role: 'premium', fresh: true);
+
+// On sign-out: drop what was kept, and the connection.
+rbacr.close();
+```
+
+- **Tokens.** Pass the signed-in user's ID token from `tokenProvider`,
+  freshly each time (`google_sign_in` refreshes it). An app that signs
+  users in some other way, such as Sign in with Apple, has its backend
+  issue its own short-lived ID tokens from an issuer rbacr trusts,
+  preferably limited to the app's systems (rbacr-sls README, "Apps with
+  their own ID tokens"; SPEC I7-I10). Release builds ignore an
+  `RBACR_TOKEN` define (see Settings).
+- **Cost.** With the defaults, a user's role is asked about about once an
+  hour, and a "no" once every 5 minutes, per question, however often the
+  app checks. Keep one client: a new client starts with nothing kept.
+- **Web.** The app's origin must be in rbacr's `RBACR_CORS_ORIGINS`.
 
 ## Tokens
 

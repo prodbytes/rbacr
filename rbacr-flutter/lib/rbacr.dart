@@ -4,6 +4,7 @@
 /// specification (rbacr-sls/SPEC.md, "Client integration").
 library;
 
+export 'src/cache.dart' show RbacrClock, monotonicClock;
 export 'src/client.dart';
 export 'src/errors.dart';
 export 'src/models.dart';
