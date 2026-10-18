@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
+import 'cache.dart';
 import 'errors.dart';
 import 'models.dart';
 import 'settings.dart';
@@ -33,6 +34,32 @@ typedef RbacrTokenProvider = FutureOr<String> Function();
 /// final mine = RbacrClient(tokenProvider: () async => (await googleUser.authentication).idToken!);
 /// final me = await mine.me();
 /// ```
+///
+/// **Kept answers.** [me], [check], [allows], [rolesIn], [allRoles] and
+/// [systemStatus] keep rbacr's answers in memory, per caller (the token's
+/// identity) and question, so that most checks need no request:
+/// - an answer that grants something for [cacheDuration] (default an hour),
+///   and a "yes" never past the `ttl` rbacr gives with it (SPEC C3a);
+/// - a "no", an empty role list and a system's status for
+///   [negativeCacheDuration] (default 5 minutes), so a role just granted or
+///   bought shows soon;
+/// - never an error (C6).
+///
+/// In the last fifth of its life a kept answer is still returned at once,
+/// and refreshed in the background. A question with no kept answer that
+/// fails because rbacr can't be reached, is slow, answers 5xx or 429 is
+/// asked again after each of [retryDelays] before it errors (or, for
+/// [allows], answers `false`). Expired answers are never used: rbacr not
+/// answering means "no" (C6). Ages use a monotonic clock, so changing the
+/// device's clock doesn't stretch them.
+///
+/// The trade-off: a role revoked in rbacr can still be answered from memory
+/// until its answer expires, at most [cacheDuration]. Pass `fresh: true` where
+/// that matters (right after a payment, say), call [clearCache] when the user
+/// signs out (answers are also dropped when another user's token shows up,
+/// and after [redeemVoucher]), or pass a shorter [cacheDuration]. A check in
+/// an app only decides what it shows: anything that must be enforced belongs
+/// on a server.
 class RbacrClient {
   /// [baseUrl] defaults to the `RBACR_URL` setting, else [production]. Pass
   /// a fixed [token] or a [tokenProvider], or neither to use the
@@ -46,10 +73,20 @@ class RbacrClient {
     RbacrTokenProvider? tokenProvider,
     http.Client? httpClient,
     this.timeout = const Duration(seconds: 10),
+    this.cacheDuration = const Duration(hours: 1),
+    this.negativeCacheDuration = const Duration(minutes: 5),
+    this.retryDelays = const [Duration(seconds: 1), Duration(seconds: 3)],
+    int maxCacheEntries = 1000,
+    RbacrClock? clock,
   }) : baseUrl = baseUrl ?? _settingUrl() ?? production,
        _token = tokenProvider ?? _fixed(token ?? setting(tokenSetting)),
        _http = httpClient ?? http.Client(),
-       _ownsHttp = httpClient == null {
+       _ownsHttp = httpClient == null,
+       _cache = AnswerCache(clock: clock ?? monotonicClock(), maxEntries: maxCacheEntries, retryDelays: retryDelays) {
+    if (cacheDuration.isNegative || negativeCacheDuration.isNegative || retryDelays.any((d) => d.isNegative)) {
+      throw ArgumentError('Durations must not be negative');
+    }
+    if (maxCacheEntries < 1) throw ArgumentError.value(maxCacheEntries, 'maxCacheEntries', 'must be at least 1');
     if (token != null && tokenProvider != null) {
       throw ArgumentError('Pass at most one of token and tokenProvider');
     }
@@ -77,6 +114,23 @@ class RbacrClient {
   /// Per request; a request that takes longer fails with [RbacrException].
   final Duration timeout;
 
+  /// How long an answer that grants something is kept (a "yes" no longer
+  /// than its `ttl`); [Duration.zero] keeps nothing.
+  final Duration cacheDuration;
+
+  /// How long a "no", an empty role list and a system's status are kept (at
+  /// most [cacheDuration]).
+  final Duration negativeCacheDuration;
+
+  /// The waits before asking again when rbacr can't be reached, is slow, or
+  /// answers 5xx or 429; empty: no retries.
+  final List<Duration> retryDelays;
+
+  final AnswerCache _cache;
+
+  /// Who the last cached question was asked as: another caller clears the cache.
+  String? _principal;
+
   final RbacrTokenProvider _token;
   final http.Client _http;
   final bool _ownsHttp;
@@ -89,40 +143,105 @@ class RbacrClient {
   static RbacrTokenProvider _fixed(String? token) =>
       () => token!;
 
-  /// The token owner's own roles: `GET /api/me`.
-  Future<Me> me() async => Me.fromJson(await _send('GET', '/api/me'));
+  /// The token owner's own roles: `GET /api/me`, kept [cacheDuration]. It
+  /// carries no `ttl`, so gate features with [allows], which does.
+  Future<Me> me({bool fresh = false}) =>
+      _cached('GET', '/api/me', null, Me.fromJson, (_) => cacheDuration, fresh: fresh);
 
   /// Whether [email] holds [role] in [systemId], or the global role [role]
   /// without a system (C3), with how long a "yes" holds (C3a). An unknown
   /// system or role throws a 404 [RbacrException] rather than answering no.
-  Future<RoleCheck> check({required String email, String? systemId, required String role}) async =>
-      RoleCheck.fromJson(await _send('POST', '/api/check', {'email': email, 'systemId': systemId, 'role': role}));
+  /// A "yes" is kept [cacheDuration] but never past its `ttl`; a "no",
+  /// [negativeCacheDuration].
+  Future<RoleCheck> check({required String email, String? systemId, required String role, bool fresh = false}) =>
+      _cached(
+        'POST',
+        '/api/check',
+        {'email': email, 'systemId': systemId, 'role': role},
+        RoleCheck.fromJson,
+        (c) => !c.allowed
+            ? _negative
+            : c.ttl != null && c.ttl! < cacheDuration
+            ? c.ttl!
+            : cacheDuration,
+        fresh: fresh,
+      );
 
   /// [check] that fails closed (C6): any error, or no answer, means no,
   /// including a token provider that fails and an answer of the wrong shape.
-  Future<bool> allows({required String email, String? systemId, required String role}) async {
+  /// Errors are never kept, so the next call asks rbacr again.
+  Future<bool> allows({required String email, String? systemId, required String role, bool fresh = false}) async {
     try {
-      return (await check(email: email, systemId: systemId, role: role)).allowed;
+      return (await check(email: email, systemId: systemId, role: role, fresh: fresh)).allowed;
     } catch (_) {
       return false;
     }
   }
 
-  /// [email]'s effective roles in [systemId], sorted (C4).
-  Future<List<String>> rolesIn({required String email, required String systemId}) async {
-    final json = await _send('POST', '/api/roles', {'email': email, 'systemId': systemId});
-    return List.unmodifiable((json['roles'] as List<Object?>).cast<String>());
-  }
+  /// [email]'s effective roles in [systemId], sorted (C4); kept like [check]'s
+  /// answers, without a `ttl` (an empty list as a "no").
+  Future<List<String>> rolesIn({required String email, required String systemId, bool fresh = false}) => _cached(
+    'POST',
+    '/api/roles',
+    {'email': email, 'systemId': systemId},
+    (json) => List<String>.unmodifiable((json['roles'] as List<Object?>).cast<String>()),
+    (roles) => roles.isEmpty ? _negative : cacheDuration,
+    fresh: fresh,
+  );
 
-  /// [email]'s roles in every system and its global roles (C4).
-  Future<AllRoles> allRoles({required String email}) async =>
-      AllRoles.fromJson(await _send('POST', '/api/roles', {'email': email}));
+  /// [email]'s roles in every system and its global roles (C4); kept like [rolesIn].
+  Future<AllRoles> allRoles({required String email, bool fresh = false}) => _cached(
+    'POST',
+    '/api/roles',
+    {'email': email},
+    AllRoles.fromJson,
+    (all) => all.globalRoles.isEmpty && all.roles.values.every((r) => r.isEmpty) ? _negative : cacheDuration,
+    fresh: fresh,
+  );
 
   /// [systemId]'s status (R12): name, URL and whether it is in maintenance
   /// (R11). Any token may ask, so an app can tell "down for maintenance"
   /// from a missing role. An unknown system throws a 404 [RbacrException].
-  Future<SystemStatus> systemStatus(String systemId) async =>
-      SystemStatus.fromJson(await _send('GET', '/api/systems/${Uri.encodeComponent(systemId)}/status'));
+  /// Kept [negativeCacheDuration], so maintenance shows soon.
+  Future<SystemStatus> systemStatus(String systemId, {bool fresh = false}) => _cached(
+    'GET',
+    '/api/systems/${Uri.encodeComponent(systemId)}/status',
+    null,
+    SystemStatus.fromJson,
+    (_) => _negative,
+    fresh: fresh,
+  );
+
+  /// Drops every kept answer. Call it when the user signs out.
+  void clearCache() => _cache.clear();
+
+  Duration get _negative => negativeCacheDuration < cacheDuration ? negativeCacheDuration : cacheDuration;
+
+  /// A question whose answer may be kept: asked as the current token's
+  /// owner, so answers never cross from one caller to another.
+  Future<T> _cached<T>(
+    String method,
+    String path,
+    Map<String, Object?>? body,
+    T Function(Map<String, Object?>) parse,
+    Duration Function(T) lifetimeOf, {
+    bool fresh = false,
+  }) async {
+    // The token read to key the answer is used for the first request; retries
+    // and background refreshes ask for a current one (ID tokens expire).
+    String? token = await _currentToken();
+    Future<T> load() async {
+      final first = token;
+      token = null;
+      return parse(await _send(method, path, body, first));
+    }
+
+    if (cacheDuration == Duration.zero) return _cache.withRetries(load);
+    final principal = AnswerCache.principalOf(token!);
+    if (_principal != null && principal != _principal) _cache.clear();
+    _principal = principal;
+    return _cache.get(AnswerCache.key(principal, method, path, body), load, lifetimeOf, fresh: fresh);
+  }
 
   /// Every system's status, sorted by id: `GET /api/systems`. Roots only;
   /// anyone else's token gets an empty list (P1).
@@ -136,13 +255,18 @@ class RbacrClient {
   /// Redeems a voucher for the token's owner and returns the grant of its
   /// first role (V4); [redeemVoucherGrants] returns them all. A voucher that
   /// needs payment throws [RbacrPaymentRequired] (V4a).
-  Future<Grant> redeemVoucher(String code) async =>
-      Grant.fromJson(await _send('POST', '/api/vouchers/redeem', {'code': code}));
+  /// The user's roles change, so kept answers are dropped.
+  Future<Grant> redeemVoucher(String code) async {
+    final json = await _send('POST', '/api/vouchers/redeem', {'code': code});
+    _cache.clear();
+    return Grant.fromJson(json);
+  }
 
   /// Redeems a voucher for the token's owner and returns a grant for each of
   /// its roles (V4).
   Future<List<Grant>> redeemVoucherGrants(String code) async {
     final json = await _send('POST', '/api/vouchers/redeem', {'code': code});
+    _cache.clear();
     final grants = (json['grants'] as List<Object?>?) ?? [json];
     return List.unmodifiable(grants.map((g) => Grant.fromJson(g as Map<String, Object?>)));
   }
@@ -225,19 +349,23 @@ class RbacrClient {
   static String _vouchersPath(String? systemId) =>
       systemId == null ? '/api/vouchers' : '/api/systems/${Uri.encodeComponent(systemId)}/vouchers';
 
-  /// Closes the HTTP client, unless it was passed in.
+  /// Closes the HTTP client, unless it was passed in, and drops kept answers.
   void close() {
+    _cache.clear();
     if (_ownsHttp) _http.close();
   }
 
-  Future<Map<String, Object?>> _send(String method, String path, [Map<String, Object?>? body]) async {
-    final String token;
+  Future<String> _currentToken() async {
     try {
-      token = await Future.value(_token()).timeout(timeout);
+      return await Future.value(_token()).timeout(timeout);
     } catch (e) {
       // Never the token itself: the provider's failure, e.g. no signed-in user.
       throw RbacrException('Could not get a token for rbacr', cause: e);
     }
+  }
+
+  Future<Map<String, Object?>> _send(String method, String path, [Map<String, Object?>? body, String? token]) async {
+    token ??= await _currentToken();
     // rbacr's API never redirects; not following one keeps the token from going elsewhere.
     final request = http.Request(method, baseUrl.resolve(path))
       ..followRedirects = false
@@ -255,6 +383,9 @@ class RbacrClient {
       throw RbacrException('rbacr did not answer within $timeout', cause: e);
     } on http.ClientException catch (e) {
       throw RbacrException('Could not reach rbacr: ${e.message}', cause: e);
+    } on Exception catch (e) {
+      // Platform clients (TLS handshakes, sockets) may throw their own types.
+      throw RbacrException('Could not reach rbacr', cause: e);
     }
     final Object? json;
     try {

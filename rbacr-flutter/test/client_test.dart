@@ -11,6 +11,7 @@ import 'package:test/test.dart';
 RbacrClient fake(FutureOr<http.Response> Function(http.Request) handler, {List<http.Request>? seen}) => RbacrClient(
   baseUrl: Uri.parse('https://rbacr.test'),
   token: 'rbacr_test',
+  retryDelays: const [],
   httpClient: MockClient((request) async {
     seen?.add(request);
     return handler(request);
@@ -561,6 +562,7 @@ void main() {
         baseUrl: Uri.parse('https://rbacr.test'),
         token: 't',
         timeout: const Duration(milliseconds: 50),
+        retryDelays: const [],
         httpClient: MockClient((_) => Future.delayed(const Duration(seconds: 1), () => reply({}))),
       );
       await expectLater(slow.me(), throwsA(isA<RbacrException>()));

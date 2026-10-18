@@ -114,12 +114,14 @@ void main() {
 
     expect((await admin('PATCH', '/api/systems/$system', {'maintenance': true}, rootToken)).statusCode, 200);
     try {
-      expect((await me.systemStatus(system)).maintenance, isTrue);
-      expect(await root.allows(email: rootEmail, systemId: system, role: 'free'), isFalse);
+      // A kept status lasts a few minutes; right after a change, ask with fresh.
+      expect((await me.systemStatus(system)).maintenance, isFalse);
+      expect((await me.systemStatus(system, fresh: true)).maintenance, isTrue);
+      expect(await root.allows(email: rootEmail, systemId: system, role: 'free', fresh: true), isFalse);
     } finally {
       await admin('PATCH', '/api/systems/$system', {'maintenance': false}, rootToken);
     }
-    expect((await me.systemStatus(system)).maintenance, isFalse);
+    expect((await me.systemStatus(system, fresh: true)).maintenance, isFalse);
   });
 
   test('keeps people out of other people roles, and reports unknown roles', () async {

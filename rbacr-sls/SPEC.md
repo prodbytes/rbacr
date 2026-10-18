@@ -640,9 +640,16 @@ How applications use rbacr. The README has a walkthrough with examples.
   returned lower-cased.
 - **C6** A change to grants, implications or vouchers shows in these
   answers within about a second (D3). A revoked or expired token is refused
-  at once (T3). Clients that cache answers should cache them briefly (a "yes"
-  never beyond its `ttl`, C3a) and never cache errors, and should deny
-  access when rbacr can't answer.
+  at once (T3). Clients that cache answers should never keep a "yes"
+  beyond its `ttl` (C3a), never cache errors, and should deny access when
+  rbacr can't answer. How long they keep answers trades freshness for
+  requests: rbacr-lib (servers) keeps them a minute by default;
+  rbacr-flutter (apps) keeps an answer that grants something up to an hour
+  and a "no" 5 minutes by default, refreshes answers in the background
+  before they expire, and retries unreachable, 5xx and 429 failures before
+  erroring. So a revoked role can still show in an app for up to that
+  hour, unless it asks again (`fresh`); apps only decide what they show,
+  and anything that must hold is enforced on a server.
 - **C7** rbacr's client libraries take their base URL from `RBACR_URL`
   (default `https://rbacr.nu01.com`) and their token from `RBACR_TOKEN`
   when the caller passes none. The local dev server (T7) takes the same
