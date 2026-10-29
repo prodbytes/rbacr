@@ -810,13 +810,14 @@ to `/`. The pages need JavaScript.
   `X-Frame-Options: DENY`, no site can frame rbacr. A page rendered for
   someone signed in is `Cache-Control: private, no-store`, so no cache
   keeps their data after they sign out.
-- **H6 Rate limits at the edge.** In AWS, a WAF web ACL on the CloudFront
-  distribution answers 429 (`{ "error": … }`) to a client IP that, within
-  5 minutes, sends more than 60 redeem requests (`/vpi/me/redeem`,
-  `/api/vouchers/redeem`), 60 requests under `/login`, 3000 under `/api/`,
-  or 10000 in all. AWS's known-bad-inputs rules block, and its common rule
-  set only counts for now. This adds to V10, which limits failed
-  redemptions per identity.
+- **H6 Rate limits at the edge.** In AWS, a WAF web ACL on the production
+  CloudFront distribution answers 429 (`{ "error": … }`) to a client IP
+  that, within 5 minutes, sends more than 60 guesses (redeem requests,
+  `/vpi/me/redeem` and `/api/vouchers/redeem`, and requests under `/login`,
+  together) or 3000 requests under `/api/`. AWS's known-bad-inputs rules
+  block. This adds to V10, which limits failed redemptions per identity.
+  The release candidate has no web ACL (each is a fixed monthly fee plus
+  one per rule).
 
 ## Configuration
 
