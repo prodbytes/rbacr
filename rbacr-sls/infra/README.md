@@ -8,7 +8,7 @@ rbacr's AWS infrastructure, as CloudFormation templates. Everything lives in
 | [github-deploy.yaml](github-deploy.yaml) | `rbacr-github-deploy` | The `rbacr-github-deploy` role (`*GA` tags), the `rbacr-github-deploy-rc` role (`*RC*` tags and manual runs from `main`), and the `rbacr-lambda-boundary` permissions boundary | An administrator, once |
 | [artifacts.yaml](artifacts.yaml) | `rbacr-artifacts`, `rbacr-rc-artifacts` | A private bucket for the Lambda zips; old zips expire after 90 days | [scripts/deploy.sh](../scripts/deploy.sh) |
 | [tables.yaml](tables.yaml) | `rbacr-tables`, `rbacr-rc-tables` | The DynamoDB tables (`rbacr` and `rbacr-sessions`, `rbacr-rc` and `rbacr-rc-sessions`): on demand, point-in-time recovery, deletion protection, kept if the stack is deleted | [scripts/deploy.sh](../scripts/deploy.sh) |
-| [app.yaml](app.yaml) | `rbacr`, `rbacr-rc` | The ACM certificate (validated in the `nu01.com` zone), the Lambda with its function URL and log group, the CloudFront distribution with its WAF web ACL, and the function alarms with their e-mail topic. The origin secret is an SSM parameter (`/rbacr/<stage>/origin-secret`), outside the stack | [scripts/deploy.sh](../scripts/deploy.sh) |
+| [app.yaml](app.yaml) | `rbacr`, `rbacr-rc` | The ACM certificate (validated in the `nu01.com` zone), the Lambda with its function URL and log group, the CloudFront distribution with its WAF web ACL (production only), and the function alarms with their e-mail topic. The origin secret is an SSM parameter (`/rbacr/<stage>/origin-secret`), outside the stack | [scripts/deploy.sh](../scripts/deploy.sh) |
 
 **DNS lives in the nu01 repository.** The `nu01.com` zone (stack
 `nu01-route53-zone`) holds every rbacr record, managed by the `nu01-dns`
@@ -26,7 +26,7 @@ The former `rbacr.nu01.com` subzone (stack `rbacr-zone`, template
 
 ```
 browser ──https──▶ CloudFront (rbacr.nu01.com, ACM certificate)
-                     │ WAF: rate limits per IP (429), AWS known-bad-inputs rules
+                     │ WAF (production only): rate limits per IP (429), AWS known-bad-inputs rules
                      │ adds x-rbacr-origin-secret (from SSM Parameter Store)
                      │ and x-rbacr-host: rbacr.nu01.com
                      ▼

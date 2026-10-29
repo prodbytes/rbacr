@@ -15,6 +15,14 @@ Description: >
   certificates live there) with scripts/deploy.sh.
 
 Parameters:
+  Waf:
+    Type: String
+    Default: enabled
+    AllowedValues: [enabled, disabled]
+    Description: >
+      Whether the distribution gets the WebAcl below (rate limits and AWS's
+      Known Bad Inputs). Each web ACL is a fixed monthly fee plus one per
+      rule, so the release candidate runs without one.
   DomainName:
     Type: String
     Default: rbacr.nu01.com
@@ -118,6 +126,9 @@ Parameters:
     MinValue: 1
     MaxValue: 99999
     Description: Days a session record is kept after the session expires, then purged by TTL (SPEC S3)
+
+Conditions:
+  WafEnabled: !Equals [!Ref Waf, enabled]
 
 Resources:
   Certificate:
@@ -266,7 +277,7 @@ Resources:
         HttpVersion: http2and3
         IPV6Enabled: true
         PriceClass: PriceClass_100
-        WebACLId: !GetAtt WebAcl.Arn
+        WebACLId: !If [WafEnabled, !GetAtt WebAcl.Arn, !Ref AWS::NoValue]
         Aliases:
           - !Ref DomainName
         ViewerCertificate:
@@ -312,8 +323,13 @@ Resources:
   # Rate limits per client IP in front of everything (blocked requests get
   # 429), plus AWS's known-bad-inputs rules. The common rule set only
   # counts for now: watch its metrics before letting it block.
+  # Three rules (each a fixed monthly fee): one rate limit for the two
+  # guessable endpoints, one for the API, and AWS's Known Bad Inputs. The
+  # Common Rule Set was only counting, and a global rate limit added nothing
+  # over CloudFront and the API limit.
   WebAcl:
     Type: AWS::WAFv2::WebACL
+    Condition: WafEnabled
     Properties:
       Name: !Sub ${AWS::StackName}-waf
       Description: !Sub rbacr ${DomainName} rate limits and managed rules
@@ -329,8 +345,8 @@ Resources:
           Content: '{"error":"Too many requests; slow down and try again shortly"}'
       Rules:
         # Guessing voucher codes (SPEC V10 limits failures per identity; this
-        # limits attempts per IP, signed in or not).
-        - Name: redeem-rate
+        # limits attempts per IP, signed in or not) and login attempts.
+        - Name: guess-rate
           Priority: 0
           Action:
             Block:
@@ -353,33 +369,18 @@ Resources:
                         PositionalConstraint: STARTS_WITH
                         SearchString: /api/vouchers/redeem
                         TextTransformations: [{ Priority: 0, Type: LOWERCASE }]
+                    - ByteMatchStatement:
+                        FieldToMatch: { UriPath: {} }
+                        PositionalConstraint: STARTS_WITH
+                        SearchString: /login
+                        TextTransformations: [{ Priority: 0, Type: LOWERCASE }]
           VisibilityConfig:
             SampledRequestsEnabled: true
             CloudWatchMetricsEnabled: true
-            MetricName: !Sub ${AWS::StackName}-redeem-rate
-        - Name: login-rate
-          Priority: 1
-          Action:
-            Block:
-              CustomResponse: { ResponseCode: 429, CustomResponseBodyKey: slow-down }
-          Statement:
-            RateBasedStatement:
-              Limit: 60
-              EvaluationWindowSec: 300
-              AggregateKeyType: IP
-              ScopeDownStatement:
-                ByteMatchStatement:
-                  FieldToMatch: { UriPath: {} }
-                  PositionalConstraint: STARTS_WITH
-                  SearchString: /login
-                  TextTransformations: [{ Priority: 0, Type: LOWERCASE }]
-          VisibilityConfig:
-            SampledRequestsEnabled: true
-            CloudWatchMetricsEnabled: true
-            MetricName: !Sub ${AWS::StackName}-login-rate
+            MetricName: !Sub ${AWS::StackName}-guess-rate
         # Unknown tokens cost a database call each (SPEC T3).
         - Name: api-rate
-          Priority: 2
+          Priority: 1
           Action:
             Block:
               CustomResponse: { ResponseCode: 429, CustomResponseBodyKey: slow-down }
@@ -398,22 +399,8 @@ Resources:
             SampledRequestsEnabled: true
             CloudWatchMetricsEnabled: true
             MetricName: !Sub ${AWS::StackName}-api-rate
-        - Name: all-rate
-          Priority: 3
-          Action:
-            Block:
-              CustomResponse: { ResponseCode: 429, CustomResponseBodyKey: slow-down }
-          Statement:
-            RateBasedStatement:
-              Limit: 10000
-              EvaluationWindowSec: 300
-              AggregateKeyType: IP
-          VisibilityConfig:
-            SampledRequestsEnabled: true
-            CloudWatchMetricsEnabled: true
-            MetricName: !Sub ${AWS::StackName}-all-rate
         - Name: known-bad-inputs
-          Priority: 4
+          Priority: 2
           OverrideAction: { None: {} }
           Statement:
             ManagedRuleGroupStatement:
@@ -423,17 +410,6 @@ Resources:
             SampledRequestsEnabled: true
             CloudWatchMetricsEnabled: true
             MetricName: !Sub ${AWS::StackName}-known-bad-inputs
-        - Name: common-count-only
-          Priority: 5
-          OverrideAction: { Count: {} }
-          Statement:
-            ManagedRuleGroupStatement:
-              VendorName: AWS
-              Name: AWSManagedRulesCommonRuleSet
-          VisibilityConfig:
-            SampledRequestsEnabled: true
-            CloudWatchMetricsEnabled: true
-            MetricName: !Sub ${AWS::StackName}-common
 
   # No DNS records here: the nu01-dns stack (nu01 repository) owns the
   # A/AAAA aliases for rbacr.nu01.com and rc.rbacr.nu01.com in nu01.com.
