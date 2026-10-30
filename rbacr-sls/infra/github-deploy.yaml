@@ -233,25 +233,24 @@ Resources:
                   - cloudfront:CreateInvalidation
                   - cloudfront:GetInvalidation
                 Resource: !Sub arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${DistributionId}
-              # Its WAF web ACL (infra/app.yaml), which CloudFront needs in us-east-1.
+              # Its viewer-request CloudFront Function (infra/app.yaml).
               - Effect: Allow
                 Action:
-                  - wafv2:CreateWebACL
-                  - wafv2:UpdateWebACL
-                  - wafv2:DeleteWebACL
+                  - cloudfront:CreateFunction
+                  - cloudfront:DescribeFunction
+                  - cloudfront:GetFunction
+                  - cloudfront:UpdateFunction
+                  - cloudfront:PublishFunction
+                  - cloudfront:DeleteFunction
+                Resource: !Sub arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:function/rbacr-viewer-ip
+              # The web ACL it had, only to delete it (the release that drops it);
+              # remove once it's gone.
+              - Effect: Allow
+                Action:
                   - wafv2:GetWebACL
-                  - wafv2:TagResource
-                  - wafv2:UntagResource
+                  - wafv2:DeleteWebACL
                   - wafv2:ListTagsForResource
-                Resource:
-                  - !Sub arn:${AWS::Partition}:wafv2:us-east-1:${AWS::AccountId}:global/webacl/rbacr-waf/*
-                  - !Sub arn:${AWS::Partition}:wafv2:us-east-1:*:global/managedruleset/*/*
-              - Effect: Allow
-                Action:
-                  - wafv2:CheckCapacity
-                  - wafv2:ListWebACLs
-                  - wafv2:DescribeManagedRuleGroup
-                Resource: '*'
+                Resource: !Sub arn:${AWS::Partition}:wafv2:us-east-1:${AWS::AccountId}:global/webacl/rbacr-waf/*
               # The certificate and DNS records
               - Effect: Allow
                 Action:
@@ -499,25 +498,16 @@ Resources:
                   - cloudfront:CreateInvalidation
                   - cloudfront:GetInvalidation
                 Resource: !Sub arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${RcDistributionId}
-              # Its WAF web ACL (infra/app.yaml), which CloudFront needs in us-east-1.
+              # Its viewer-request CloudFront Function (infra/app.yaml).
               - Effect: Allow
                 Action:
-                  - wafv2:CreateWebACL
-                  - wafv2:UpdateWebACL
-                  - wafv2:DeleteWebACL
-                  - wafv2:GetWebACL
-                  - wafv2:TagResource
-                  - wafv2:UntagResource
-                  - wafv2:ListTagsForResource
-                Resource:
-                  - !Sub arn:${AWS::Partition}:wafv2:us-east-1:${AWS::AccountId}:global/webacl/rbacr-rc-waf/*
-                  - !Sub arn:${AWS::Partition}:wafv2:us-east-1:*:global/managedruleset/*/*
-              - Effect: Allow
-                Action:
-                  - wafv2:CheckCapacity
-                  - wafv2:ListWebACLs
-                  - wafv2:DescribeManagedRuleGroup
-                Resource: '*'
+                  - cloudfront:CreateFunction
+                  - cloudfront:DescribeFunction
+                  - cloudfront:GetFunction
+                  - cloudfront:UpdateFunction
+                  - cloudfront:PublishFunction
+                  - cloudfront:DeleteFunction
+                Resource: !Sub arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:function/rbacr-rc-viewer-ip
               # The certificate and DNS records
               - Effect: Allow
                 Action:

@@ -43,7 +43,7 @@ app on AWS Lambda. Run every command below from this folder
   record with who did it and when (e.g. `revokedBy`, `revokedAt`), and
   rbacr hides it from then on, so every change can be audited. Only
   sign-in sessions are purged, a year (configurable) after they expire.
-- **Vouchers** are codes like `2026Q4-OTTER-FALCON-LEMUR` that grant one or
+- **Vouchers** are codes like `2026Q4-OTTER-FALCON-LEMUR-HERON-MOOSE` that grant one or
   more roles when redeemed, either in one system or **globally**. A global
   voucher grants roles you pick from any systems (say `premium` in
   `presence` and in `tabscan`), each in its own system. The voucher

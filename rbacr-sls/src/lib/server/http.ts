@@ -5,6 +5,23 @@ import type { ApiToken } from './tokens';
 
 export type Ctx = Services & { actor: Actor };
 
+/** Set by the distribution's viewer-request function (infra/app.yaml) to the viewer's IP, over anything the client sent. */
+export const VIEWER_IP_HEADER = 'x-rbacr-viewer-ip';
+
+/**
+ * The caller's IP address, for limits per network (V10). Behind CloudFront
+ * (RBACR_ORIGIN_SECRET set, so every request came through it) the header
+ * its function sets; elsewhere (local) the socket's. Null when unknown.
+ */
+export function clientAddress(event: RequestEvent, behindCloudFront: boolean): string | null {
+	if (behindCloudFront) return event.request.headers.get(VIEWER_IP_HEADER);
+	try {
+		return event.getClientAddress();
+	} catch {
+		return null;
+	}
+}
+
 async function run(ctx: Ctx, fn: (ctx: Ctx) => Promise<unknown>): Promise<Response> {
 	try {
 		const result = await fn(ctx);
