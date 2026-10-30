@@ -1,7 +1,7 @@
 /**
  * Voucher codes and their default terms (SPEC V2), shared by the pages and
  * the server: a code defaults to the current quarter plus random animal
- * names, e.g. 2026Q4-OTTER-FALCON-LEMUR, and a voucher to being valid
+ * names, e.g. 2026Q4-OTTER-FALCON-LEMUR-HERON-MOOSE, and a voucher to being valid
  * through that quarter, from two weeks before it starts to two weeks after
  * it ends.
  */
@@ -42,8 +42,11 @@ export const ANIMALS = [
 	'WHALE', 'WOLF', 'WOMBAT', 'WOODCOCK', 'WREN', 'YAK', 'ZEBRA', 'ZEBU'
 ];
 
-/** Animals in a default code: 3 x 8 = 24 random bits. */
-const ANIMALS_PER_CODE = 3;
+/**
+ * Animals in a default code: 5 x 8 = 40 random bits, so guessing one at the
+ * redeem limits (V10) would take millennia.
+ */
+const ANIMALS_PER_CODE = 5;
 
 export interface Quarter {
 	/** e.g. 2026Q4 */
@@ -75,15 +78,54 @@ export function defaultValidity(at: Date): { start: Date; end: Date } {
 	return { start: new Date(start.getTime() - margin), end: new Date(end.getTime() + margin) };
 }
 
-/** A default code: the quarter of `at` and random animals, e.g. 2026Q4-OTTER-FALCON-LEMUR. */
+/** A default code: the quarter of `at` and random animals, e.g. 2026Q4-OTTER-FALCON-LEMUR-HERON-MOOSE. */
 export function suggestVoucherCode(at: Date = new Date()): string {
 	const picks = Array.from(crypto.getRandomValues(new Uint8Array(ANIMALS_PER_CODE)), (b) => ANIMALS[b]);
 	return [quarterOf(at).label, ...picks].join('-');
 }
 
-/** Shortest and longest codes, counting letters and digits only. */
-export const MIN_CODE_LENGTH = 6;
-export const MAX_CODE_LENGTH = 40;
+/**
+ * Shortest and longest codes, counting letters and digits only. The longest
+ * default code (a quarter and five 8-letter animals) has 46.
+ */
+export const MIN_CODE_LENGTH = 12;
+export const MAX_CODE_LENGTH = 48;
+/** Fewest different letters and digits a code may have. */
+export const MIN_CODE_DISTINCT = 6;
+
+/**
+ * Why a code chosen by hand is too easy to guess, or null when it isn't
+ * (V2): too short or long, too few different characters, one block
+ * repeated (ABCABCABCABC), or a run (ABCDEFGHIJKL, 987654321098). These
+ * only rule out the worst; a code made of words people would try
+ * (SUMMER-SALE-2026) passes, so the generated codes are the safe choice.
+ */
+export function weakCodeReason(raw: string): string | null {
+	const code = compactVoucherCode(raw);
+	if (code.length < MIN_CODE_LENGTH || code.length > MAX_CODE_LENGTH) {
+		return `A code needs ${MIN_CODE_LENGTH} to ${MAX_CODE_LENGTH} letters and digits`;
+	}
+	if (new Set(code).size < MIN_CODE_DISTINCT) {
+		return `A code needs at least ${MIN_CODE_DISTINCT} different letters and digits`;
+	}
+	for (let size = 1; size <= code.length / 2; size++) {
+		if (code.length % size === 0 && code.slice(0, size).repeat(code.length / size) === code) {
+			return 'A code can\'t be one block repeated';
+		}
+	}
+	const steps = new Set(Array.from(code.slice(1), (c, i) => c.charCodeAt(0) - code.charCodeAt(i)));
+	if ((steps.size === 1 && [1, -1].includes([...steps][0])) || isDigitRun(code)) {
+		return 'A code can\'t be a run of letters or digits';
+	}
+	return null;
+}
+
+/** Digits counting up or down, wrapping past 9 or 0 (1234567890, 9876543210). */
+function isDigitRun(code: string): boolean {
+	if (!/^[0-9]+$/.test(code)) return false;
+	const d = Array.from(code, Number);
+	return [1, 9].some((step) => d.every((x, i) => i === 0 || x === (d[i - 1] + step) % 10));
+}
 
 /**
  * A code as shown and stored: upper case, letters and digits, any run of

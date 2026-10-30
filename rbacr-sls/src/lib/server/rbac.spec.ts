@@ -2,8 +2,8 @@ import { PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { Table } from './dynamo';
 import { Allowlist } from './identity';
-import { MAX_REDEEM_FAILURES, REDEEM_FAILURE_WINDOW_MS, Rbac, RbacError, appMayCall, voucherStatus, type Actor } from './rbac';
-import { ANIMALS, defaultValidity, quarterOf } from '../vouchers';
+import { MAX_REDEEM_FAILURES, MAX_REDEEM_FAILURES_PER_NETWORK, REDEEM_FAILURE_WINDOW_MS, Rbac, RbacError, appMayCall, redeemNetwork, voucherStatus, type Actor } from './rbac';
+import { ANIMALS, defaultValidity, quarterOf, weakCodeReason } from '../vouchers';
 import { createTestTable, scanAll } from './testing/dynamodb';
 
 const ROOT = 'root@corp.com';
@@ -242,16 +242,16 @@ describe('role implications are registered data', () => {
 
 describe('redeem events', () => {
 	it('record every redemption with all its details (V7)', async () => {
-		await rbac.createVoucher(root, { systemId: 'billing', roles: ['viewer', 'editor'], code: 'EVENT-TEST' });
+		await rbac.createVoucher(root, { systemId: 'billing', roles: ['viewer', 'editor'], code: 'EVENT-TEST-2026' });
 		// editor already held forever: kept; viewer held until a date: replaced.
 		await rbac.grant(root, 'billing', 'editor', USER);
 		await rbac.grant(root, 'billing', 'viewer', USER, { endsAt: new Date('2026-06-01T00:00:00Z') });
-		await rbac.redeemVoucher(USER, 'event test', 'page');
-		await rbac.redeemVoucher(OTHER, 'EVENT-TEST');
+		await rbac.redeemVoucher(USER, 'event test 2026', 'page');
+		await rbac.redeemVoucher(OTHER, 'EVENT-TEST-2026');
 
-		const [other, mine] = await rbac.listRedemptions(root, 'event-test');
+		const [other, mine] = await rbac.listRedemptions(root, 'event-test-2026');
 		expect(mine).toMatchObject({
-			code: 'EVENT-TEST',
+			code: 'EVENT-TEST-2026',
 			systemId: 'billing',
 			roles: ['editor', 'viewer'],
 			discountPercent: 100,
@@ -436,11 +436,11 @@ describe('system cards', () => {
 describe('own redemptions', () => {
 	it("give the redeemer their RedeemEvent and the voucher's system (V8)", async () => {
 		await rbac.configureSystem(root, 'billing', { url: 'https://billing.example.com', description: 'Invoices' });
-		await rbac.createVoucher(root, { systemId: 'billing', roles: ['viewer', 'editor'], code: 'OWN-SYSTEM' });
-		await expectError(rbac.ownRedemption(USER, 'OWN-SYSTEM'), 404);
-		await rbac.redeemVoucher(USER, 'own system', 'page');
-		const { redemption, systems } = await rbac.ownRedemption(USER, 'own-system');
-		expect(redemption).toMatchObject({ code: 'OWN-SYSTEM', email: USER, roles: ['editor', 'viewer'], via: 'page' });
+		await rbac.createVoucher(root, { systemId: 'billing', roles: ['viewer', 'editor'], code: 'OWN-SYSTEM-2026' });
+		await expectError(rbac.ownRedemption(USER, 'OWN-SYSTEM-2026'), 404);
+		await rbac.redeemVoucher(USER, 'own system 2026', 'page');
+		const { redemption, systems } = await rbac.ownRedemption(USER, 'own-system-2026');
+		expect(redemption).toMatchObject({ code: 'OWN-SYSTEM-2026', email: USER, roles: ['editor', 'viewer'], via: 'page' });
 		expect(systems).toEqual([
 			{
 				id: 'billing',
@@ -453,16 +453,16 @@ describe('own redemptions', () => {
 			}
 		]);
 		// Only one's own: someone else, or an unknown code, gets 404.
-		await expectError(rbac.ownRedemption(OTHER, 'OWN-SYSTEM'), 404);
+		await expectError(rbac.ownRedemption(OTHER, 'OWN-SYSTEM-2026'), 404);
 		await expectError(rbac.ownRedemption(USER, 'NO-SUCH-CODE'), 404);
 	});
 
 	it('list, for a global voucher, every system that has one of its roles (V8)', async () => {
 		await rbac.addRole(root, 'crm', 'viewer');
 		await rbac.createSystem(root, { id: 'wiki', roles: ['editor'] });
-		await rbac.createVoucher(root, { systemId: null, roles: ['viewer', 'editor'], code: 'OWN-GLOBAL' });
-		await rbac.redeemVoucher(USER, 'OWN-GLOBAL');
-		const { systems } = await rbac.ownRedemption(USER, 'OWN-GLOBAL');
+		await rbac.createVoucher(root, { systemId: null, roles: ['viewer', 'editor'], code: 'OWN-GLOBAL-2026' });
+		await rbac.redeemVoucher(USER, 'OWN-GLOBAL-2026');
+		const { systems } = await rbac.ownRedemption(USER, 'OWN-GLOBAL-2026');
 		expect(systems.map((s) => [s.id, s.roles])).toEqual([
 			['billing', ['editor', 'viewer']],
 			['crm', ['viewer']],
@@ -472,9 +472,11 @@ describe('own redemptions', () => {
 });
 
 describe('vouchers', () => {
-	it('get a default code: the quarter and three animals (V2)', async () => {
+	it('get a default code: the quarter and five animals (V2)', async () => {
 		const v = await rbac.createVoucher(root, { systemId: 'billing', roles: ['viewer'] });
-		expect(v.code).toMatch(/^2026Q1(-[A-Z]{2,8}){3}$/);
+		expect(v.code).toMatch(/^2026Q1(-[A-Z]{2,8}){5}$/);
+		// It passes the custom code checks too: the page sends its suggestion as a custom code.
+		expect(weakCodeReason(v.code)).toBeNull();
 		expect(v.code.split('-').slice(1).every((a) => ANIMALS.includes(a))).toBe(true);
 		expect(quarterOf(new Date('2026-11-30T23:59:59Z'))).toEqual({
 			label: '2026Q4',
@@ -493,8 +495,20 @@ describe('vouchers', () => {
 		const [grant] = await rbac.redeemVoucher(USER, 'springsale2026');
 		expect(grant.voucherCode).toBe('SPRING-SALE-2026');
 		await expectError(rbac.createVoucher(root, { systemId: null, roles: ['viewer'], code: 'Spring-Sale 2026' }), 409, /already exists/);
-		await expectError(rbac.createVoucher(root, { systemId: null, roles: ['viewer'], code: 'a-b-c' }), 400, /6 to 40/);
+		await expectError(rbac.createVoucher(root, { systemId: null, roles: ['viewer'], code: 'a-b-c' }), 400, /12 to 48/);
 		expect((await rbac.disableVoucher(root, 'spring sale 2026')).disabledBy).toBe(ROOT);
+	});
+
+	it('refuse custom codes that are easy to guess (V2)', async () => {
+		const create = (code: string) => rbac.createVoucher(root, { systemId: 'billing', roles: ['viewer'], code });
+		await expectError(create('SALE-2026'), 400, /12 to 48/);
+		await expectError(create('A'.repeat(49)), 400, /12 to 48/);
+		await expectError(create('AAAA-BBBB-AAAA'), 400, /6 different/);
+		await expectError(create('ABC123-ABC123'), 400, /block repeated/);
+		await expectError(create('ABCDEFGHIJKL'), 400, /run/);
+		await expectError(create('lkjihgfedcba'), 400, /run/);
+		await expectError(create('7890-1234-5678'), 400, /run/);
+		expect((await create('summer-sale-2026')).code).toBe('SUMMER-SALE-2026');
 	});
 
 	it('grant several roles at once, all or nothing (V1, V4)', async () => {
@@ -1357,6 +1371,43 @@ describe('failed redemptions are throttled per identity (V10)', () => {
 		// The next window starts afresh.
 		clock = new Date(clock.getTime() + REDEEM_FAILURE_WINDOW_MS);
 		expect((await rbac.redeemVoucher(USER, v.code)).map((g) => g.role)).toEqual(['viewer']);
+	});
+});
+
+describe('failed redemptions are throttled per network too (V10)', () => {
+	it(`lets ${MAX_REDEEM_FAILURES_PER_NETWORK} failures from one network through per window, whatever identities make them`, async () => {
+		const v = await rbac.createVoucher(root, { systemId: 'billing', roles: ['viewer'] });
+		clock = new Date('2026-01-10T12:00:00Z');
+		const ip = '203.0.113.7';
+		for (let i = 0; i < MAX_REDEEM_FAILURES_PER_NETWORK; i++) {
+			await expectError(rbac.redeemVoucher(`guesser${i}@partner.com`, `NO-SUCH-CODE-${i}`, 'api', undefined, ip), 404);
+		}
+		// A fresh identity on that network waits; elsewhere, or without an address, it doesn't.
+		await expectError(rbac.redeemVoucher(USER, v.code, 'api', undefined, ip), 429, /try again/);
+		await rbac.redeemVoucher(USER, v.code, 'api', undefined, '198.51.100.1');
+		await rbac.redeemVoucher(OTHER, v.code);
+		clock = new Date(clock.getTime() + REDEEM_FAILURE_WINDOW_MS);
+		await expectError(rbac.redeemVoucher(ROOT, 'NO-SUCH-CODE', 'api', undefined, ip), 404);
+	});
+
+	it('counts an IPv6 address by its /64', async () => {
+		clock = new Date('2026-01-10T12:00:00Z');
+		for (let i = 0; i < MAX_REDEEM_FAILURES_PER_NETWORK; i++) {
+			await expectError(rbac.redeemVoucher(`guesser${i}@partner.com`, `NO-SUCH-CODE-${i}`, 'api', undefined, `2001:db8:1:2::${i.toString(16)}`), 404);
+		}
+		await expectError(rbac.redeemVoucher(USER, 'NO-SUCH-CODE', 'api', undefined, '2001:db8:1:2:ffff::1'), 429);
+		await expectError(rbac.redeemVoucher(USER, 'NO-SUCH-CODE', 'api', undefined, '2001:db8:1:3::1'), 404);
+	});
+
+	it('normalizes addresses', () => {
+		expect(redeemNetwork('203.0.113.7')).toBe('203.0.113.7');
+		expect(redeemNetwork('::ffff:203.0.113.7')).toBe('203.0.113.7');
+		expect(redeemNetwork('2001:DB8:0001:0002:aaaa:bbbb:cccc:dddd')).toBe('2001:db8:1:2::/64');
+		expect(redeemNetwork('2001:db8::1')).toBe('2001:db8:0:0::/64');
+		expect(redeemNetwork('[2001:db8::1]:443')).toBe('2001:db8:0:0::/64');
+		expect(redeemNetwork('999.1.1.1')).toBeNull();
+		expect(redeemNetwork('not an address')).toBeNull();
+		expect(redeemNetwork(null)).toBeNull();
 	});
 });
 

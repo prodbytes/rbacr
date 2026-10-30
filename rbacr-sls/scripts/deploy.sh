@@ -60,9 +60,8 @@ if [[ "$AWS_REGION" != us-east-1 ]]; then
 fi
 STAGE="${STAGE:-prod}"
 case "$STAGE" in
-  prod) STACK=rbacr; DOMAIN=rbacr.nu01.com; TENANCY=GA; WAF=enabled ;;
-  # No web ACL (a fixed monthly fee per ACL and rule) for the release candidate.
-  rc) STACK=rbacr-rc; DOMAIN=rc.rbacr.nu01.com; TENANCY=RC; WAF=disabled ;;
+  prod) STACK=rbacr; DOMAIN=rbacr.nu01.com; TENANCY=GA ;;
+  rc) STACK=rbacr-rc; DOMAIN=rc.rbacr.nu01.com; TENANCY=RC ;;
   *) echo "error: STAGE must be prod or rc (got '$STAGE')" >&2; exit 2 ;;
 esac
 ARTIFACTS_STACK=$STACK-artifacts
@@ -243,7 +242,7 @@ aws cloudformation deploy --stack-name "$STACK" \
   --template-file infra/app.yaml --capabilities CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND \
   --parameter-overrides "${params[@]}" "CodeBucket=$bucket" "CodeKey=$key" \
     "TableName=$STACK" "TableArn=$table_arn" \
-    "SessionsTableName=$STACK-sessions" "SessionsTableArn=$sessions_table_arn" "Waf=$WAF" \
+    "SessionsTableName=$STACK-sessions" "SessionsTableArn=$sessions_table_arn" \
   --tags "${TAGS[@]}" --no-fail-on-empty-changeset
 function_url="$(stack_output "$STACK" FunctionUrl)"
 

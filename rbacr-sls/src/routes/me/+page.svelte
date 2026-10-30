@@ -50,7 +50,7 @@
 
 <h2>Redeem a voucher</h2>
 <form class="row" onsubmit={onRedeem}>
-	<input name="code" placeholder="2026Q4-OTTER-FALCON-LEMUR" required autocomplete="off" />
+	<input name="code" placeholder="2026Q4-OTTER-FALCON-LEMUR-HERON-MOOSE" required autocomplete="off" />
 	<button>Redeem</button>
 </form>
 {#if redeem.payment}

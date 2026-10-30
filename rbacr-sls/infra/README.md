@@ -8,7 +8,7 @@ rbacr's AWS infrastructure, as CloudFormation templates. Everything lives in
 | [github-deploy.yaml](github-deploy.yaml) | `rbacr-github-deploy` | The `rbacr-github-deploy` role (`*GA` tags), the `rbacr-github-deploy-rc` role (`*RC*` tags and manual runs from `main`), and the `rbacr-lambda-boundary` permissions boundary | An administrator, once |
 | [artifacts.yaml](artifacts.yaml) | `rbacr-artifacts`, `rbacr-rc-artifacts` | A private bucket for the Lambda zips; old zips expire after 90 days | [scripts/deploy.sh](../scripts/deploy.sh) |
 | [tables.yaml](tables.yaml) | `rbacr-tables`, `rbacr-rc-tables` | The DynamoDB tables (`rbacr` and `rbacr-sessions`, `rbacr-rc` and `rbacr-rc-sessions`): on demand, point-in-time recovery, deletion protection, kept if the stack is deleted | [scripts/deploy.sh](../scripts/deploy.sh) |
-| [app.yaml](app.yaml) | `rbacr`, `rbacr-rc` | The ACM certificate (validated in the `nu01.com` zone), the Lambda with its function URL and log group, the CloudFront distribution with its WAF web ACL (production only), and the function alarms with their e-mail topic. The origin secret is an SSM parameter (`/rbacr/<stage>/origin-secret`), outside the stack | [scripts/deploy.sh](../scripts/deploy.sh) |
+| [app.yaml](app.yaml) | `rbacr`, `rbacr-rc` | The ACM certificate (validated in the `nu01.com` zone), the Lambda with its function URL and log group, the CloudFront distribution with its viewer-IP function, and the function alarms with their e-mail topic. The origin secret is an SSM parameter (`/rbacr/<stage>/origin-secret`), outside the stack | [scripts/deploy.sh](../scripts/deploy.sh) |
 
 **DNS lives in the nu01 repository.** The `nu01.com` zone (stack
 `nu01-route53-zone`) holds every rbacr record, managed by the `nu01-dns`
@@ -26,7 +26,7 @@ The former `rbacr.nu01.com` subzone (stack `rbacr-zone`, template
 
 ```
 browser ──https──▶ CloudFront (rbacr.nu01.com, ACM certificate)
-                     │ WAF (production only): rate limits per IP (429), AWS known-bad-inputs rules
+                     │ sets x-rbacr-viewer-ip (a CloudFront Function; redeem limits per network)
                      │ adds x-rbacr-origin-secret (from SSM Parameter Store)
                      │ and x-rbacr-host: rbacr.nu01.com
                      ▼
@@ -163,16 +163,17 @@ scripts/deploy.sh tags the origin secret parameter it creates.
    create a CloudFront distribution but read, change or delete only its own
    stage's (by id): another stage's configuration holds that stage's origin
    secret, so nothing lists or reads distributions in general. Each manages
-   only its own WAF web ACL (`rbacr-waf`, `rbacr-rc-waf`) and alarms, by
-   name. Neither may read, write, export, restore or delete the tables'
+   only its own CloudFront Function (`rbacr-viewer-ip`, `rbacr-rc-viewer-ip`)
+   and alarms, by name; production may also delete its old WAF web ACL
+   (`rbacr-waf`), until a release has. Neither may read, write, export, restore or delete the tables'
    data, nor delete a table: an explicit deny, so a compromised deploy run
    can't reach the data. ACM permissions remain account-wide, because
    certificate ids aren't known in advance (so do the leftover Route 53
    health check delete permissions, until the next deploy of each stage
    has removed the old health checks).
    Redeploy this stack whenever `github-deploy.yaml` changes, **before**
-   the release that needs it (for example, the WAF permissions before the
-   first release with the web ACL): the deploy roles can't update
+   the release that needs it (for example, the CloudFront Function
+   permissions before the first release with the function): the deploy roles can't update
    themselves.
 
 3. **Repository settings.** Variables are public identifiers; secrets are

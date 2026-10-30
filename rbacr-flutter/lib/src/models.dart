@@ -251,7 +251,7 @@ class Voucher {
     disabledBy: json['disabledBy'] as String?,
   );
 
-  /// Upper case, words separated by dashes, e.g. `2026Q4-OTTER-FALCON-LEMUR`;
+  /// Upper case, words separated by dashes, e.g. `2026Q4-OTTER-FALCON-LEMUR-HERON-MOOSE`;
   /// matched ignoring case and separators (V2).
   final String code;
 
