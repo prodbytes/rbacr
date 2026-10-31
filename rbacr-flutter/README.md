@@ -59,7 +59,7 @@ if (status.maintenance) showMaintenance(status.name);
 
 final me = await rbacr.me();                        // the token owner's own roles
 final roles = await rbacr.rolesIn(email: user.email, systemId: 'presence');
-final grant = await rbacr.redeemVoucher('2026Q4-OTTER-FALCON-LEMUR'); // its first role
+final grant = await rbacr.redeemVoucher('2026Q4-OTTER-FALCON-LEMUR-HERON-MOOSE'); // its first role
 final grants = await rbacr.redeemVoucherGrants('spring sale');          // one per role
 
 // Voucher management, with a root's token on your server (see Tokens).

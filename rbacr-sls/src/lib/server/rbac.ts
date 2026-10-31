@@ -1,7 +1,7 @@
 import { GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { GSI1, cancellationReasons, queryAll, queryIndex, queryPrefix, type Item, type Table } from './dynamo';
 import { Allowlist, granteesFor, normalizeEmail, parseGrantee } from './identity';
-import { MAX_CODE_LENGTH, MIN_CODE_LENGTH, compactVoucherCode, normalizeVoucherCode, suggestVoucherCode } from '../vouchers';
+import { compactVoucherCode, normalizeVoucherCode, suggestVoucherCode, weakCodeReason } from '../vouchers';
 
 /**
  * The only built-in role (R1, R2): held by every identity on RBACR_ROOT_LIST,
@@ -243,6 +243,30 @@ export interface RedeemFailure {
 export const MAX_REDEEM_FAILURES = 10;
 /** The window those failures are counted in (V10). */
 export const REDEEM_FAILURE_WINDOW_MS = 15 * 60 * 1000;
+/**
+ * Failed redeem attempts one network (an IPv4 address, an IPv6 /64) may
+ * make per window, whatever identities it uses (V10). Higher than one
+ * identity's, for people behind the same NAT.
+ */
+export const MAX_REDEEM_FAILURES_PER_NETWORK = 30;
+
+/**
+ * The network a client address counts against (V10): an IPv4 address as
+ * is, an IPv6 one by its /64 (one subscriber's, typically). Null when
+ * there's no address, or it isn't one.
+ */
+export function redeemNetwork(address: string | null | undefined): string | null {
+	const ip = (address ?? '').trim().replace(/^\[|\](:\d+)?$/g, '');
+	const v4 = ip.replace(/^::ffff:/i, '');
+	if (/^\d{1,3}(\.\d{1,3}){3}$/.test(v4) && v4.split('.').every((n) => Number(n) <= 255)) return v4;
+	if (!/^[0-9a-f:]+$/i.test(ip) || !ip.includes(':')) return null;
+	const [head, tail = ''] = ip.toLowerCase().split('::');
+	const left = head ? head.split(':') : [];
+	const right = ip.includes('::') && tail ? tail.split(':') : [];
+	const groups = ip.includes('::') ? [...left, ...Array(8 - left.length - right.length).fill('0'), ...right] : left;
+	if (groups.length !== 8 || groups.some((g) => !/^[0-9a-f]{1,4}$/.test(g))) return null;
+	return `${groups.slice(0, 4).map((g) => g.replace(/^0+(?=.)/, '')).join(':')}::/64`;
+}
 
 /** Most failed attempts listed across all vouchers, newest first (V9). */
 export const MAX_REDEEM_FAILURES_LISTED = 100;
@@ -426,6 +450,7 @@ export const MAX_VOUCHER_ROLES = 20;
  *   failed redemption PK VOUCHER#<key>, or REDEEMFAILS for an unknown code
  *               SK FAILED#<when>#<id>    GSI1 REDEEMFAILS / <when>#<id>   (V9)
  *   redeem throttle PK REDEEMTHROTTLE#<email>  SK <window start>  (failures counted per window, V10)
+ *   network throttle PK REDEEMTHROTTLE#NET#<network>  SK <window start>  (the same, per network, V10)
  *   notification PK NOTIFS        SK NOTIF#<id>                (N1; dismissed ones carry dismissedAt / dismissedBy)
  *   history     PK as the item   SK HIST#<its SK>#<when it was deleted>  (L4)
  *
@@ -1613,10 +1638,8 @@ export class Rbac {
 		}
 		const custom = input.code ? normalizeVoucherCode(input.code) : null;
 		if (custom !== null) {
-			const length = compactVoucherCode(custom).length;
-			if (length < MIN_CODE_LENGTH || length > MAX_CODE_LENGTH) {
-				throw badRequest(`A code needs ${MIN_CODE_LENGTH} to ${MAX_CODE_LENGTH} letters and digits`);
-			}
+			const weak = weakCodeReason(custom);
+			if (weak) throw badRequest(weak);
 		}
 		const createdAt = this.now();
 		// A made-up code is retried on the (unlikely) clash with an existing one.
@@ -1751,13 +1774,24 @@ export class Rbac {
 	 * that one already gives it now and forever (G3). A voucher with less
 	 * than 100% discount needs payment, which isn't available yet: it fails
 	 * with 402 and the voucher's terms, granting nothing. Every failed
-	 * attempt (402, 404, 409) is kept as a RedeemFailure (V9).
+	 * attempt (402, 404, 409) is kept as a RedeemFailure (V9). `clientAddress`,
+	 * the caller's IP address, adds a limit per network (V10).
 	 */
-	async redeemVoucher(email: string, rawCode: string, via: RedeemVia = 'api', systems?: readonly string[]): Promise<GrantWithImplied[]> {
-		// V10: too many failures in this window and the identity waits, so codes can't be guessed at speed.
+	async redeemVoucher(
+		email: string,
+		rawCode: string,
+		via: RedeemVia = 'api',
+		systems?: readonly string[],
+		clientAddress?: string | null
+	): Promise<GrantWithImplied[]> {
+		// V10: too many failures in this window, from this identity or this
+		// network, and the caller waits, so codes can't be guessed at speed.
 		const window = this.redeemWindow();
-		const counted = await this.get({ PK: `REDEEMTHROTTLE#${email}`, SK: window.start });
-		if (((counted?.failures as number | undefined) ?? 0) >= MAX_REDEEM_FAILURES) {
+		const network = redeemNetwork(clientAddress);
+		const keys = [`REDEEMTHROTTLE#${email}`, ...(network ? [`REDEEMTHROTTLE#NET#${network}`] : [])];
+		const limits = [MAX_REDEEM_FAILURES, MAX_REDEEM_FAILURES_PER_NETWORK];
+		const counted = await Promise.all(keys.map((PK) => this.get({ PK, SK: window.start })));
+		if (counted.some((c, i) => ((c?.failures as number | undefined) ?? 0) >= limits[i])) {
 			const minutes = Math.max(1, Math.ceil((window.end.getTime() - this.now().getTime()) / 60_000));
 			throw new RbacError(429, `Too many failed attempts to redeem a voucher; try again in ${minutes} minute${minutes > 1 ? 's' : ''}`);
 		}
@@ -1769,7 +1803,7 @@ export class Rbac {
 				console.warn(`Redeem failed (${err.status}, via ${via}): ${err.message}`);
 				await Promise.all([
 					this.recordRedeemFailure(email, rawCode, via, err),
-					this.countRedeemFailure(email, window)
+					...keys.map((PK) => this.countRedeemFailure(PK, window))
 				]).catch((e) => console.error('Could not record a failed redemption', e));
 			}
 			throw err;
@@ -1782,12 +1816,12 @@ export class Rbac {
 		return { start: new Date(start).toISOString(), end: new Date(start + REDEEM_FAILURE_WINDOW_MS) };
 	}
 
-	/** Counts one failed redemption of `email` in its window (V10). */
-	private async countRedeemFailure(email: string, window: { start: string; end: Date }): Promise<void> {
+	/** Counts one failed redemption against a throttle key (an identity's or a network's) in its window (V10). */
+	private async countRedeemFailure(PK: string, window: { start: string; end: Date }): Promise<void> {
 		await this.table.doc.send(
 			new UpdateCommand({
 				TableName: this.table.name,
-				Key: { PK: `REDEEMTHROTTLE#${email}`, SK: window.start },
+				Key: { PK, SK: window.start },
 				UpdateExpression: 'ADD failures :one SET windowEndsAt = :end',
 				ExpressionAttributeValues: { ':one': 1, ':end': window.end.toISOString() }
 			})

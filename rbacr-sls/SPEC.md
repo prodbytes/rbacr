@@ -220,13 +220,18 @@ and the README in sync with the code.
   be valid names other than `root`, but the pages only make system-role
   ones. Requests send `roles`, or a single `role` as before.
 - **V2** A root may choose the code (`code`); without one, rbacr makes
-  one up from the current calendar quarter (UTC) and three random animal
-  names out of 256, e.g. `2026Q4-OTTER-FALCON-LEMUR` (24 random bits;
-  redeeming needs a signed-in identity, V5). The pages suggest such a code
+  one up from the current calendar quarter (UTC) and five random animal
+  names out of 256, e.g. `2026Q4-OTTER-FALCON-LEMUR-HERON-MOOSE` (40
+  random bits; redeeming needs a signed-in identity, V5). The pages suggest such a code
   and, as the validity, the current quarter widened by two weeks each
   side: from 14 days before its first day to 14 days after the next
   quarter's first day. A code is stored upper case with any run of
-  other characters as one dash, and needs 6 to 40 letters and digits.
+  other characters as one dash, and needs 12 to 48 letters and digits,
+  at least 6 of them different; one block repeated (`ABC123ABC123`) or a
+  run (`ABCDEFGHIJKL`, `7890123456`) gives 400. These only rule out the
+  worst: a code of words people would try (`SUMMER-SALE-2026`) passes, so
+  the made-up codes are the safe choice. The checks apply to new codes;
+  older vouchers keep theirs.
   Codes are matched ignoring case and separators, so `spring sale` and
   `SPRING-SALE` are the same code, and they are unique: reusing one, even
   a disabled voucher's, gives 409. Vouchers made before codes could be
@@ -304,9 +309,14 @@ and the README in sync with the code.
   10 times within the current 15-minute window (windows start on the
   quarter hour, UTC) gets 429 for any further attempt until the window
   ends, with how many minutes to wait; other identities aren't affected.
-  The count is kept per identity and window (L1: never deleted), the 429
-  isn't recorded as a RedeemFailure (V9), and a success doesn't reset it.
-  With codes of 24 random bits (V2), this keeps guessing them slow.
+  So does any identity on a network (an IPv4 address, or an IPv6 /64)
+  from which redeem attempts failed 30 times in the window, whoever made
+  them, so many identities don't make guessing faster. The counts are
+  kept per identity, per network and window (L1: never deleted), the 429
+  isn't recorded as a RedeemFailure (V9), and a success doesn't reset
+  them. With made-up codes of 40 random bits (V2), this keeps guessing
+  them hopeless. Behind CloudFront the address is the viewer's, set by
+  the distribution (H6); without one, no network is counted.
 
 ## Notifications
 
@@ -810,14 +820,13 @@ to `/`. The pages need JavaScript.
   `X-Frame-Options: DENY`, no site can frame rbacr. A page rendered for
   someone signed in is `Cache-Control: private, no-store`, so no cache
   keeps their data after they sign out.
-- **H6 Rate limits at the edge.** In AWS, a WAF web ACL on the production
-  CloudFront distribution answers 429 (`{ "error": … }`) to a client IP
-  that, within 5 minutes, sends more than 60 guesses (redeem requests,
-  `/vpi/me/redeem` and `/api/vouchers/redeem`, and requests under `/login`,
-  together) or 3000 requests under `/api/`. AWS's known-bad-inputs rules
-  block. This adds to V10, which limits failed redemptions per identity.
-  The release candidate has no web ACL (each is a fixed monthly fee plus
-  one per rule).
+- **H6 Limits at the edge.** In AWS, the function serves at most a set
+  number of requests at once (`MaxConcurrency`, 20); past it, 429. This
+  caps what a flood can cost. A CloudFront Function puts the viewer's IP
+  in `x-rbacr-viewer-ip`, replacing any the client sent, for V10; only
+  CloudFront reaches the function (the origin secret), so the app trusts
+  it. There is no WAF: its fixed monthly fees cost more than rbacr's
+  traffic, and V10 covers what it limited.
 
 ## Configuration
 
