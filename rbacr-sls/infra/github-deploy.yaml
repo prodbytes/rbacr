@@ -242,6 +242,9 @@ Resources:
                   - cloudfront:UpdateFunction
                   - cloudfront:PublishFunction
                   - cloudfront:DeleteFunction
+                  - cloudfront:TagResource
+                  - cloudfront:UntagResource
+                  - cloudfront:ListTagsForResource
                 Resource: !Sub arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:function/rbacr-viewer-ip
               # The web ACL it had, only to delete it (the release that drops it);
               # remove once it's gone.
@@ -507,6 +510,9 @@ Resources:
                   - cloudfront:UpdateFunction
                   - cloudfront:PublishFunction
                   - cloudfront:DeleteFunction
+                  - cloudfront:TagResource
+                  - cloudfront:UntagResource
+                  - cloudfront:ListTagsForResource
                 Resource: !Sub arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:function/rbacr-rc-viewer-ip
               # The certificate and DNS records
               - Effect: Allow
