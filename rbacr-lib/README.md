@@ -81,8 +81,9 @@ address's roles in every system at once, so one request answers all its
 systems and roles: prefer it to several `allows` about the same person.
 
 `fresh` asks rbacr even when an answer is kept (right after a payment),
-and doesn't join a request already under way. A grant or revoke drops what this client kept about the grantee (all of
-it, for a domain), and that role's holders. `forget(email?)` drops kept
+and doesn't join a request already under way. A grant or revoke drops
+what this client kept about the grantee (all of it, for a domain), and
+that role's holders. `forget(email?)` drops kept
 answers about one address, or all. Other instances' answers age out
 within `cacheMs`; rbacr itself shows a change within about a second (D3).
 
