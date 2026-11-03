@@ -105,6 +105,26 @@ describe('lambda handler', () => {
 		}
 	});
 
+	it('logs one line per request, refused ones too, without secrets (H7)', async () => {
+		const lines = [];
+		const log = console.log;
+		console.log = (line) => lines.push(String(line));
+		try {
+			await invoke('/redeem/SECRETCODE1234', { headers: { 'x-rbacr-viewer-ip': '198.51.100.9', 'user-agent': 'smoke' } });
+			await invoke('/api/me', { headers: { authorization: 'Bearer rbacr_not-a-real-token' }, viaCloudFront: false });
+		} finally {
+			console.log = log;
+		}
+		const entries = lines.filter((l) => l.includes('"msg":"request"')).map((l) => JSON.parse(l));
+		assert.equal(entries.length, 2);
+		assert.equal(entries[0].route, '/redeem/[code]');
+		assert.equal(entries[0].ip, '198.51.100.9');
+		assert.equal(entries[0].userAgent, 'smoke');
+		assert.deepEqual([entries[1].status, entries[1].credential], [403, 'token']);
+		const all = lines.join('\n');
+		assert.ok(!all.includes('SECRETCODE1234') && !all.includes('rbacr_not-a-real-token'));
+	});
+
 	it('renders the sign-in page as HTML', async () => {
 		const res = await invoke('/', { headers: { accept: 'text/html' } });
 		assert.equal(res.statusCode, 200);
