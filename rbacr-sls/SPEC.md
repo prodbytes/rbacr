@@ -821,8 +821,9 @@ to `/`. The pages need JavaScript.
   someone signed in is `Cache-Control: private, no-store`, so no cache
   keeps their data after they sign out.
 - **H6 Limits at the edge.** In AWS, the function serves at most a set
-  number of requests at once (`MaxConcurrency`, 20); past it, 429. This
-  caps what a flood can cost. A CloudFront Function puts the viewer's IP
+  number of requests at once (`MaxConcurrency`, 30); past it, 429. This
+  caps what a flood can cost; 30 leaves room for a console page loading
+  its scripts at once beside the apps' role checks. A CloudFront Function puts the viewer's IP
   in `x-rbacr-viewer-ip`, replacing any the client sent, for V10; only
   CloudFront reaches the function (the origin secret), so the app trusts
   it. There is no WAF: its fixed monthly fees cost more than rbacr's

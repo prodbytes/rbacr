@@ -46,6 +46,9 @@
 #   RBACR_STRIPE_WEBHOOK_SECRET, RBACR_STRIPE_API_KEY
 #                 optional (the paid-subscription sync); unset ones keep
 #                 their deployed values
+#   RBACR_MAX_CONCURRENCY  the most requests the function serves at once
+#                 (SPEC H6; default 30); passed on every deploy, since an
+#                 existing stack would otherwise keep its old value
 #   HEALTH_EMAILS comma-separated addresses the function alarms e-mail
 #                 (default julio+health@nu01.com); passed on every deploy,
 #                 because the template's Fn::ForEach can't see defaults
@@ -174,6 +177,7 @@ for pair in StripeWebhookSecret:RBACR_STRIPE_WEBHOOK_SECRET StripeApiKey:RBACR_S
   if [[ -n "${!name:-}" ]]; then params+=("$param=${!name}"); fi
 done
 params+=("HealthNotificationEmails=${HEALTH_EMAILS:-julio+health@nu01.com}")
+params+=("MaxConcurrency=${RBACR_MAX_CONCURRENCY:-30}")
 # The header value CloudFront sends and the app requires: a plain SSM String
 # (standard tier, free; see infra/app.yaml). A stage's first deploy creates
 # it; afterwards it must exist, because a new value would reach the Lambda

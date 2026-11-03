@@ -17,11 +17,12 @@ Description: >
 Parameters:
   MaxConcurrency:
     Type: Number
-    Default: 20
+    Default: 30
     MinValue: 1
     Description: >
       The most requests the function serves at once (H6); more get 429.
-      A few hundred milliseconds each, so 20 is far above rbacr's traffic.
+      A few hundred milliseconds each, so 30 is far above rbacr's traffic
+      and leaves room for a console page's burst (its scripts at once).
   DomainName:
     Type: String
     Default: rbacr.nu01.com
