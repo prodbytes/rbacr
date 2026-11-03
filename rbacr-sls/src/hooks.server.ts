@@ -2,9 +2,11 @@ import { timingSafeEqual } from 'node:crypto';
 import type { Handle } from '@sveltejs/kit/hooks';
 import { dev } from '$app/env';
 import { RBACR_ORIGIN_SECRET, RBACR_PUBLIC_ORIGIN } from '$app/env/private';
+import { accessLine, credentialOf } from '#lib/server/accesslog.js';
 import { addCorsHeaders, allowedOrigin, isPreflight, preflight } from '#lib/server/cors.js';
 import { isCrossSiteForm } from '#lib/server/csrf.js';
 import { looksLikeJwt } from '#lib/server/idtokens.js';
+import { clientAddress } from '#lib/server/http.js';
 import { appMayCall } from '#lib/server/rbac.js';
 import { appIdTokens, corsOrigins, getServices } from '#lib/server/services.js';
 import { LEGACY_SESSION_COOKIE, SESSION_COOKIE } from '#lib/server/session.js';
@@ -20,7 +22,37 @@ function fromOrigin(request: Request): boolean {
 	return given.length === expected.length && timingSafeEqual(given, expected);
 }
 
-export const handle: Handle = async ({ event, resolve }) => {
+/**
+ * H7: one line per request in the function's log (accesslog.ts), refused
+ * ones included, so a burst can be traced to its callers; SvelteKit's
+ * in-process fetches aren't requests of their own.
+ */
+export const handle: Handle = async (input) => {
+	const { event } = input;
+	if (event.isSubRequest) return guard(input);
+	const started = Date.now();
+	let status = 500;
+	try {
+		const response = await guard(input);
+		status = response.status;
+		return response;
+	} finally {
+		const { request } = event;
+		console.log(
+			accessLine({
+				method: request.method,
+				route: event.route.id,
+				status,
+				ms: Date.now() - started,
+				ip: clientAddress(event, Boolean(RBACR_ORIGIN_SECRET)),
+				userAgent: request.headers.get('user-agent'),
+				credential: credentialOf(request, Boolean(event.cookies.get(SESSION_COOKIE)))
+			})
+		);
+	}
+};
+
+const guard: Handle = async ({ event, resolve }) => {
 	// Behind CloudFront, requests that skip it (straight to the Lambda URL) are
 	// refused. Sub-requests are SvelteKit's in-process fetches while rendering a
 	// page that already passed this check.

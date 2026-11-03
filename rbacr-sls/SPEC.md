@@ -827,6 +827,16 @@ to `/`. The pages need JavaScript.
   CloudFront reaches the function (the origin secret), so the app trusts
   it. There is no WAF: its fixed monthly fees cost more than rbacr's
   traffic, and V10 covers what it limited.
+- **H7 Access log.** Every request the app answers, refused ones (H1,
+  401, 403) included, writes one JSON line to the function's log
+  (`{"msg":"request",…}`): the method, the route's pattern
+  (`/redeem/[code]`, never the path, which can hold a voucher code; null
+  when no route matches), the status, the time taken in ms, the viewer's
+  IP (`x-rbacr-viewer-ip`), the user agent (at most 160 characters) and
+  how it authenticated (`token`, `id-token`, `session` or `none`), never
+  a token, cookie or email. Static assets, served before the app, and
+  requests refused at the edge (H6's 429s) aren't in it; CloudFront's
+  metrics count those. SvelteKit's in-process fetches aren't logged.
 
 ## Configuration
 
