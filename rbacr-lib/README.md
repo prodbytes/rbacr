@@ -62,7 +62,7 @@ Asking:
 | `allows(email, systemId, role, {fresh?})` | `POST /api/check` | `cacheMs`; a "yes" never past its `ttl` (C3a) | `false`, not kept |
 | `roles(email, systemId)` | `POST /api/roles` | no | throws |
 | `allRoles(email)` | `POST /api/roles` (no system) | no | throws |
-| `rolesOf(email, systemId, {fresh?})` | `POST /api/roles` (no system) | `cacheMs`, per address | `null`, not kept |
+| `rolesOf(email, systemId, {fresh?})` | `POST /api/roles` (no system) | `cacheMs`, per address | `null` (also for an answer that isn't a role list), not kept |
 | `systemStatus(systemId)` | `GET /api/systems/:id/status` (R12) | no | throws |
 
 Granting (roots):

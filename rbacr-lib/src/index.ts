@@ -178,7 +178,8 @@ export class RbacrClient {
   /**
    * `email`'s effective roles in `systemId` plus their global roles
    * (`root`), sorted, without duplicates; kept for `cacheMs`. Null when
-   * rbacr can't say (not kept). `fresh`: ask even when an answer is kept.
+   * rbacr can't say, or answers something that isn't a role list (not
+   * kept). `fresh`: ask even when an answer is kept.
    */
   async rolesOf(email: string, systemId: string, options: { fresh?: boolean } = {}): Promise<string[] | null> {
     const key = lower(email);
@@ -187,6 +188,7 @@ export class RbacrClient {
     all ??= await this.shared(`roles\n${key}`, options.fresh, async (since) => {
       try {
         const got = await this.allRoles(email);
+        if (!isRoleList(got)) return null;
         this.keep(this.roleLists, key, got, Infinity, since);
         return got;
       } catch {
@@ -346,6 +348,21 @@ export class RbacrClient {
 
 function lower(email: string): string {
   return email.trim().toLowerCase();
+}
+
+const isNames = (v: unknown): v is string[] => Array.isArray(v) && v.every((x) => typeof x === 'string');
+
+/** Whether an answer of `POST /api/roles` is one: names in `globalRoles` and in every system's list. */
+function isRoleList(v: unknown): v is AllRoles {
+  const all = v as Partial<AllRoles> | null | undefined;
+  return (
+    typeof all === 'object' &&
+    all !== null &&
+    isNames(all.globalRoles) &&
+    typeof all.roles === 'object' &&
+    all.roles !== null &&
+    Object.values(all.roles).every(isNames)
+  );
 }
 
 /** The site, without a trailing slash; https, or http for localhost only (C7). */

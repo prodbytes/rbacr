@@ -90,6 +90,12 @@ describe('rbacr-lib', () => {
     now = 61_000;
     down = true;
     expect(await c.rolesOf('a@example.com', 'grigri')).toBeNull();
+    // A 200 that isn't a role list: null too, and not kept.
+    const odd = fake({ 'POST /api/roles': () => [200, { allowed: true }] });
+    const c2 = new RbacrClient({ url: 'https://r.example.com', token: 't', fetch: odd.fetchFn });
+    expect(await c2.rolesOf('a@example.com', 'grigri')).toBeNull();
+    expect(await c2.rolesOf('a@example.com', 'grigri')).toBeNull();
+    expect(odd.asked).toHaveLength(2);
   });
 
   it('shares a lookup asked again while rbacr answers it; fresh and forget ask anew', async () => {
