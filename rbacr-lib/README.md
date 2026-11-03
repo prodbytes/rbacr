@@ -18,7 +18,7 @@ GitHub releases (tags `rbacr-lib-v<version>`), which npm installs by URL
 and pins by integrity in your lockfile:
 
 ```sh
-npm install https://github.com/prodbytes/rbacr/releases/download/rbacr-lib-v0.1.1/rbacr-lib-0.1.1.tgz
+npm install https://github.com/prodbytes/rbacr/releases/download/rbacr-lib-v0.1.2/rbacr-lib-0.1.2.tgz
 ```
 
 ## Use it
@@ -74,8 +74,14 @@ Granting (roots):
 | `grant({systemId, role, grantee, startsAt?, endsAt?})` | `POST /api/systems/:id/grants` | the grant; again with another validity replaces it (G2) |
 | `revoke({systemId, role, grantee})` | `DELETE /api/systems/:id/grants` | `false` when there was none |
 
-`fresh` asks rbacr even when an answer is kept (right after a payment).
-A grant or revoke drops what this client kept about the grantee (all of
+A lookup (`allows`, `rolesOf`, `holders`) asked again while rbacr is
+still answering the same one shares that request, so parallel work (a
+page's checks, a list's people) asks rbacr once. `rolesOf` asks for an
+address's roles in every system at once, so one request answers all its
+systems and roles: prefer it to several `allows` about the same person.
+
+`fresh` asks rbacr even when an answer is kept (right after a payment),
+and doesn't join a request already under way. A grant or revoke drops what this client kept about the grantee (all of
 it, for a domain), and that role's holders. `forget(email?)` drops kept
 answers about one address, or all. Other instances' answers age out
 within `cacheMs`; rbacr itself shows a change within about a second (D3).
