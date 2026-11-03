@@ -90,6 +90,51 @@ describe('rbacr-lib', () => {
     now = 61_000;
     down = true;
     expect(await c.rolesOf('a@example.com', 'grigri')).toBeNull();
+    // A 200 that isn't a role list: null too, and not kept.
+    const odd = fake({ 'POST /api/roles': () => [200, { allowed: true }] });
+    const c2 = new RbacrClient({ url: 'https://r.example.com', token: 't', fetch: odd.fetchFn });
+    expect(await c2.rolesOf('a@example.com', 'grigri')).toBeNull();
+    expect(await c2.rolesOf('a@example.com', 'grigri')).toBeNull();
+    expect(odd.asked).toHaveLength(2);
+  });
+
+  it('shares a lookup asked again while rbacr answers it; fresh and forget ask anew', async () => {
+    let down = false;
+    const { asked, fetchFn } = fake({
+      'POST /api/check': (b) => (down ? [503, { error: 'down' }] : [200, { ...b, allowed: true, expiresAt: null, ttl: null }]),
+      'POST /api/roles': () => [200, { email: 'ada@example.com', globalRoles: [], roles: { grigri: ['premium'] } }],
+      'GET /api/systems/grigri/grants': () => [200, { grants: [{ role: 'premium', grantee: 'ada@example.com', status: 'active' }] }],
+    });
+    const c = new RbacrClient({ url: 'https://r.example.com', token: 't', fetch: fetchFn });
+    const ada = 'ada@example.com';
+    expect(await Promise.all([c.allows(ada, 'grigri', 'premium'), c.allows('Ada@Example.com', 'grigri', 'premium')])).toEqual([true, true]);
+    expect(asked).toHaveLength(1);
+    // One role list per address answers every system's.
+    expect(await Promise.all([c.rolesOf(ada, 'grigri'), c.rolesOf(ada, 'other')])).toEqual([['premium'], []]);
+    expect(asked).toHaveLength(2);
+    const [h1, h2] = await Promise.all([c.holders('grigri', 'premium'), c.holders('grigri', 'Premium')]);
+    expect(h1).toEqual(new Set([ada]));
+    expect(h2).toBe(h1);
+    expect(asked).toHaveLength(3);
+    // fresh doesn't join a lookup already asked; the next caller joins it.
+    c.forget();
+    await Promise.all([c.rolesOf(ada, 'grigri'), c.rolesOf(ada, 'grigri', { fresh: true }), c.rolesOf(ada, 'grigri')]);
+    expect(asked).toHaveLength(5);
+    // A forget while rbacr answers: that answer isn't kept, nor joined.
+    c.forget();
+    const early = c.rolesOf(ada, 'grigri');
+    c.forget(ada);
+    await Promise.all([early, c.rolesOf(ada, 'grigri')]);
+    expect(asked).toHaveLength(7);
+    await c.rolesOf(ada, 'grigri');
+    expect(asked).toHaveLength(7);
+    // A failure is shared, and not kept.
+    down = true;
+    expect(await Promise.all([c.allows('ben@example.com', 'grigri', 'premium'), c.allows('ben@example.com', 'grigri', 'premium')])).toEqual([false, false]);
+    expect(asked).toHaveLength(8);
+    down = false;
+    expect(await c.allows('ben@example.com', 'grigri', 'premium')).toBe(true);
+    expect(asked).toHaveLength(9);
   });
 
   it('grants, revokes and lists holders (roots); its own changes drop what it kept', async () => {

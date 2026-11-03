@@ -100,8 +100,10 @@ interface Kept<T> {
 /**
  * A client for one rbacr site and token. Checks and role lists are kept
  * for `cacheMs` (a "yes" no longer than its grant lasts); errors never are
- * (C6). The "fail closed" helpers ({@link allows}, {@link rolesOf})
- * answer "no" / null when rbacr can't; the others throw {@link RbacrError}.
+ * (C6). The same lookup asked again while rbacr is still answering it
+ * shares that request, so parallel work asks once. The "fail closed"
+ * helpers ({@link allows}, {@link rolesOf}) answer "no" / null when rbacr
+ * can't; the others throw {@link RbacrError}.
  */
 export class RbacrClient {
   readonly url: string;
@@ -113,6 +115,10 @@ export class RbacrClient {
   private readonly checks = new Map<string, Kept<boolean>>();
   private readonly roleLists = new Map<string, Kept<AllRoles>>();
   private readonly holderSets = new Map<string, Kept<Set<string>>>();
+  /** Lookups rbacr is answering, shared by whoever asks the same meanwhile. */
+  private readonly asking = new Map<string, Promise<unknown>>();
+  /** Moved on by every forget: answers to older asks aren't kept. */
+  private generation = 0;
 
   constructor(options: RbacrOptions = {}) {
     const env = typeof process === 'undefined' ? {} : process.env;
@@ -146,14 +152,16 @@ export class RbacrClient {
     const key = `${lower(email)}\n${systemId}\n${role.toLowerCase()}`;
     const hit = this.checks.get(key);
     if (!options.fresh && hit && hit.until > this.clock()) return hit.value;
-    try {
-      const answer = await this.check(email, systemId, role);
-      const ttlMs = answer.allowed && answer.ttl !== null ? answer.ttl * 1000 : Infinity;
-      this.keep(this.checks, key, answer.allowed === true, ttlMs);
-      return answer.allowed === true;
-    } catch {
-      return false;
-    }
+    return this.shared(`check\n${key}`, options.fresh, async (since) => {
+      try {
+        const answer = await this.check(email, systemId, role);
+        const ttlMs = answer.allowed && answer.ttl !== null ? answer.ttl * 1000 : Infinity;
+        this.keep(this.checks, key, answer.allowed === true, ttlMs, since);
+        return answer.allowed === true;
+      } catch {
+        return false;
+      }
+    });
   }
 
   /** `POST /api/roles` with a system: `email`'s effective roles in it, sorted (C4), uncached. */
@@ -170,20 +178,24 @@ export class RbacrClient {
   /**
    * `email`'s effective roles in `systemId` plus their global roles
    * (`root`), sorted, without duplicates; kept for `cacheMs`. Null when
-   * rbacr can't say (not kept). `fresh`: ask even when an answer is kept.
+   * rbacr can't say, or answers something that isn't a role list (not
+   * kept). `fresh`: ask even when an answer is kept.
    */
   async rolesOf(email: string, systemId: string, options: { fresh?: boolean } = {}): Promise<string[] | null> {
     const key = lower(email);
     const hit = this.roleLists.get(key);
-    let all = !options.fresh && hit && hit.until > this.clock() ? hit.value : undefined;
-    if (!all) {
+    let all: AllRoles | null | undefined = !options.fresh && hit && hit.until > this.clock() ? hit.value : undefined;
+    all ??= await this.shared(`roles\n${key}`, options.fresh, async (since) => {
       try {
-        all = await this.allRoles(email);
+        const got = await this.allRoles(email);
+        if (!isRoleList(got)) return null;
+        this.keep(this.roleLists, key, got, Infinity, since);
+        return got;
       } catch {
         return null;
       }
-      this.keep(this.roleLists, key, all, Infinity);
-    }
+    });
+    if (!all) return null;
     return [...new Set([...(all.roles[systemId] ?? []), ...all.globalRoles])].sort();
   }
 
@@ -210,12 +222,14 @@ export class RbacrClient {
     const key = `${systemId}\n${role.toLowerCase()}`;
     const hit = this.holderSets.get(key);
     if (!options.fresh && hit && hit.until > this.clock()) return hit.value;
-    const grants = await this.grants(systemId);
-    const holders = new Set(
-      grants.filter((g) => g.role === role.toLowerCase() && g.status === 'active').map((g) => g.grantee.toLowerCase()),
-    );
-    this.keep(this.holderSets, key, holders, Infinity);
-    return holders;
+    return this.shared(`holders\n${key}`, options.fresh, async (since) => {
+      const grants = await this.grants(systemId);
+      const holders = new Set(
+        grants.filter((g) => g.role === role.toLowerCase() && g.status === 'active').map((g) => g.grantee.toLowerCase()),
+      );
+      this.keep(this.holderSets, key, holders, Infinity, since);
+      return holders;
+    });
   }
 
   /** `POST /api/systems/:id/grants` (roots): grants a role (again with another validity: replaces it, G2). */
@@ -245,6 +259,7 @@ export class RbacrClient {
 
   /** Drops kept answers: about `email`, or all of them. */
   forget(email?: string): void {
+    this.moveOn();
     if (email === undefined) {
       this.checks.clear();
       this.roleLists.clear();
@@ -263,14 +278,39 @@ export class RbacrClient {
     if (grantee.includes('@') && !grantee.startsWith('@')) this.forget(grantee);
     // A domain grant changes everyone's in it: drop every kept answer.
     else {
+      this.moveOn();
       this.checks.clear();
       this.roleLists.clear();
     }
   }
 
-  private keep<T>(map: Map<string, Kept<T>>, key: string, value: T, limitMs: number): void {
+  /** Lookups asked from now on don't join, or keep, answers to earlier asks (which may predate a change). */
+  private moveOn(): void {
+    this.generation++;
+    this.asking.clear();
+  }
+
+  /**
+   * `ask`'s answer, shared with the same lookup's callers until it comes;
+   * `fresh` doesn't join one already asked (it may predate what changed),
+   * but later callers join it. `ask` gets the generation it was asked in.
+   */
+  private shared<T>(key: string, fresh: boolean | undefined, ask: (since: number) => Promise<T>): Promise<T> {
+    const going = this.asking.get(key) as Promise<T> | undefined;
+    if (going && !fresh) return going;
+    const asked = ask(this.generation);
+    this.asking.set(key, asked);
+    const done = () => {
+      if (this.asking.get(key) === asked) this.asking.delete(key);
+    };
+    asked.then(done, done);
+    return asked;
+  }
+
+  /** Keeps an answer asked in generation `since`, unless something was forgotten since. */
+  private keep<T>(map: Map<string, Kept<T>>, key: string, value: T, limitMs: number, since: number): void {
     const ms = Math.min(this.cacheMs, limitMs);
-    if (ms > 0) map.set(key, { value, until: this.clock() + ms });
+    if (ms > 0 && since === this.generation) map.set(key, { value, until: this.clock() + ms });
   }
 
   private async call<T>(method: 'GET' | 'POST' | 'DELETE', path: string, body?: unknown): Promise<T> {
@@ -308,6 +348,21 @@ export class RbacrClient {
 
 function lower(email: string): string {
   return email.trim().toLowerCase();
+}
+
+const isNames = (v: unknown): v is string[] => Array.isArray(v) && v.every((x) => typeof x === 'string');
+
+/** Whether an answer of `POST /api/roles` is one: names in `globalRoles` and in every system's list. */
+function isRoleList(v: unknown): v is AllRoles {
+  const all = v as Partial<AllRoles> | null | undefined;
+  return (
+    typeof all === 'object' &&
+    all !== null &&
+    isNames(all.globalRoles) &&
+    typeof all.roles === 'object' &&
+    all.roles !== null &&
+    Object.values(all.roles).every(isNames)
+  );
 }
 
 /** The site, without a trailing slash; https, or http for localhost only (C7). */
