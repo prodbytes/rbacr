@@ -30,7 +30,12 @@ export interface RedeemFailure {
 	reason: string;
 }
 
-export const load: PageLoad = async ({ fetch }) => ({
-	...(await vpiLoad<{ notifications: Notification[] }>(fetch, '/notifications')),
-	...(await vpiLoad<{ failures: RedeemFailure[] }>(fetch, '/redeem-failures'))
-});
+// Both at once. Closing a notification refreshes the whole page (invalidateAll),
+// since the layout's open count changes too.
+export const load: PageLoad = async ({ fetch }) => {
+	const [notifications, failures] = await Promise.all([
+		vpiLoad<{ notifications: Notification[] }>(fetch, '/notifications'),
+		vpiLoad<{ failures: RedeemFailure[] }>(fetch, '/redeem-failures')
+	]);
+	return { ...notifications, ...failures };
+};

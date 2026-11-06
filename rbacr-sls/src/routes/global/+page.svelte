@@ -1,6 +1,6 @@
 <script lang="ts">
-	import { invalidateAll } from '$app/navigation';
-	import { formatDate, formValues, utcIso, vpiFetch, VpiError } from '#lib/vpi.js';
+	import { invalidate } from '$app/navigation';
+	import { formatDate, formValues, GLOBAL_DATA, utcIso, VpiError, vpiFetch } from '#lib/vpi.js';
 	import VoucherRedemptions from '#lib/VoucherRedemptions.svelte';
 	import VoucherForm, { type VoucherBody } from '#lib/VoucherForm.svelte';
 	import CopyRedeemLink from '#lib/CopyRedeemLink.svelte';
@@ -16,7 +16,7 @@
 		error = '';
 		try {
 			const result = await vpiFetch(fetch, path, { method, body });
-			await invalidateAll();
+			await invalidate(GLOBAL_DATA);
 			return result;
 		} catch (err) {
 			if (!(err instanceof VpiError)) throw err;

@@ -1,4 +1,4 @@
-import { vpiLoad } from '#lib/vpi.js';
+import { GLOBAL_DATA, vpiLoad } from '#lib/vpi.js';
 import type { Token } from '#lib/ApiTokens.svelte';
 import type { Grant, Voucher } from '../systems/[system]/+page.js';
 import type { PageLoad } from './$types';
@@ -12,7 +12,8 @@ export interface GlobalData {
 }
 
 /** Everyone's own API tokens; for roots, also global grants and vouchers (null otherwise). */
-export const load: PageLoad = async ({ fetch, parent }) => {
+export const load: PageLoad = async ({ fetch, parent, depends }) => {
+	depends(GLOBAL_DATA);
 	const { user } = await parent();
 	const [{ tokens }, global] = await Promise.all([
 		vpiLoad<{ tokens: Token[] }>(fetch, '/tokens'),
