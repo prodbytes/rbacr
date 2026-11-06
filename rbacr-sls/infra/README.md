@@ -6,9 +6,9 @@ rbacr's AWS infrastructure, as CloudFormation templates. Everything lives in
 | Template | Stack | Holds | Deployed by |
 |---|---|---|---|
 | [github-deploy.yaml](github-deploy.yaml) | `rbacr-github-deploy` | The `rbacr-github-deploy` role (`*GA` tags), the `rbacr-github-deploy-rc` role (`*RC*` tags and manual runs from `main`), and the `rbacr-lambda-boundary` permissions boundary | An administrator, once |
-| [artifacts.yaml](artifacts.yaml) | `rbacr-artifacts`, `rbacr-rc-artifacts` | A private bucket for the Lambda zips; old zips expire after 90 days | [scripts/deploy.sh](../scripts/deploy.sh) |
+| [artifacts.yaml](artifacts.yaml) | `rbacr-artifacts`, `rbacr-rc-artifacts` | Two private buckets: the Lambda zips (old ones expire after 90 days) and the client assets (`/_app/immutable/*`, kept: a page already open still loads its own) | [scripts/deploy.sh](../scripts/deploy.sh) |
 | [tables.yaml](tables.yaml) | `rbacr-tables`, `rbacr-rc-tables` | The DynamoDB tables (`rbacr` and `rbacr-sessions`, `rbacr-rc` and `rbacr-rc-sessions`): on demand, point-in-time recovery, deletion protection, kept if the stack is deleted | [scripts/deploy.sh](../scripts/deploy.sh) |
-| [app.yaml](app.yaml) | `rbacr`, `rbacr-rc` | The ACM certificate (validated in the `nu01.com` zone), the Lambda with its function URL and log group, the CloudFront distribution with its viewer-IP function, and the function alarms with their e-mail topic. The origin secret is an SSM parameter (`/rbacr/<stage>/origin-secret`), outside the stack | [scripts/deploy.sh](../scripts/deploy.sh) |
+| [app.yaml](app.yaml) | `rbacr`, `rbacr-rc` | The ACM certificate (validated in the `nu01.com` zone), the Lambda with its function URL and log group, the CloudFront distribution with its viewer-IP function, its origin access control to the assets bucket (whose policy is here too) and its edge log (standard logging to CloudWatch Logs), and the function alarms with their e-mail topic. The origin secret is an SSM parameter (`/rbacr/<stage>/origin-secret`), outside the stack | [scripts/deploy.sh](../scripts/deploy.sh) |
 
 **DNS lives in the nu01 repository.** The `nu01.com` zone (stack
 `nu01-route53-zone`) holds every rbacr record, managed by the `nu01-dns`
@@ -26,6 +26,8 @@ The former `rbacr.nu01.com` subzone (stack `rbacr-zone`, template
 
 ```
 browser ──https──▶ CloudFront (rbacr.nu01.com, ACM certificate)
+                     │ /_app/immutable/* ──▶ S3 assets bucket (origin access control; cached at the edge)
+                     │
                      │ sets x-rbacr-viewer-ip (a CloudFront Function; redeem limits per network)
                      │ adds x-rbacr-origin-secret (from SSM Parameter Store)
                      │ and x-rbacr-host: rbacr.nu01.com
@@ -36,8 +38,16 @@ browser ──https──▶ CloudFront (rbacr.nu01.com, ACM certificate)
                                                      DynamoDB table rbacr / rbacr-rc
 ```
 
-- **Caching.** `/_app/immutable/*` holds content-hashed assets and is cached
-  at the edge. Everything else is not cached, and every viewer header except
+- **Caching.** `/_app/immutable/*` holds content-hashed assets: CloudFront
+  reads them from the stage's assets bucket (its origin access control
+  signs the requests; the bucket policy admits only this distribution) and
+  caches them at the edge. They never reach the function: a page names up
+  to a few dozen, fetched at once, and every edge location (and encoding)
+  fills its cache separately, so served by the function, one request per
+  instance, they filled `MaxConcurrency` (SPEC H6) and tripped
+  `<stack>-throttles` on their own. scripts/deploy.sh uploads them before
+  the app stack changes, and leaves old ones in place for pages already
+  open. Everything else is not cached, and every viewer header except
   `Host`, plus all cookies and query strings, is forwarded. AWS's managed
   security-headers policy is added to every response.
 - **Locking down the function URL.** The URL is public (`AuthType: NONE`),
@@ -67,8 +77,8 @@ browser ──https──▶ CloudFront (rbacr.nu01.com, ACM certificate)
   `/health` answers 503 unless the Google client is configured; it doesn't
   touch DynamoDB, so polls cost nothing there. Because it doesn't reach the
   database, `<stack>-errors` (5 or more function errors in 5 minutes) and
-  `<stack>-throttles` (any throttled invocation, the account's Lambda
-  concurrency running out) notify the `<stack>-health` SNS topic, again on
+  `<stack>-throttles` (any throttled invocation: `MaxConcurrency` requests
+  at once, SPEC H6) notify the `<stack>-health` SNS topic, again on
   recovery. The topic e-mails the
   `HealthNotificationEmails` parameter (comma-separated, default
   `julio+health@nu01.com`; `HEALTH_EMAILS` for scripts/deploy.sh, which
@@ -77,6 +87,27 @@ browser ──https──▶ CloudFront (rbacr.nu01.com, ACM certificate)
   deploy. The template uses the `AWS::LanguageExtensions` transform
   (`Fn::ForEach` over the addresses), so deploys pass
   `CAPABILITY_AUTO_EXPAND`.
+- **Logs.** Two per stage, both 30 days, both for Logs Insights. The
+  function's (`/aws/lambda/<stack>`) has one JSON line per request the
+  app answered (SPEC H7: method, route pattern, status, time, viewer IP,
+  user agent, `Origin`, the referer's origin, credential kind). CloudFront's
+  (`/aws/cloudfront/<stack>`; standard logging v2, delivered by CloudWatch's
+  vended-log delivery, which the stack's `EdgeLogPolicy` admits) has every
+  request at the edge, the ones the function never saw included: assets
+  from S3, and 429s when `MaxConcurrency` was reached. Its fields are the
+  viewer's IP, country and network (`asn`), user agent, edge location,
+  method, host, cache behaviour (`/_app/immutable/*` or `Default (*)`),
+  status, result type, protocol, time and bytes; no path, query, cookie or
+  referer (a path can hold a voucher code). Where requests come from, say
+  in the last day:
+
+  ```
+  stats count(*) as requests, count_distinct(`c-ip`) as ips by `c-country`, asn, `cs(User-Agent)`, `sc-status`
+  | sort requests desc
+  ```
+
+  A flood shows up as many requests from one `asn` or `c-ip`, or a wave
+  of `sc-status` 429 (`x-edge-result-type` Error).
 - **Database.** Each stage has two DynamoDB tables (`infra/tables.yaml`,
   stack `<stack>-tables`), deployed before the app, which gets their names
   and ARNs: the main table, which never deletes anything (SPEC L1), and
@@ -112,11 +143,15 @@ touch the app run the Release workflow's build and tests, without publishing.
 1. Builds the app and packages the zip
    ([scripts/package-lambda.sh](../scripts/package-lambda.sh): production
    dependencies only, smoke-tested through `lambda.js`).
-2. Deploys `artifacts.yaml` and uploads the zip.
+2. Deploys `artifacts.yaml` and uploads the zip and the client assets
+   (`build/client/_app/immutable`, uncompressed, with a year-long immutable
+   `Cache-Control`).
 3. Deploys `app.yaml`.
 4. Checks the live site: `/health` must be healthy and report the tag; `/` must be the
    sign-in page; anonymous `/api/me` must return 401; `/login/dev` must
-   return 404; and the bare function URL must return 403.
+   return 404; the sign-in page's first script must come from the assets
+   bucket (S3's encryption header reaches the browser); and the bare
+   function URL must return 403.
 
 You can also run it by hand with admin credentials (inside devbox):
 `STAGE=rc TAG=0.1.<Z>-RC bash scripts/deploy.sh`. Settings not already in
@@ -153,6 +188,10 @@ scripts/deploy.sh tags the origin secret parameter it creates.
    `DistributionId` and `RcDistributionId` are the app stacks' `DistributionId`
    outputs (empty before a stage's first deploy; the template's defaults are
    the current ones). Update them if a distribution is ever replaced.
+
+   Redeploy the stack whenever the template changes; the roles can only do
+   what it lists (the release that moved the client assets to S3 added
+   the distribution's origin access control, for one).
 
    The roles trust only this repository's tokens, in both subject forms
    (`repo:prodbytes@288014477/rbacr@1404734829:…` and `repo:prodbytes/rbacr:…`).
