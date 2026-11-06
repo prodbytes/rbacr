@@ -429,6 +429,65 @@ Resources:
           Protocol: email
           Endpoint: !Ref Email
 
+  # CloudFront's own log of every request (SPEC H7): the ones the function
+  # never sees too, the assets from S3 and what it refused at the edge
+  # (H6's 429s). Standard logging (v2) delivered to CloudWatch Logs, queried
+  # like the function's log. No path, query, cookie or referer field: a
+  # path can hold a voucher code; the function's log has the route pattern.
+  EdgeLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/cloudfront/${AWS::StackName}
+      RetentionInDays: 30
+
+  # Lets the log delivery service write into it: an account-level policy
+  # (ten per region at most; this stage uses one).
+  EdgeLogPolicy:
+    Type: AWS::Logs::ResourcePolicy
+    Properties:
+      PolicyName: !Sub ${AWS::StackName}-edge-log
+      PolicyDocument: !Sub
+        - '{"Version":"2012-10-17","Statement":[{"Sid":"EdgeLogDelivery","Effect":"Allow","Principal":{"Service":"delivery.logs.amazonaws.com"},"Action":["logs:CreateLogStream","logs:PutLogEvents"],"Resource":"${LogStreams}","Condition":{"StringEquals":{"aws:SourceAccount":"${AWS::AccountId}"},"ArnLike":{"aws:SourceArn":"arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:*"}}}]}'
+        - LogStreams: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${EdgeLogGroup}:log-stream:*
+
+  EdgeLogSource:
+    Type: AWS::Logs::DeliverySource
+    Properties:
+      Name: !Sub ${AWS::StackName}-edge
+      LogType: ACCESS_LOGS
+      ResourceArn: !Sub arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${Distribution}
+
+  EdgeLogDestination:
+    Type: AWS::Logs::DeliveryDestination
+    DependsOn: EdgeLogPolicy
+    Properties:
+      Name: !Sub ${AWS::StackName}-edge
+      DestinationResourceArn: !GetAtt EdgeLogGroup.Arn
+      OutputFormat: json
+
+  EdgeLogDelivery:
+    Type: AWS::Logs::Delivery
+    Properties:
+      DeliverySourceName: !Ref EdgeLogSource
+      DeliveryDestinationArn: !GetAtt EdgeLogDestination.Arn
+      RecordFields:
+        - timestamp
+        - x-edge-location
+        - c-ip
+        - c-country
+        - asn
+        - cs-method
+        - cs(Host)
+        - cache-behavior-path-pattern
+        - sc-status
+        - x-edge-result-type
+        - x-edge-detailed-result-type
+        - cs(User-Agent)
+        - cs-protocol-version
+        - time-taken
+        - sc-bytes
+        - x-edge-request-id
+
   # The function failing or throttled: /health (polled by nu01-monitor)
   # doesn't touch the database (SPEC HC2), so these catch what it can't.
   ErrorsAlarm:

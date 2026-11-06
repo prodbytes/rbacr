@@ -2,7 +2,7 @@ import { timingSafeEqual } from 'node:crypto';
 import type { Handle } from '@sveltejs/kit/hooks';
 import { dev } from '$app/env';
 import { RBACR_ORIGIN_SECRET, RBACR_PUBLIC_ORIGIN } from '$app/env/private';
-import { accessLine, credentialOf } from '#lib/server/accesslog.js';
+import { accessLine, credentialOf, refererOrigin } from '#lib/server/accesslog.js';
 import { addCorsHeaders, allowedOrigin, isPreflight, preflight } from '#lib/server/cors.js';
 import { isCrossSiteForm } from '#lib/server/csrf.js';
 import { looksLikeJwt } from '#lib/server/idtokens.js';
@@ -46,6 +46,8 @@ export const handle: Handle = async (input) => {
 				ms: Date.now() - started,
 				ip: clientAddress(event, Boolean(RBACR_ORIGIN_SECRET)),
 				userAgent: request.headers.get('user-agent'),
+				origin: request.headers.get('origin'),
+				referer: refererOrigin(request.headers.get('referer')),
 				credential: credentialOf(request, Boolean(event.cookies.get(SESSION_COOKIE)))
 			})
 		);

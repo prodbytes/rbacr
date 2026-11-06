@@ -8,7 +8,7 @@ rbacr's AWS infrastructure, as CloudFormation templates. Everything lives in
 | [github-deploy.yaml](github-deploy.yaml) | `rbacr-github-deploy` | The `rbacr-github-deploy` role (`*GA` tags), the `rbacr-github-deploy-rc` role (`*RC*` tags and manual runs from `main`), and the `rbacr-lambda-boundary` permissions boundary | An administrator, once |
 | [artifacts.yaml](artifacts.yaml) | `rbacr-artifacts`, `rbacr-rc-artifacts` | Two private buckets: the Lambda zips (old ones expire after 90 days) and the client assets (`/_app/immutable/*`, kept: a page already open still loads its own) | [scripts/deploy.sh](../scripts/deploy.sh) |
 | [tables.yaml](tables.yaml) | `rbacr-tables`, `rbacr-rc-tables` | The DynamoDB tables (`rbacr` and `rbacr-sessions`, `rbacr-rc` and `rbacr-rc-sessions`): on demand, point-in-time recovery, deletion protection, kept if the stack is deleted | [scripts/deploy.sh](../scripts/deploy.sh) |
-| [app.yaml](app.yaml) | `rbacr`, `rbacr-rc` | The ACM certificate (validated in the `nu01.com` zone), the Lambda with its function URL and log group, the CloudFront distribution with its viewer-IP function and its origin access control to the assets bucket (whose policy is here too), and the function alarms with their e-mail topic. The origin secret is an SSM parameter (`/rbacr/<stage>/origin-secret`), outside the stack | [scripts/deploy.sh](../scripts/deploy.sh) |
+| [app.yaml](app.yaml) | `rbacr`, `rbacr-rc` | The ACM certificate (validated in the `nu01.com` zone), the Lambda with its function URL and log group, the CloudFront distribution with its viewer-IP function, its origin access control to the assets bucket (whose policy is here too) and its edge log (standard logging to CloudWatch Logs), and the function alarms with their e-mail topic. The origin secret is an SSM parameter (`/rbacr/<stage>/origin-secret`), outside the stack | [scripts/deploy.sh](../scripts/deploy.sh) |
 
 **DNS lives in the nu01 repository.** The `nu01.com` zone (stack
 `nu01-route53-zone`) holds every rbacr record, managed by the `nu01-dns`
@@ -87,6 +87,27 @@ browser ──https──▶ CloudFront (rbacr.nu01.com, ACM certificate)
   deploy. The template uses the `AWS::LanguageExtensions` transform
   (`Fn::ForEach` over the addresses), so deploys pass
   `CAPABILITY_AUTO_EXPAND`.
+- **Logs.** Two per stage, both 30 days, both for Logs Insights. The
+  function's (`/aws/lambda/<stack>`) has one JSON line per request the
+  app answered (SPEC H7: method, route pattern, status, time, viewer IP,
+  user agent, `Origin`, the referer's origin, credential kind). CloudFront's
+  (`/aws/cloudfront/<stack>`; standard logging v2, delivered by CloudWatch's
+  vended-log delivery, which the stack's `EdgeLogPolicy` admits) has every
+  request at the edge, the ones the function never saw included: assets
+  from S3, and 429s when `MaxConcurrency` was reached. Its fields are the
+  viewer's IP, country and network (`asn`), user agent, edge location,
+  method, host, cache behaviour (`/_app/immutable/*` or `Default (*)`),
+  status, result type, protocol, time and bytes; no path, query, cookie or
+  referer (a path can hold a voucher code). Where requests come from, say
+  in the last day:
+
+  ```
+  stats count(*) as requests, count_distinct(`c-ip`) as ips by `c-country`, asn, `cs(User-Agent)`, `sc-status`
+  | sort requests desc
+  ```
+
+  A flood shows up as many requests from one `asn` or `c-ip`, or a wave
+  of `sc-status` 429 (`x-edge-result-type` Error).
 - **Database.** Each stage has two DynamoDB tables (`infra/tables.yaml`,
   stack `<stack>-tables`), deployed before the app, which gets their names
   and ARNs: the main table, which never deletes anything (SPEC L1), and
