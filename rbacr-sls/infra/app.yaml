@@ -21,8 +21,8 @@ Parameters:
     MinValue: 1
     Description: >
       The most requests the function serves at once (H6); more get 429.
-      A few hundred milliseconds each, so 30 is far above rbacr's traffic
-      and leaves room for a console page's burst (its scripts at once).
+      Only pages and the APIs reach it (the client assets come from S3), a
+      few hundred milliseconds each, so 30 is far above rbacr's traffic.
   DomainName:
     Type: String
     Default: rbacr.nu01.com
@@ -120,6 +120,15 @@ Parameters:
   SessionsTableArn:
     Type: String
     Description: Its ARN
+  AssetsBucketName:
+    Type: String
+    Description: The stage's client assets bucket (the rbacr(-rc)-artifacts stack, infra/artifacts.yaml)
+  AssetsBucketArn:
+    Type: String
+    Description: Its ARN
+  AssetsBucketDomainName:
+    Type: String
+    Description: Its regional endpoint (the stack's AssetsBucketDomainName output)
   SessionRetentionDays:
     Type: Number
     Default: 365
@@ -204,7 +213,9 @@ Resources:
       MemorySize: 1024
       Timeout: 15
       # A ceiling on what a flood can cost (H6): requests past it get 429
-      # from the function URL, and ThrottlesAlarm says so.
+      # from the function URL, and ThrottlesAlarm says so. Each instance
+      # serves one request at a time, so a browser's burst of script
+      # requests would fill this at once; that's why they come from S3.
       ReservedConcurrentExecutions: !Ref MaxConcurrency
       Role: !GetAtt FunctionRole.Arn
       Code:
@@ -286,6 +297,47 @@ Resources:
           return request;
         }
 
+  # CloudFront signs its requests to the assets bucket with this; the
+  # bucket policy below admits only this distribution.
+  AssetsOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub ${AWS::StackName}-assets
+        Description: !Sub rbacr (${DomainName}) client assets
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  # The assets bucket's policy lives here, not in the artifacts stack,
+  # because it names the distribution. TLS only, like the code bucket.
+  AssetsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref AssetsBucketName
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: TlsOnly
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !Ref AssetsBucketArn
+              - !Sub ${AssetsBucketArn}/*
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+          - Sid: CloudFrontRead
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub ${AssetsBucketArn}/*
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${Distribution}
+
   Distribution:
     Type: AWS::CloudFront::Distribution
     Properties:
@@ -313,6 +365,14 @@ Resources:
                 HeaderValue: !Sub '{{resolve:ssm:${OriginSecretParameter}}}' # as RBACR_ORIGIN_SECRET
               - HeaderName: x-rbacr-host
                 HeaderValue: !Ref DomainName
+          # The content-hashed client assets, uploaded by scripts/deploy.sh
+          # before the function changes, so a new page's scripts are there
+          # when it first renders; old ones stay for pages already open.
+          - Id: assets
+            DomainName: !Ref AssetsBucketDomainName
+            OriginAccessControlId: !GetAtt AssetsOriginAccessControl.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ''
         # Pages and the JSON API: nothing cached; every viewer header but
         # Host (Origin and the CORS preflight headers included), every cookie
         # and query string forwarded, and every method (OPTIONS preflights,
@@ -330,9 +390,13 @@ Resources:
             - EventType: viewer-request
               FunctionARN: !GetAtt ViewerIpFunction.FunctionMetadata.FunctionARN
         CacheBehaviors:
-          # Content-hashed client assets: cached at the edge.
+          # Content-hashed client assets: from the bucket, cached at the
+          # edge. Never from the function: a page names up to a few dozen
+          # of them, fetched at once, and each edge location (and each
+          # encoding) fills its cache separately, which with one request
+          # per function instance would hit MaxConcurrency on its own.
           - PathPattern: /_app/immutable/*
-            TargetOriginId: app
+            TargetOriginId: assets
             ViewerProtocolPolicy: redirect-to-https
             Compress: true
             AllowedMethods: [GET, HEAD]

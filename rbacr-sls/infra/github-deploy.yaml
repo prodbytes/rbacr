@@ -129,7 +129,8 @@ Resources:
                   - cloudformation:GetTemplateSummary
                   - cloudformation:ListStacks
                 Resource: '*'
-              # The artifacts bucket (CloudFormation names it rbacr-artifacts-artifactsbucket-*)
+              # The artifacts buckets (CloudFormation names them rbacr-artifacts-artifactsbucket-*
+              # and rbacr-artifacts-assetsbucket-*)
               - Effect: Allow
                 Action: s3:*
                 Resource:
@@ -221,6 +222,19 @@ Resources:
                 Action:
                   - cloudfront:CreateDistribution
                 Resource: '*'
+              # The distribution's origin access control for the assets
+              # bucket (infra/app.yaml); creating one needs '*'.
+              - Effect: Allow
+                Action:
+                  - cloudfront:CreateOriginAccessControl
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - cloudfront:GetOriginAccessControl
+                  - cloudfront:GetOriginAccessControlConfig
+                  - cloudfront:UpdateOriginAccessControl
+                  - cloudfront:DeleteOriginAccessControl
+                Resource: !Sub arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:origin-access-control/*
               - Effect: Allow
                 Action:
                   - cloudfront:GetDistribution
@@ -397,7 +411,8 @@ Resources:
                   - cloudformation:GetTemplateSummary
                   - cloudformation:ListStacks
                 Resource: '*'
-              # The artifacts bucket (CloudFormation names it rbacr-rc-artifacts-artifactsbucket-*)
+              # The artifacts buckets (CloudFormation names them rbacr-rc-artifacts-artifactsbucket-*
+              # and rbacr-rc-artifacts-assetsbucket-*)
               - Effect: Allow
                 Action: s3:*
                 Resource:
@@ -489,6 +504,19 @@ Resources:
                 Action:
                   - cloudfront:CreateDistribution
                 Resource: '*'
+              # The distribution's origin access control for the assets
+              # bucket (infra/app.yaml); creating one needs '*'.
+              - Effect: Allow
+                Action:
+                  - cloudfront:CreateOriginAccessControl
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - cloudfront:GetOriginAccessControl
+                  - cloudfront:GetOriginAccessControlConfig
+                  - cloudfront:UpdateOriginAccessControl
+                  - cloudfront:DeleteOriginAccessControl
+                Resource: !Sub arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:origin-access-control/*
               - Effect: Allow
                 Action:
                   - cloudfront:GetDistribution
