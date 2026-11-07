@@ -1,4 +1,4 @@
-import { vpiLoad } from '#lib/vpi.js';
+import { SYSTEM_DATA, vpiLoad } from '#lib/vpi.js';
 import type { PageLoad } from './$types';
 
 export interface Grant {
@@ -36,8 +36,9 @@ export interface Voucher {
 	disabledBy: string | null;
 }
 
-export const load: PageLoad = ({ fetch, params }) =>
-	vpiLoad<{
+export const load: PageLoad = ({ fetch, params, depends }) => {
+	depends(SYSTEM_DATA);
+	return vpiLoad<{
 		system: {
 			id: string;
 			name: string;
@@ -58,3 +59,4 @@ export const load: PageLoad = ({ fetch, params }) =>
 		vouchers: Voucher[];
 		root: boolean;
 	}>(fetch, `/systems/${encodeURIComponent(params.system)}`);
+};

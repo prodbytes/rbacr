@@ -129,7 +129,8 @@ Resources:
                   - cloudformation:GetTemplateSummary
                   - cloudformation:ListStacks
                 Resource: '*'
-              # The artifacts bucket (CloudFormation names it rbacr-artifacts-artifactsbucket-*)
+              # The artifacts buckets (CloudFormation names them rbacr-artifacts-artifactsbucket-*
+              # and rbacr-artifacts-assetsbucket-*)
               - Effect: Allow
                 Action: s3:*
                 Resource:
@@ -157,8 +158,41 @@ Resources:
                 Resource:
                   - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/rbacr
                   - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/rbacr:*
+                  - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/cloudfront/rbacr
+                  - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/cloudfront/rbacr:*
               - Effect: Allow
                 Action: logs:DescribeLogGroups
+                Resource: '*'
+              # CloudFront's edge log (infra/app.yaml): the delivery from the
+              # distribution to the log group, and the account policy that
+              # admits the delivery service.
+              - Effect: Allow
+                Action:
+                  - logs:PutDeliverySource
+                  - logs:GetDeliverySource
+                  - logs:DeleteDeliverySource
+                  - logs:PutDeliveryDestination
+                  - logs:GetDeliveryDestination
+                  - logs:DeleteDeliveryDestination
+                  - logs:CreateDelivery
+                  - logs:GetDelivery
+                  - logs:DeleteDelivery
+                  - logs:UpdateDeliveryConfiguration
+                  - logs:TagResource
+                  - logs:UntagResource
+                  - logs:ListTagsForResource
+                Resource:
+                  - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:delivery-source:rbacr-edge
+                  - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:delivery-destination:rbacr-edge
+                  - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:delivery:*
+              - Effect: Allow
+                Action:
+                  - logs:DescribeDeliveries
+                  - logs:DescribeDeliverySources
+                  - logs:DescribeDeliveryDestinations
+                  - logs:PutResourcePolicy
+                  - logs:DeleteResourcePolicy
+                  - logs:DescribeResourcePolicies
                 Resource: '*'
               # Its execution role: only ever with the boundary attached, so
               # a deploy can't create a role beyond "write logs, use the rbacr tables".
@@ -221,6 +255,19 @@ Resources:
                 Action:
                   - cloudfront:CreateDistribution
                 Resource: '*'
+              # The distribution's origin access control for the assets
+              # bucket (infra/app.yaml); creating one needs '*'.
+              - Effect: Allow
+                Action:
+                  - cloudfront:CreateOriginAccessControl
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - cloudfront:GetOriginAccessControl
+                  - cloudfront:GetOriginAccessControlConfig
+                  - cloudfront:UpdateOriginAccessControl
+                  - cloudfront:DeleteOriginAccessControl
+                Resource: !Sub arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:origin-access-control/*
               - Effect: Allow
                 Action:
                   - cloudfront:GetDistribution
@@ -232,6 +279,7 @@ Resources:
                   - cloudfront:ListTagsForResource
                   - cloudfront:CreateInvalidation
                   - cloudfront:GetInvalidation
+                  - cloudfront:AllowVendedLogDeliveryForResource
                 Resource: !Sub arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${DistributionId}
               # Its viewer-request CloudFront Function (infra/app.yaml).
               - Effect: Allow
@@ -397,7 +445,8 @@ Resources:
                   - cloudformation:GetTemplateSummary
                   - cloudformation:ListStacks
                 Resource: '*'
-              # The artifacts bucket (CloudFormation names it rbacr-rc-artifacts-artifactsbucket-*)
+              # The artifacts buckets (CloudFormation names them rbacr-rc-artifacts-artifactsbucket-*
+              # and rbacr-rc-artifacts-assetsbucket-*)
               - Effect: Allow
                 Action: s3:*
                 Resource:
@@ -425,8 +474,41 @@ Resources:
                 Resource:
                   - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/rbacr-rc
                   - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/rbacr-rc:*
+                  - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/cloudfront/rbacr-rc
+                  - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/cloudfront/rbacr-rc:*
               - Effect: Allow
                 Action: logs:DescribeLogGroups
+                Resource: '*'
+              # CloudFront's edge log (infra/app.yaml): the delivery from the
+              # distribution to the log group, and the account policy that
+              # admits the delivery service.
+              - Effect: Allow
+                Action:
+                  - logs:PutDeliverySource
+                  - logs:GetDeliverySource
+                  - logs:DeleteDeliverySource
+                  - logs:PutDeliveryDestination
+                  - logs:GetDeliveryDestination
+                  - logs:DeleteDeliveryDestination
+                  - logs:CreateDelivery
+                  - logs:GetDelivery
+                  - logs:DeleteDelivery
+                  - logs:UpdateDeliveryConfiguration
+                  - logs:TagResource
+                  - logs:UntagResource
+                  - logs:ListTagsForResource
+                Resource:
+                  - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:delivery-source:rbacr-rc-edge
+                  - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:delivery-destination:rbacr-rc-edge
+                  - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:delivery:*
+              - Effect: Allow
+                Action:
+                  - logs:DescribeDeliveries
+                  - logs:DescribeDeliverySources
+                  - logs:DescribeDeliveryDestinations
+                  - logs:PutResourcePolicy
+                  - logs:DeleteResourcePolicy
+                  - logs:DescribeResourcePolicies
                 Resource: '*'
               # Its execution role: only ever with the boundary attached, so
               # a deploy can't create a role beyond "write logs, use the rbacr tables".
@@ -489,6 +571,19 @@ Resources:
                 Action:
                   - cloudfront:CreateDistribution
                 Resource: '*'
+              # The distribution's origin access control for the assets
+              # bucket (infra/app.yaml); creating one needs '*'.
+              - Effect: Allow
+                Action:
+                  - cloudfront:CreateOriginAccessControl
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - cloudfront:GetOriginAccessControl
+                  - cloudfront:GetOriginAccessControlConfig
+                  - cloudfront:UpdateOriginAccessControl
+                  - cloudfront:DeleteOriginAccessControl
+                Resource: !Sub arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:origin-access-control/*
               - Effect: Allow
                 Action:
                   - cloudfront:GetDistribution
@@ -500,6 +595,7 @@ Resources:
                   - cloudfront:ListTagsForResource
                   - cloudfront:CreateInvalidation
                   - cloudfront:GetInvalidation
+                  - cloudfront:AllowVendedLogDeliveryForResource
                 Resource: !Sub arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${RcDistributionId}
               # Its viewer-request CloudFront Function (infra/app.yaml).
               - Effect: Allow

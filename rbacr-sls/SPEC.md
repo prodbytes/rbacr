@@ -736,7 +736,12 @@ addresses stay out of URLs and access logs.
 ### `/vpi`: the view programming interface (session cookie, A2/A3)
 
 Its endpoints are shaped for the pages and are not a public contract; the
-frontend (`src/lib/vpi.ts`) is its only client. The routes are
+frontend (`src/lib/vpi.ts`) is its only client, and a frugal one: each
+page's load makes one request for everything it shows (the sign-in
+state, `GET /vpi/session`, once per visit), links fetch their page's
+data when tapped, not when hovered, and after a change a page refreshes
+only its own data, never the session (the notifications page excepted:
+closing one changes the layout's open count). The routes are
 `GET /vpi/session` (who is signed in; works anonymously), `GET /vpi/settings`
 (version, API address, account, and the root allow list for roots), `GET /vpi/me` (with the cards of the person's systems, R13),
 `POST /vpi/me/redeem` (402 with `payment` per V4a),
@@ -822,8 +827,13 @@ to `/`. The pages need JavaScript.
   keeps their data after they sign out.
 - **H6 Limits at the edge.** In AWS, the function serves at most a set
   number of requests at once (`MaxConcurrency`, 30); past it, 429. This
-  caps what a flood can cost; 30 leaves room for a console page loading
-  its scripts at once beside the apps' role checks. A CloudFront Function puts the viewer's IP
+  caps what a flood can cost; only pages and the APIs count against it,
+  so 30 is far above the apps' role checks. The content-hashed client
+  assets (`/_app/immutable/*`) come from an S3 bucket through CloudFront
+  and never reach the function: a page names up to a few dozen of them,
+  fetched at once, and each edge location fills its cache separately, so
+  served by the function (one request per instance) they alone would hit
+  the cap. A CloudFront Function puts the viewer's IP
   in `x-rbacr-viewer-ip`, replacing any the client sent, for V10; only
   CloudFront reaches the function (the origin secret), so the app trusts
   it. There is no WAF: its fixed monthly fees cost more than rbacr's
@@ -833,11 +843,18 @@ to `/`. The pages need JavaScript.
   (`{"msg":"request",…}`): the method, the route's pattern
   (`/redeem/[code]`, never the path, which can hold a voucher code; null
   when no route matches), the status, the time taken in ms, the viewer's
-  IP (`x-rbacr-viewer-ip`), the user agent (at most 160 characters) and
-  how it authenticated (`token`, `id-token`, `session` or `none`), never
-  a token, cookie or email. Static assets, served before the app, and
-  requests refused at the edge (H6's 429s) aren't in it; CloudFront's
-  metrics count those. SvelteKit's in-process fetches aren't logged.
+  IP (`x-rbacr-viewer-ip`), the user agent, the `Origin` header (a web
+  app calling `/api` from the browser, H3), the `Referer` header's origin
+  (scheme and host only, never its path) and how it authenticated
+  (`token`, `id-token`, `session` or `none`), never a token, cookie or
+  email; header values are cut at 160 characters. Static assets (in AWS
+  served from S3, H6; elsewhere served before the app) and requests
+  refused at the edge (H6's 429s) aren't in it: in AWS, CloudFront's own
+  log of every request (standard logging to CloudWatch Logs,
+  `/aws/cloudfront/<stack>`) has those, with the viewer's IP, country and
+  network (ASN), user agent, edge location, status and result type, and
+  no path, query, cookie or referer. SvelteKit's in-process fetches
+  aren't logged.
 
 ## Configuration
 
@@ -867,7 +884,11 @@ All settings come from environment variables prefixed `RBACR_`:
   with `serverless-http` for AWS Lambda. Lambda runs behind a function URL
   fronted by CloudFront ([infra/app.yaml](infra/app.yaml)). The request's
   host comes from the `x-rbacr-host` header (adapter-node's `HOST_HEADER`),
-  which CloudFront sets, and the protocol is assumed to be `https`.
+  which CloudFront sets, and the protocol is assumed to be `https`. The
+  client assets (`/_app/immutable/*`) are uploaded to a private S3 bucket
+  per stage ([infra/artifacts.yaml](infra/artifacts.yaml)) on every
+  deploy, before the function changes, and CloudFront serves them from
+  there (H6); the function still holds a copy, used only locally.
 - DynamoDB: two on-demand tables per stage ([infra/tables.yaml](infra/tables.yaml)),
   the main one and `<name>-sessions` (S3),
   on DynamoDB Local in development ([compose.yaml](compose.yaml)) and in the

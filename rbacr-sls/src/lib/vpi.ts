@@ -16,6 +16,14 @@ export interface Payment {
 	discountPercent: number;
 }
 
+/**
+ * What a page's changes refresh (`depends` in its load, `invalidate` after a
+ * change): its own data, not the session. Here because a page module may
+ * export nothing but SvelteKit's names.
+ */
+export const SYSTEM_DATA = 'vpi:system';
+export const GLOBAL_DATA = 'vpi:global';
+
 export class VpiError extends Error {
 	constructor(
 		readonly status: number,

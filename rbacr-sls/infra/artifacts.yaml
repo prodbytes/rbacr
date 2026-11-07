@@ -1,8 +1,13 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
-  rbacr-artifacts (and rbacr-rc-artifacts): the private bucket that holds
-  the Lambda code zips scripts/deploy.sh uploads. Old zips expire after 90
-  days. Deployed by scripts/deploy.sh.
+  rbacr-artifacts (and rbacr-rc-artifacts): two private buckets. One holds
+  the Lambda code zips scripts/deploy.sh uploads (old zips expire after 90
+  days); the other holds the app's content-hashed client assets
+  (/_app/immutable/*), which CloudFront serves straight from it (the app
+  stack's origin access control and bucket policy, infra/app.yaml), so no
+  script or stylesheet request ever reaches the function. Assets are kept:
+  a page opened before a deploy still loads the ones it names, and a
+  release is about 600 KB. Deployed by scripts/deploy.sh.
 
 Resources:
   ArtifactsBucket:
@@ -46,6 +51,38 @@ Resources:
               Bool:
                 aws:SecureTransport: 'false'
 
+  # Read by CloudFront only: its policy (TLS only, and the distribution's
+  # origin access control may GetObject) is in the app stack, which owns
+  # the distribution. Not public: block public access stays on.
+  AssetsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      LifecycleConfiguration:
+        Rules:
+          - Id: abort-incomplete-uploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+
 Outputs:
   ArtifactsBucketName:
     Value: !Ref ArtifactsBucket
+  AssetsBucketName:
+    Value: !Ref AssetsBucket
+  AssetsBucketArn:
+    Value: !GetAtt AssetsBucket.Arn
+  AssetsBucketDomainName:
+    Description: The bucket's regional endpoint, the distribution's assets origin
+    Value: !GetAtt AssetsBucket.RegionalDomainName

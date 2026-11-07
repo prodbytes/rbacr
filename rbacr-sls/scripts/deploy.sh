@@ -3,8 +3,10 @@
 # the release candidate, https://rc.rbacr.nu01.com (its own stacks, rbacr-rc*):
 #   1. builds the app and packages the Lambda zip (scripts/package-lambda.sh,
 #      which smoke-tests it)
-#   2. deploys the artifacts bucket (infra/artifacts.yaml, stack
-#      rbacr[-rc]-artifacts) and uploads the zip, and the DynamoDB tables
+#   2. deploys the artifacts buckets (infra/artifacts.yaml, stack
+#      rbacr[-rc]-artifacts) and uploads the zip and the client assets
+#      (build/client/_app/immutable, which CloudFront serves from the
+#      assets bucket, never from the function), and the DynamoDB tables
 #      (infra/tables.yaml, stack rbacr[-rc]-tables, tables rbacr[-rc] and
 #      rbacr[-rc]-sessions)
 #   3. deploys the app (infra/app.yaml, stack rbacr[-rc]: certificate,
@@ -15,8 +17,9 @@
 #   4. smoke-tests the live site: /health must be healthy and report this
 #      version, / must be the sign-in page, /api/me must refuse anonymous
 #      calls and unknown tokens (401; the latter is looked up in DynamoDB),
-#      /login/dev must not exist (404), and the function URL must refuse
-#      direct calls (403)
+#      /login/dev must not exist (404), the sign-in page's first script
+#      must come from the assets bucket (through CloudFront), and the
+#      function URL must refuse direct calls (403)
 #
 # Run by .github/workflows/deploy.yml (*GA tags) and deploy-rc.yml (*RC*
 # tags), or by hand with admin credentials. Needs the AWS CLI, Node, zip and
@@ -28,7 +31,8 @@
 #                 (default: none, so Z is the current time)
 #   STAGE         prod (default) or rc
 #   AWS_REGION    must be us-east-1 (CloudFront certificates live there)
-#   SKIP_BUILD    1 to deploy an existing dist/rbacr-lambda.zip
+#   SKIP_BUILD    1 to deploy an existing dist/rbacr-lambda.zip and
+#                 build/client (the same build's assets)
 #   RBACR_ROOT_LIST   root addresses/domains (default @nu01.com); passed on
 #                 every deploy, so the stack never keeps an old value
 #   RBACR_GOOGLE_CLIENT_ID, RBACR_GOOGLE_CLIENT_SECRET
@@ -47,8 +51,9 @@
 #                 optional (the paid-subscription sync); unset ones keep
 #                 their deployed values
 #   RBACR_MAX_CONCURRENCY  the most requests the function serves at once
-#                 (SPEC H6; default 30); passed on every deploy, since an
-#                 existing stack would otherwise keep its old value
+#                 (SPEC H6; default 30, for pages and the APIs only: the
+#                 client assets don't reach it); passed on every deploy,
+#                 since an existing stack would otherwise keep its old value
 #   HEALTH_EMAILS comma-separated addresses the function alarms e-mail
 #                 (default julio+health@nu01.com); passed on every deploy,
 #                 because the template's Fn::ForEach can't see defaults
@@ -221,6 +226,8 @@ if [[ "${SKIP_BUILD:-}" != 1 ]]; then
   OUT="$zip" bash scripts/package-lambda.sh
 fi
 test -f "$zip" || { echo "error: no $zip" >&2; exit 1; }
+assets=build/client/_app/immutable
+test -d "$assets" || { echo "error: no $assets (the zip's build)" >&2; exit 1; }
 
 # 2. Artifacts
 echo "==> deploying $ARTIFACTS_STACK"
@@ -230,6 +237,28 @@ bucket="$(stack_output "$ARTIFACTS_STACK" ArtifactsBucketName)"
 key="lambda/rbacr-$RELEASE-$(git rev-parse --short HEAD 2>/dev/null || echo local)-$BUILD_NUMBER.zip"
 aws s3 cp "$zip" "s3://$bucket/$key" --only-show-errors
 echo "    code: s3://$bucket/$key"
+# The client assets, before the app stack switches to the version that
+# names them. Content-hashed, so a name never changes meaning: cached for
+# a year, and old ones left in place for pages already open. Uploaded
+# uncompressed (CloudFront compresses), with explicit types for what
+# browsers are strict about (module scripts need a JavaScript type).
+assets_bucket="$(stack_output "$ARTIFACTS_STACK" AssetsBucketName)"
+assets_bucket_arn="$(stack_output "$ARTIFACTS_STACK" AssetsBucketArn)"
+assets_domain="$(stack_output "$ARTIFACTS_STACK" AssetsBucketDomainName)"
+immutable='public,max-age=31536000,immutable'
+upload_assets() { # upload_assets <content type or ''> <include glob>...
+  local type="$1"; shift
+  local args=(--recursive --only-show-errors --cache-control "$immutable" --exclude '*')
+  for glob in "$@"; do args+=(--include "$glob"); done
+  [[ -n "$type" ]] && args+=(--content-type "$type")
+  aws s3 cp "$assets" "s3://$assets_bucket/_app/immutable" "${args[@]}"
+}
+upload_assets 'text/javascript; charset=utf-8' '*.js' '*.mjs'
+upload_assets 'text/css; charset=utf-8' '*.css'
+# Anything else (fonts, images, WebAssembly): the CLI's type from the extension.
+aws s3 cp "$assets" "s3://$assets_bucket/_app/immutable" --recursive --only-show-errors \
+  --cache-control "$immutable" --exclude '*.js' --exclude '*.mjs' --exclude '*.css' --exclude '*.br' --exclude '*.gz'
+echo "    assets: s3://$assets_bucket/_app/immutable ($(find "$assets" -type f ! -name '*.br' ! -name '*.gz' | wc -l | tr -d ' ') files)"
 
 echo "==> deploying $TABLES_STACK"
 aws cloudformation deploy --stack-name "$TABLES_STACK" \
@@ -247,6 +276,7 @@ aws cloudformation deploy --stack-name "$STACK" \
   --parameter-overrides "${params[@]}" "CodeBucket=$bucket" "CodeKey=$key" \
     "TableName=$STACK" "TableArn=$table_arn" \
     "SessionsTableName=$STACK-sessions" "SessionsTableArn=$sessions_table_arn" \
+    "AssetsBucketName=$assets_bucket" "AssetsBucketArn=$assets_bucket_arn" "AssetsBucketDomainName=$assets_domain" \
   --tags "${TAGS[@]}" --no-fail-on-empty-changeset
 function_url="$(stack_output "$STACK" FunctionUrl)"
 
@@ -266,6 +296,13 @@ check() {
   code="$(status -H 'authorization: Bearer rbacr_smoke-test-unknown-token' "https://$DOMAIN/api/me")"
   [[ "$code" == 401 ]] || { echo "    /api/me with an unknown token answered $code, want 401"; return 1; }
   code="$(status -H 'accept: text/html' "https://$DOMAIN/login/dev")"; [[ "$code" == 404 ]] || { echo "    /login/dev answered $code, want 404"; return 1; }
+  # The page's first script comes from the assets bucket: S3 answers with
+  # its encryption header, which CloudFront passes on; the function wouldn't.
+  local script headers
+  script="$(curl -fsS --max-time 20 -H 'accept: text/html' "https://$DOMAIN/" | grep -o '/_app/immutable/[^"]*\.js' | head -1)"
+  [[ -n "$script" ]] || { echo "    / names no script"; return 1; }
+  headers="$(curl -fsS --max-time 20 -o /dev/null -D - "https://$DOMAIN$script")" || { echo "    $script failed"; return 1; }
+  grep -qi '^x-amz-server-side-encryption:' <<<"$headers" || { echo "    $script didn't come from the assets bucket"; return 1; }
   code="$(status "${function_url%/}/health")"; [[ "$code" == 403 ]] || { echo "    the function URL answered $code, want 403"; return 1; }
 }
 for attempt in $(seq 1 30); do
